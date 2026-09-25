@@ -229,35 +229,15 @@ if settings.ENV == "development":
 else:
     logger.info("Demo scenario-control API is disabled outside development mode.")
 
-from fastapi.staticfiles import StaticFiles
-from starlette.responses import FileResponse
-from pathlib import Path
-
-# Mount static frontend. Resolved relative to this file's own location
-# (repo_root/backend/main.py -> repo_root/frontend/dist), not a hardcoded
-# absolute path — the previous "d:/SIH/netraksh/frontend/dist" only ever
-# worked on this one Windows dev machine and would 404 everything on any
-# other machine, including a Linux container.
-frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
-if frontend_dist.exists():
-    app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="assets")
-
-# Surveillance media must never be exposed by an unauthenticated StaticFiles
-# mount.  Dashboard media and the deterministic demo telemetry are served by
-# authenticated routes in backend/api/dashboard.py instead.
-
-@app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"])
-async def serve_frontend(full_path: str):
-    # Allow API routes to pass through if they 404 (handled before this catch-all)
-    if full_path.startswith("demo/") or full_path.startswith("events/") or full_path.startswith("alerts/") or full_path.startswith("analytics/") or full_path.startswith("audit/") or full_path.startswith("auth/") or full_path.startswith("cameras/") or full_path.startswith("dashboard/") or full_path.startswith("system/") or full_path.startswith("watchlist/") or full_path.startswith("ws/"):
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Not Found")
-    
-    # But for anything else, serve index.html for SPA routing
-    file_path = frontend_dist / full_path
-    if file_path.exists() and file_path.is_file():
-        return FileResponse(file_path)
-    return FileResponse(frontend_dist / "index.html")
+@app.get("/")
+async def root() -> dict[str, str]:
+    """Backend control-plane entry point; the SPA is deployed separately."""
+    return {
+        "service": "NETRAKSH Command Center API",
+        "status": "ok",
+        "health": "/health",
+        "ready": "/ready",
+    }
 
 
 if __name__ == "__main__":
