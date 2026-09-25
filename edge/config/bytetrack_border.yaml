@@ -1,0 +1,25 @@
+# NETRAKSH — Border-tuned ByteTrack config (architecture v4 §4, Track Continuity Guard).
+# Identical to ultralytics' bundled bytetrack.yaml except track_buffer, which is
+# raised from the default 30 frames (~1s at 30fps) to 120 frames (~4s at 30fps).
+#
+# Why: people/vehicles at range in a border scene move slowly relative to frame
+# rate and can be briefly hidden by terrain or vegetation without truly leaving
+# the scene. The default buffer drops a lost track's identity after ~1 second,
+# which is often shorter than a real occlusion. Ultralytics' own comment on this
+# field is an honest tradeoff, not a free lunch: "higher handles occlusion,
+# increases ID switches risk" — this value is a hand-picked starting point for
+# border-camera framerates, not a calibrated one. See docs/LIMITATIONS.md.
+#
+# This alone only makes ByteTrack itself wait longer before giving up on a
+# track. The color-histogram re-association in edge/tracking/continuity_guard.py
+# is a second, independent layer on top: it recovers identity even *after*
+# ByteTrack has given up and assigned a new ID, which this buffer increase
+# alone cannot do.
+
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 120  # was 30 in the ultralytics default
+match_thresh: 0.8
+fuse_score: True

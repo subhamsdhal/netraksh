@@ -1,0 +1,18 @@
+# NETRAKSH — Border-tuned BoT-SORT config (Phase 3 Step 3 Candidate)
+# Adapts the default ultralytics botsort.yaml to match the specific
+# track_buffer (120) and thresholds tuned for the bytetrack_border.yaml
+# baseline, ensuring an apples-to-apples comparison.
+
+tracker_type: botsort
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 120  # Matches bytetrack_border.yaml (was 30 in botsort default)
+match_thresh: 0.8
+fuse_score: True
+
+# BoT-SORT settings
+gmc_method: sparseOptFlow
+proximity_thresh: 0.5
+appearance_thresh: 0.25
+with_reid: False

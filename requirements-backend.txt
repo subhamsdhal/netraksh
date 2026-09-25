@@ -1,0 +1,62 @@
+# NETRAKSH — backend-only runtime dependencies.
+#
+# requirements.txt (the original file) installs the FULL stack — edge
+# (ultralytics/opencv/easyocr/retina-face/scikit-learn) AND backend — because
+# local dev runs both from one Python environment. The backend container
+# (Dockerfile) only ever runs `backend.main:app`; it never imports edge code
+# at all. Installing the edge stack into it would pull in torch/tensorflow-
+# scale dependencies for nothing, multiplying build time and image size for
+# a deploy that has real free-tier build-time and memory limits. This is
+# the actual import list backend/ and shared/ need — verified by grepping
+# every top-level import in both, not guessed.
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+sqlalchemy==2.0.0
+psycopg2-binary==2.9.9
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+# Pinned <4.1: bcrypt 4.1 removed the `__about__.__version__` attribute
+# passlib's backend-detection code reads, causing a trapped-but-noisy
+# warning locally and a hard crash in production (Render resolved an
+# unpinned `bcrypt` to a newer version than this dev machine happened to
+# have installed). See backend/security/auth.py's _truncate_for_bcrypt for
+# the other half of this fix (the 72-byte limit).
+bcrypt==4.0.1
+python-multipart==0.0.9
+cryptography==42.0.0
+pydantic==2.9.0
+pydantic-settings==2.6.0
+python-dotenv==1.0.0
+# backend/services/webhook_delivery.py (real external C2 integration, SIH
+# PS 26187) makes a real outbound HTTP POST to admin-registered webhooks.
+# The import is inside a try/except (non-fatal by design if missing), so
+# omitting this wouldn't crash the app -- but it WOULD silently make every
+# real webhook delivery fail on the deployed backend, defeating the whole
+# feature. Caught by re-checking this file's own "verified by grepping
+# every top-level import" claim above after adding a new backend service,
+# not assumed still true.
+httpx==0.27.0
+# Rate limiting — backend/api/rate_limit.py.
+# slowapi is the standard FastAPI/Starlette rate-limiting library.
+# Uses in-memory store by default (sufficient for single-process demo);
+# swap to RedisStore for multi-worker production deployments.
+slowapi==0.1.9
+
+# Imported unconditionally by backend/api/system.py and
+# backend/observability/metrics.py during application startup.
+prometheus-client==0.20.0
+
+# backend/services/reid.py is imported by the event/correlation path.
+numpy==1.26.0
+
+# backend/api/watchlist.py imports cv2 unconditionally.
+opencv-contrib-python-headless==4.10.0.84
+
+# Production startup verifies the database revision through Alembic; the
+# runtime image must be able to execute that check and the migration service.
+alembic==1.14.0
+
+# Required when OBJECT_STORAGE_PROVIDER=s3 (including the bundled MinIO
+# deployment profile). Keeping it in the authoritative backend manifest makes
+# that documented configuration reproducible.
+boto3==1.34.0

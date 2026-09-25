@@ -1,0 +1,133 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: netraksh-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio
+    container_name: netraksh-minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: netraksh-backend
+    environment:
+      - ENV=${ENV:-production}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY is required}
+      - EDGE_AUTH_TOKEN=${EDGE_AUTH_TOKEN:?EDGE_AUTH_TOKEN is required}
+      - BOOTSTRAP_USERS=${BOOTSTRAP_USERS:-false}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - INITIAL_OPERATOR_PASSWORD=${INITIAL_OPERATOR_PASSWORD}
+      - INITIAL_AUDITOR_PASSWORD=${INITIAL_AUDITOR_PASSWORD}
+      - OBJECT_STORAGE_PROVIDER=${OBJECT_STORAGE_PROVIDER:-local}
+      - OBJECT_STORAGE_ENDPOINT=http://minio:9000
+      - OBJECT_STORAGE_BUCKET=${OBJECT_STORAGE_BUCKET:-netraksh-evidence}
+      - OBJECT_STORAGE_ACCESS_KEY=${MINIO_ROOT_USER:-minioadmin}
+      - OBJECT_STORAGE_SECRET_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - MTLS_MODE=${MTLS_MODE:-disabled}
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost,http://127.0.0.1}
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: netraksh-migrate
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      - ENV=${ENV:-production}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY is required}
+      - EDGE_AUTH_TOKEN=${EDGE_AUTH_TOKEN:?EDGE_AUTH_TOKEN is required}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - INITIAL_OPERATOR_PASSWORD=${INITIAL_OPERATOR_PASSWORD}
+      - INITIAL_AUDITOR_PASSWORD=${INITIAL_AUDITOR_PASSWORD}
+      - MTLS_MODE=${MTLS_MODE:-disabled}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000/api}
+        VITE_BACKEND_URL: ${VITE_BACKEND_URL:-http://localhost:8000}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8000/ws/dashboard}
+    container_name: netraksh-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  edge:
+    build:
+      context: .
+      dockerfile: edge/Dockerfile
+    container_name: netraksh-edge
+    environment:
+      - CAMERA_ID=${EDGE_CAMERA_ID:-cam-border-01}
+      - VIDEO_SOURCE=${VIDEO_SOURCE:?VIDEO_SOURCE is required}
+      - BACKEND_URL=http://backend:8000
+      - EDGE_AUTH_TOKEN=${EDGE_AUTH_TOKEN:?EDGE_AUTH_TOKEN is required}
+      - DETECTOR_MODEL=${DETECTOR_MODEL:-/app/models/yolov8n.pt}
+      - DETECTOR_RUNTIME=${DETECTOR_RUNTIME:-pytorch}
+      - FACE_RECOGNITION_ENGINE=${FACE_RECOGNITION_ENGINE:-lbph}
+      - ZONES_CONFIG_PATH=/app/demo/scripts/zones_config.json
+    volumes:
+      - ./demo:/app/demo:ro
+      - ${DETECTOR_MODEL_HOST_PATH:?DETECTOR_MODEL_HOST_PATH is required}:/app/models/yolov8n.pt:ro
+      # Operators provision per-camera private keys outside source control.
+      - ${EDGE_CERTS_PATH:?EDGE_CERTS_PATH is required}:/app/certs/edge:ro
+      - edge_data:/app/edge/data
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  minio_data:
+  edge_data:

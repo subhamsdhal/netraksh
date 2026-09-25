@@ -1,0 +1,173 @@
+{
+  "video": "demo/videos/vtest.avi",
+  "zone": {
+    "x1": 0.456,
+    "y1": 0.26,
+    "x2": 1.0,
+    "y2": 0.521
+  },
+  "without_verifier": {
+    "required_confirmations": 1,
+    "frames_processed": 795,
+    "raw_candidate_events_fired": 52,
+    "alerts_actually_raised": 23,
+    "wall_seconds": 35.2,
+    "metrics": {
+      "uptime_seconds": 35.2,
+      "fps": 22.32,
+      "frames": {
+        "health_condition_ms": {
+          "count": 500,
+          "mean_ms": 10.518,
+          "p95_ms": 11.69,
+          "max_ms": 15.4,
+          "min_ms": 7.62
+        },
+        "detection_tracking_ms": {
+          "count": 500,
+          "mean_ms": 32.894,
+          "p95_ms": 37.174,
+          "max_ms": 47.179,
+          "min_ms": 0.0
+        },
+        "event_processing_ms": {
+          "count": 500,
+          "mean_ms": 0.07,
+          "p95_ms": 0.106,
+          "max_ms": 0.139,
+          "min_ms": 0.0
+        },
+        "total_frame_ms": {
+          "count": 500,
+          "mean_ms": 43.482,
+          "p95_ms": 48.1,
+          "max_ms": 62.651,
+          "min_ms": 7.624
+        }
+      },
+      "events": {
+        "snapshot_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "hash_sign_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "chain_store_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "enqueue_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "total_event_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        }
+      },
+      "alerts_generated": 0,
+      "cpu_percent": 0.0,
+      "rss_mb": 411.1,
+      "psutil_available": true
+    }
+  },
+  "with_verifier": {
+    "required_confirmations": 3,
+    "frames_processed": 795,
+    "raw_candidate_events_fired": 52,
+    "alerts_actually_raised": 23,
+    "wall_seconds": 38.14,
+    "metrics": {
+      "uptime_seconds": 38.1,
+      "fps": 20.78,
+      "frames": {
+        "health_condition_ms": {
+          "count": 500,
+          "mean_ms": 11.339,
+          "p95_ms": 12.48,
+          "max_ms": 16.093,
+          "min_ms": 7.746
+        },
+        "detection_tracking_ms": {
+          "count": 500,
+          "mean_ms": 35.304,
+          "p95_ms": 40.904,
+          "max_ms": 46.096,
+          "min_ms": 0.0
+        },
+        "event_processing_ms": {
+          "count": 500,
+          "mean_ms": 0.078,
+          "p95_ms": 0.122,
+          "max_ms": 0.179,
+          "min_ms": 0.0
+        },
+        "total_frame_ms": {
+          "count": 500,
+          "mean_ms": 46.721,
+          "p95_ms": 53.09,
+          "max_ms": 57.548,
+          "min_ms": 7.749
+        }
+      },
+      "events": {
+        "snapshot_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "hash_sign_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "chain_store_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "enqueue_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "total_event_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        }
+      },
+      "alerts_generated": 0,
+      "cpu_percent": 0.0,
+      "rss_mb": 427.2,
+      "psutil_available": true
+    }
+  }
+}

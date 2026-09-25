@@ -1,0 +1,190 @@
+# Secrets — never commit real values
+.env
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Databases (real local data — a deployment should point DATABASE_URL at Postgres, not ship this file)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Edge runtime data
+edge/data/
+edge/data/clips/
+demo/videos/*.avi
+
+# Calibration snapshot images (large, regenerable by re-running
+# scripts/collect_calibration_data.py against the video) — the labeled
+# manifest.json (the actual real result: D/T/S/H + manual labels) IS
+# committed, since that's the non-regenerable part.
+scripts/calibration_data/snapshots/
+scripts/calibration_data_night/snapshots/
+scripts/calibration_data_fog/snapshots/
+scripts/calibration_data_glare/snapshots/
+scripts/calibration_data_fog_mild/snapshots/
+scripts/calibration_data_glare_mild/snapshots/
+scripts/calibration_data_night_mild/snapshots/
+scripts/calibration_data_night_fog/snapshots/
+scripts/calibration_data_night_glare/snapshots/
+scripts/calibration_data_night_fog_glare/snapshots/
+scripts/calibration_data_fog_glare/snapshots/
+scripts/calibration_data_night_fog_glare_mild/snapshots/
+# MOT16 ground-truth calibration (scripts/collect_mot16_ground_truth_calibration.py)
+# — same rationale, plus these snapshots are derived crops of CC BY-NC-SA
+# licensed MOT16 footage (Milan et al., https://motchallenge.net); not
+# redistributing them keeps the repo clear of any redistribution question
+# even though the license would likely permit it. manifest.json (numeric
+# candidate data + bbox coordinates, no image bytes) IS committed.
+scripts/calibration_data_mot16_04/snapshots/
+scripts/calibration_data_mot16_02/snapshots/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# TLS material
+certs/*.key
+certs/*.crt
+certs/*/*.key
+certs/*/*.crt
+certs/edge/*.aes
+certs/edge/*.pem
+*_private.pem
+*.p12
+
+# OS / editor / logs
+.DS_Store
+Thumbs.db
+*.log
+.coverage
+logs/
+.vscode/
+.idea/
+
+# Machine-local dev-preview config (hardcoded local paths/python.exe location,
+# not portable — see docs/LIMITATIONS.md)
+.claude/
+
+# Temporary / Scratch Outputs
+scratch/
+out*.txt
+docs/benchmark_raw*.json
+docs/*_demo.json
+docs/*_vtest.json
+node_modules
+
+# Local environments
+venv.broken*/
+venv_broken/
+
+# Generated/runtime test artifacts
+test-results/
+MagicMock/
+opencv_zoo/
+
+# Local model artifact
+*.onnx
+
+# Scratch/recovery scripts
+scratch_*.py
+recover*.py
+patch*.py
+fix_cameras.py
+repair_venv.py
+check_vid.py
+diagnostic.py
+diagnostic_script.py
+helper.py
+hash_gen.py
+refactor.py
+apply_sih_css.py
+extract.js
+extract_clean.py
+extract_css.py
+extract_valid_css.py
+analyze_reads.js
+anpr_backup.py
+lpd_yunet_ref.py
+run_wrapper.py
+
+# Temporary browser/test scripts
+test.js
+test_api.js
+test_browser.py
+test_frontend.py
+test_headed.py
+test_ws.py
+targeted_verify.py
+e2e_*.py
+verify_*.py
+test_api.py
+test_default_video.py
+test_backend_handshake.py
+test_dashboard_tdz.py
+test_acceptance_tdz2.py
+test_csp.py
+upload_and_listen.py
+frontend/upload_and_listen.mjs
+frontend/test_dashboard_logic.js
+
+# Generated video uploads
+demo/videos/uploaded_*.mp4
+demo/videos/uploaded_*
+
+# Runtime media, generated evidence, and validation output
+artifacts/
+screenshots/
+*.jsonl
+*.trace
+*.bak
+
+# Generated telemetry/report artifact
+e2e_report.json
+*telemetry.json
+
+# Generated screenshots
+*.png
+
+# Temporary local runner/build scripts
+run_*.bat
+run_*.ps1
+start_all.py
+build_ui.*
+
+# Firebase local/config files if not part of deployment
+.firebase/
+.firebaserc
+firebase.json
+
+# Presentation exports
+*.pdf
+*.pptx
+
+# Temporary phase walkthrough reports
+svgphase*.md
+svgwalkthrough*.md
+walkthrough.md
+
+# Generated status/log text files
+diff.txt
+namestatus_*.txt
+stat_*.txt
+status.txt
+status_*.txt
+
+# CSS backups
+frontend/src/index_*.css
+.venv*
+
+.env.*
+!.env.example
+.pytest-runtime/
+.pytest-remediation-temp/
+.npm-cache/

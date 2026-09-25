@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  edge:
+    build:
+      context: .
+      dockerfile: edge/Dockerfile
+    container_name: netraksh-edge
+    environment:
+      - ENV=${ENV:-production}
+      - BACKEND_URL=${BACKEND_URL}
+      - MTLS_MODE=${MTLS_MODE:-disabled}
+      # The credentials for the camera, identity, etc.
+      - CAMERA_ID=${CAMERA_ID}
+      - EDGE_DEVICE_ID=${EDGE_DEVICE_ID}
+    volumes:
+      - edge_data:/app/edge/data
+      # Demo videos can be mounted here if needed for demo_runner.py, but not strictly required for production edge/main.py
+      # - ./demo/videos:/app/demo/videos:ro 
+      - ./certs/edge:/app/certs/edge:ro
+      - ./certs/ca:/app/certs/ca:ro
+    restart: unless-stopped
+    # Depending on Edge AI, GPU passthrough could be configured here (e.g., deploy: resources: reservations: devices)
+
+volumes:
+  edge_data:

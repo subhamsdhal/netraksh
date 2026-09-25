@@ -1,0 +1,26 @@
+opencv-contrib-python-headless==4.10.0.84
+# EasyOCR declares the non-contrib distribution explicitly. Pinning both to
+# the identical build prevents pip from replacing cv2 with an incompatible
+# newer ABI while retaining the cv2.face module required by the chosen LBPH
+# watchlist pipeline.
+torch==2.5.1
+torchvision==0.20.1
+ultralytics==8.3.40
+lapx==0.5.11
+numpy==1.26.4
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+cryptography>=41.0.0
+requests>=2.31.0
+requests-toolbelt>=1.0.0
+httpx==0.27.0
+easyocr==1.7.2
+onnxruntime==1.20.1
+scikit-image==0.24.0
+scipy==1.14.1
+scikit-learn==1.5.2
+tifffile==2024.9.20
+contourpy==1.3.1
+psutil==6.0.0
+SQLAlchemy>=2.0.0
+prometheus-client==0.20.0

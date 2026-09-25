@@ -1,0 +1,63 @@
+{
+  "_readme": "Zones below were placed by visually inspecting real frames from demo/videos/vtest.avi (the same OpenCV sample clip used for the real false-positive benchmark, docs/PERFORMANCE_REPORT.md) -- they are grounded in actual visible content in that footage (a taped-off restricted area, a real pedestrian chokepoint, the only vehicle-parking area in frame, a signpost pause-point), NOT clicked interactively, and NOT the team's actual demo camera. scripts/define_zone.py needs a live GUI + mouse clicks that only a human operator can provide -- it could not be run non-interactively. Once real demo footage/camera exists, run: python scripts/define_zone.py --source <your camera or video> --zone-id <id> --zone-type <fence|boundary|checkpoint|verification> --name <name> --camera-id edge-001 -- to replace these with genuinely correct coordinates. See docs/LIMITATIONS.md.",
+  "zones": [
+    {
+      "zone_id": "fence-perimeter-1",
+      "camera_id": "cam-border-01",
+      "name": "Perimeter Fence Line — Taped Restricted Area",
+      "zone_type": "fence",
+      "polygon": {
+        "points": [
+          {"x": 0.03, "y": 0.10},
+          {"x": 0.97, "y": 0.10},
+          {"x": 0.97, "y": 0.90},
+          {"x": 0.03, "y": 0.90}
+        ]
+      },
+      "owning_command_id": "COMMAND_A"
+    },
+    {
+      "zone_id": "trip-line-1",
+      "camera_id": "cam-border-01",
+      "name": "Trip Line — Lamppost Chokepoint",
+      "zone_type": "boundary",
+      "polygon": {
+        "points": [
+          {"x": 0.50, "y": 0.10},
+          {"x": 0.50, "y": 0.90}
+        ]
+      },
+      "owning_command_id": "COMMAND_A"
+    },
+    {
+      "zone_id": "checkpoint-1",
+      "camera_id": "cam-border-01",
+      "name": "Vehicle Checkpoint — Parking Area",
+      "zone_type": "checkpoint",
+      "polygon": {
+        "points": [
+          {"x": 0.10, "y": 0.10},
+          {"x": 0.90, "y": 0.10},
+          {"x": 0.90, "y": 0.90},
+          {"x": 0.10, "y": 0.90}
+        ]
+      },
+      "owning_command_id": "COMMAND_A"
+    },
+    {
+      "zone_id": "verification-1",
+      "camera_id": "cam-border-01",
+      "name": "Personnel Verification — Signpost Pause Point",
+      "zone_type": "verification",
+      "polygon": {
+        "points": [
+          {"x": 0.20, "y": 0.20},
+          {"x": 0.80, "y": 0.20},
+          {"x": 0.80, "y": 0.80},
+          {"x": 0.20, "y": 0.80}
+        ]
+      },
+      "owning_command_id": "COMMAND_A"
+    }
+  ]
+}

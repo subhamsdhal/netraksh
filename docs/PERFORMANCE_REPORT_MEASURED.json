@@ -1,0 +1,173 @@
+{
+  "video": "demo/videos/vtest.avi",
+  "zone": {
+    "x1": 0.456,
+    "y1": 0.26,
+    "x2": 1.0,
+    "y2": 0.521
+  },
+  "without_verifier": {
+    "required_confirmations": 1,
+    "frames_processed": 795,
+    "raw_candidate_events_fired": 52,
+    "alerts_actually_raised": 23,
+    "wall_seconds": 34.57,
+    "metrics": {
+      "uptime_seconds": 34.6,
+      "fps": 22.44,
+      "frames": {
+        "health_condition_ms": {
+          "count": 500,
+          "mean_ms": 9.311,
+          "p95_ms": 10.682,
+          "max_ms": 15.251,
+          "min_ms": 5.638
+        },
+        "detection_tracking_ms": {
+          "count": 500,
+          "mean_ms": 33.779,
+          "p95_ms": 40.007,
+          "max_ms": 63.385,
+          "min_ms": 0.0
+        },
+        "event_processing_ms": {
+          "count": 500,
+          "mean_ms": 0.082,
+          "p95_ms": 0.131,
+          "max_ms": 0.206,
+          "min_ms": 0.0
+        },
+        "total_frame_ms": {
+          "count": 500,
+          "mean_ms": 43.173,
+          "p95_ms": 50.445,
+          "max_ms": 74.936,
+          "min_ms": 5.643
+        }
+      },
+      "events": {
+        "snapshot_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "hash_sign_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "chain_store_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "enqueue_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "total_event_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        }
+      },
+      "alerts_generated": 0,
+      "cpu_percent": 0.0,
+      "rss_mb": 412.9,
+      "psutil_available": true
+    }
+  },
+  "with_verifier": {
+    "required_confirmations": 3,
+    "frames_processed": 795,
+    "raw_candidate_events_fired": 52,
+    "alerts_actually_raised": 23,
+    "wall_seconds": 36.56,
+    "metrics": {
+      "uptime_seconds": 36.6,
+      "fps": 21.76,
+      "frames": {
+        "health_condition_ms": {
+          "count": 500,
+          "mean_ms": 9.54,
+          "p95_ms": 10.577,
+          "max_ms": 13.425,
+          "min_ms": 6.457
+        },
+        "detection_tracking_ms": {
+          "count": 500,
+          "mean_ms": 34.926,
+          "p95_ms": 39.162,
+          "max_ms": 59.081,
+          "min_ms": 0.0
+        },
+        "event_processing_ms": {
+          "count": 500,
+          "mean_ms": 0.086,
+          "p95_ms": 0.134,
+          "max_ms": 0.184,
+          "min_ms": 0.0
+        },
+        "total_frame_ms": {
+          "count": 500,
+          "mean_ms": 44.552,
+          "p95_ms": 49.174,
+          "max_ms": 69.381,
+          "min_ms": 6.462
+        }
+      },
+      "events": {
+        "snapshot_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "hash_sign_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "chain_store_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "enqueue_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "total_event_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        }
+      },
+      "alerts_generated": 0,
+      "cpu_percent": 0.0,
+      "rss_mb": 426.5,
+      "psutil_available": true
+    }
+  }
+}

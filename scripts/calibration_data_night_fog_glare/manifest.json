@@ -1,0 +1,82 @@
+{
+  "video": "demo/videos/vtest.avi",
+  "zone": {
+    "x1": 0.456,
+    "y1": 0.26,
+    "x2": 1.0,
+    "y2": 0.521
+  },
+  "synthetic_condition": "night_fog_glare",
+  "synthetic_condition_disclosure": "SYNTHETIC LIGHTING APPLIED: every frame below was run through an honest, disclosed 'night_fog_glare' brightness/contrast transform (see apply_synthetic_condition() in this script's source) before reaching the real pipeline. The people, motion, and zone are the same real footage as scripts/calibration_data/ \u2014 only the lighting is synthetic. Every D/T/S/H value, every scene_condition classification, and every YOLO detection below was genuinely computed by the real pipeline on these (now degraded) real pixels \u2014 nothing here is backfilled or invented.",
+  "condition_distribution": {
+    "GLARE": 795
+  },
+  "frames_processed": 795,
+  "candidate_count": 3,
+  "wall_seconds": 87.35,
+  "candidates": [
+    {
+      "candidate_id": "candidate_000",
+      "frame_idx": 242,
+      "track_id": 1,
+      "detection_class": "person",
+      "D": 0.8346,
+      "T": 1.0,
+      "T_age_score": 1.0,
+      "T_smoothness": 1.0,
+      "T_speed_consistency": 1.0,
+      "trajectory_point_count": 2,
+      "S": 0.6803,
+      "H": 1.0,
+      "scene_condition": "GLARE",
+      "brightness_mean": 75.15,
+      "contrast_std": 80.66,
+      "contrast_std_excluding_glare": 14.76,
+      "synthetic_condition": "night_fog_glare",
+      "snapshot": "snapshots\\candidate_000.jpg",
+      "label": 1
+    },
+    {
+      "candidate_id": "candidate_001",
+      "frame_idx": 251,
+      "track_id": 33,
+      "detection_class": "person",
+      "D": 0.7498,
+      "T": 0.7267,
+      "T_age_score": 0.18,
+      "T_smoothness": 1.0,
+      "T_speed_consistency": 1.0,
+      "trajectory_point_count": 2,
+      "S": 0.6803,
+      "H": 1.0,
+      "scene_condition": "GLARE",
+      "brightness_mean": 75.15,
+      "contrast_std": 80.65,
+      "contrast_std_excluding_glare": 14.72,
+      "synthetic_condition": "night_fog_glare",
+      "snapshot": "snapshots\\candidate_001.jpg",
+      "label": 1
+    },
+    {
+      "candidate_id": "candidate_002",
+      "frame_idx": 362,
+      "track_id": 22,
+      "detection_class": "person",
+      "D": 0.7785,
+      "T": 0.7107,
+      "T_age_score": 1.0,
+      "T_smoothness": 0.3399,
+      "T_speed_consistency": 0.7921,
+      "trajectory_point_count": 3,
+      "S": 0.6801,
+      "H": 1.0,
+      "scene_condition": "GLARE",
+      "brightness_mean": 75.04,
+      "contrast_std": 80.7,
+      "contrast_std_excluding_glare": 14.72,
+      "synthetic_condition": "night_fog_glare",
+      "snapshot": "snapshots\\candidate_002.jpg",
+      "label": 1
+    }
+  ]
+}

@@ -1,0 +1,173 @@
+{
+  "video": "MOT16-04 (Milan et al., arXiv:1603.00831, https://motchallenge.net, CC BY-NC-SA 3.0) -- real frame sequence (train/MOT16-04/img1, 1050 frames, 1920x1080, 30fps declared) reconstructed into a video file via cv2.VideoWriter for this benchmark harness; not committed to this repo (1.95GB raw dataset, gitignored like this project's other calibration_data_mot16_*/snapshots/ per .gitignore) -- see scripts/collect_mot16_ground_truth_calibration.py for the same dataset used elsewhere in this project.",
+  "zone": {
+    "x1": 0.208,
+    "y1": 0.509,
+    "x2": 0.781,
+    "y2": 1.0
+  },
+  "without_verifier": {
+    "required_confirmations": 1,
+    "frames_processed": 1050,
+    "raw_candidate_events_fired": 18,
+    "alerts_actually_raised": 14,
+    "wall_seconds": 116.37,
+    "metrics": {
+      "uptime_seconds": 116.4,
+      "fps": 9.15,
+      "frames": {
+        "health_condition_ms": {
+          "count": 500,
+          "mean_ms": 64.705,
+          "p95_ms": 70.961,
+          "max_ms": 89.828,
+          "min_ms": 58.116
+        },
+        "detection_tracking_ms": {
+          "count": 500,
+          "mean_ms": 40.196,
+          "p95_ms": 48.498,
+          "max_ms": 61.219,
+          "min_ms": 31.333
+        },
+        "event_processing_ms": {
+          "count": 500,
+          "mean_ms": 0.142,
+          "p95_ms": 0.213,
+          "max_ms": 0.457,
+          "min_ms": 0.083
+        },
+        "total_frame_ms": {
+          "count": 500,
+          "mean_ms": 105.043,
+          "p95_ms": 118.038,
+          "max_ms": 139.945,
+          "min_ms": 93.558
+        }
+      },
+      "events": {
+        "snapshot_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "hash_sign_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "chain_store_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "enqueue_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "total_event_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        }
+      },
+      "alerts_generated": 0,
+      "cpu_percent": 0.0,
+      "rss_mb": 456.8,
+      "psutil_available": true
+    }
+  },
+  "with_verifier": {
+    "required_confirmations": 3,
+    "frames_processed": 1050,
+    "raw_candidate_events_fired": 18,
+    "alerts_actually_raised": 12,
+    "wall_seconds": 114.72,
+    "metrics": {
+      "uptime_seconds": 114.7,
+      "fps": 9.01,
+      "frames": {
+        "health_condition_ms": {
+          "count": 500,
+          "mean_ms": 67.637,
+          "p95_ms": 82.247,
+          "max_ms": 100.341,
+          "min_ms": 58.498
+        },
+        "detection_tracking_ms": {
+          "count": 500,
+          "mean_ms": 38.7,
+          "p95_ms": 44.567,
+          "max_ms": 56.008,
+          "min_ms": 31.957
+        },
+        "event_processing_ms": {
+          "count": 500,
+          "mean_ms": 0.146,
+          "p95_ms": 0.21,
+          "max_ms": 0.301,
+          "min_ms": 0.088
+        },
+        "total_frame_ms": {
+          "count": 500,
+          "mean_ms": 106.483,
+          "p95_ms": 124.275,
+          "max_ms": 149.613,
+          "min_ms": 91.455
+        }
+      },
+      "events": {
+        "snapshot_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "hash_sign_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "chain_store_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "enqueue_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        },
+        "total_event_ms": {
+          "count": 0,
+          "mean_ms": 0.0,
+          "p95_ms": 0.0,
+          "max_ms": 0.0,
+          "min_ms": 0.0
+        }
+      },
+      "alerts_generated": 0,
+      "cpu_percent": 0.0,
+      "rss_mb": 480.4,
+      "psutil_available": true
+    }
+  }
+}

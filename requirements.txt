@@ -1,0 +1,59 @@
+# NETRAKSH — Python dependencies
+# Confirmed against Python 3.14 in Phase 0 environment spike
+
+# --- Computer Vision & AI ---
+ultralytics==8.3.0          # YOLOv8n/v11n detector
+lapx>=0.5.2                 # Required by ultralytics ByteTrack/BOTSORT for linear assignment
+# Was opencv-python-headless — swapped to the -contrib- variant (superset
+# API, same "headless"/no-GUI-deps build) specifically for cv2.face
+# (LBPHFaceRecognizer), needed for real watchlist face recognition
+# (SIH PS 26187 — "support facial recognition", not detection alone).
+# Confirmed real and working: the -contrib- package ships cv2.face (unlike the 
+# plain opencv-python-headless package). Only one of {opencv-python,-headless,-contrib-*} 
+# may be installed at once — do not add opencv-python-headless back alongside this.
+# Note: Pinned to 4.10.x to maintain Numpy 1.x compatibility for ultralytics.
+opencv-contrib-python-headless==4.10.0.84  # Camera ingestion, health/condition checks, face recognition
+easyocr==1.7.2              # ANPR OCR step (after plate crop)
+retina-face==0.0.17         # Face detection (MVP: detection only, no recognition)
+
+# --- ML / Calibration ---
+scikit-learn==1.5.0         # Isotonic regression / Platt scaling for Gate 3 calibration
+numpy==1.26.0
+
+# --- Cryptography / Evidence ---
+cryptography==42.0.0        # SHA-256, Ed25519 signatures
+
+# --- Backend / API ---
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+sqlalchemy==2.0.0
+alembic==1.14.0
+psycopg2-binary==2.9.9      # PostgreSQL driver
+python-jose[cryptography]==3.3.0  # JWT
+passlib[bcrypt]==1.7.4      # Password hashing
+bcrypt==4.0.1                  # 4.1 removed __about__.__version__ that passlib reads — see backend/security/auth.py
+python-multipart==0.0.9     # Form data / file uploads
+aiofiles==24.1.0
+websockets==13.0
+
+# --- HTTP client (edge→server sync) ---
+httpx==0.27.0
+
+# --- Object Storage ---
+boto3==1.34.0
+
+# --- Testing ---
+pytest==8.3.0
+pytest-asyncio==0.24.0
+httpx==0.27.0               # Already listed above, test client uses it too
+
+# --- Performance instrumentation (optional) ---
+psutil==6.0.0                # CPU%/RAM sampling for edge/instrumentation/metrics.py.
+                              # Soft dependency: metrics.py works without it, cpu_percent/rss_mb
+                              # just report null instead of a fabricated number.
+
+# --- Dev utilities ---
+python-dotenv==1.0.0
+pydantic==2.9.0             # bundled with fastapi but explicit pin
+pydantic-settings==2.6.0
+slowapi==0.1.9

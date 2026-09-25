@@ -1,0 +1,5 @@
+# Large edge model/video assets should be stored through Git LFS for future
+# pushes. This declaration does not rewrite existing Git history.
+*.onnx filter=lfs diff=lfs merge=lfs -text
+*.pt filter=lfs diff=lfs merge=lfs -text
+demo/videos/uploaded_demo.mp4 filter=lfs diff=lfs merge=lfs -text
