@@ -49,6 +49,9 @@ async def lifespan(app: FastAPI):
     logger.info(f"Blockchain mode: {settings.BLOCKCHAIN_MODE.upper()}")
     if settings.BLOCKCHAIN_MODE == "mock":
         logger.warning(f"  -> {settings.BLOCKCHAIN_MOCK_LABEL}")
+    if settings.RUN_STORAGE_SMOKE_TEST_ON_STARTUP:
+        from backend.services.storage_smoke import run_startup_storage_smoke_test
+        run_startup_storage_smoke_test()
     # Start WebSocket background tasks (telemetry batcher + heartbeat).
     # Must be called inside the async lifespan context so the asyncio
     # event loop is running when create_task is called.

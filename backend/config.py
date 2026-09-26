@@ -133,6 +133,9 @@ class Settings(BaseSettings):
     OBJECT_STORAGE_ACCESS_KEY: Optional[str] = None # AWS_ACCESS_KEY_ID
     OBJECT_STORAGE_SECRET_KEY: Optional[str] = None # AWS_SECRET_ACCESS_KEY
     OBJECT_STORAGE_REGION: Optional[str] = None     # e.g. us-east-1
+    # A deliberate, one-shot deployment diagnostic. It is disabled by default
+    # and must never be enabled permanently in a production environment.
+    RUN_STORAGE_SMOKE_TEST_ON_STARTUP: bool = False
     MAX_UPLOAD_SIZE_BYTES: int = 5242880  # 5 MiB default
     EVIDENCE_SIGNED_URL_TTL_SECONDS: int = 3600  # Default 1 hour
     WEBHOOK_HMAC_SECRET: Optional[str] = None
