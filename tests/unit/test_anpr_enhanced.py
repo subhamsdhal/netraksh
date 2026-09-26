@@ -229,3 +229,23 @@ def test_anpr_module_enhanced_mode(monkeypatch, mock_track, mock_frame):
     assert res["plate_text"] == "MOCK123"
     assert res["fusion_state"] == "CONFIRMED"
     assert res["observations_count"] == 2
+
+
+def test_constrained_cloud_anpr_never_constructs_easyocr(monkeypatch):
+    monkeypatch.setenv("EDGE_CONSTRAINED_CLOUD", "true")
+    monkeypatch.delenv("ANPR_OCR_BACKEND", raising=False)
+    module = EnhancedANPRModule(engine="heuristic")
+    assert module.ocr_backend == "disabled"
+    assert module.ocr_engine is None
+
+
+def test_constrained_cloud_anpr_reports_ocr_unavailable_without_plate_text(monkeypatch, mock_track, mock_frame):
+    monkeypatch.setenv("EDGE_CONSTRAINED_CLOUD", "true")
+    monkeypatch.delenv("ANPR_OCR_BACKEND", raising=False)
+    module = EnhancedANPRModule(engine="heuristic")
+    module.quality_filter.check = Mock(return_value=(True, None))
+    result = module.process(mock_track, mock_frame)
+    assert result["plate_text"] is None
+    assert result["normalized_plate_text"] is None
+    assert result["validation_status"] == "OCR_UNAVAILABLE"
+    assert result["processing_method"] == "heuristic+OCR_UNAVAILABLE"

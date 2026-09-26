@@ -360,9 +360,12 @@ class EasyOCREngine(OCREngine):
     def __init__(self, languages: List[str] = None):
         self._languages = languages or ["en"]
         self._reader = None
-        self._init_reader()
+        self._attempted = False
         
     def _init_reader(self):
+        if self._attempted:
+            return
+        self._attempted = True
         try:
             import easyocr
             self._reader = easyocr.Reader(self._languages, gpu=False, verbose=False)
@@ -371,6 +374,7 @@ class EasyOCREngine(OCREngine):
             logger.error(f"[ANPR] EasyOCR init failed: {exc}")
 
     def read(self, image: np.ndarray) -> Optional[OCRResult]:
+        self._init_reader()
         if self._reader is None:
             return None
             
@@ -493,7 +497,16 @@ class EnhancedANPRModule:
             
         self.engine = engine
         self.quality_filter = PlateQualityFilter()
-        self.ocr_engine = EasyOCREngine()
+        constrained = os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true"
+        self.ocr_backend = os.environ.get(
+            "ANPR_OCR_BACKEND", "disabled" if constrained else "easyocr"
+        ).lower()
+        # In constrained cloud mode there is intentionally no OCR engine.
+        # Local/full installations retain lazy EasyOCR loading on first real
+        # plate crop; no model is imported merely by constructing the pipeline.
+        self.ocr_engine = EasyOCREngine() if self.ocr_backend == "easyocr" else None
+        if self.ocr_engine is None:
+            logger.info("[ANPR] OCR unavailable by configured constrained-cloud policy; localization remains active")
         self.fusion = TemporalOCRFusion()
         self.watchlist = PlateWatchlist()
         
@@ -528,6 +541,11 @@ class EnhancedANPRModule:
             
         processed_img = OCRPreprocessor.process(crop_data.crop, quad=crop_data.quadrilateral)
         
+        if self.ocr_engine is None:
+            result['processing_method'] = f'{crop_data.method}+OCR_UNAVAILABLE'
+            result['validation_status'] = 'OCR_UNAVAILABLE'
+            return result
+
         ocr_res = self.ocr_engine.read(processed_img)
         if not ocr_res:
             return result

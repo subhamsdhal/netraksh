@@ -221,6 +221,11 @@ class CameraAdapter:
                     self._width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                     self._height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                     self._set_state(StreamState.CONNECTED)
+                    try:
+                        from edge.runtime_diagnostics import log_runtime_checkpoint
+                        log_runtime_checkpoint("video_opened")
+                    except Exception:
+                        pass
                     attempt = 0
                     first_frame_received = False
                     self.last_frame_time = 0.0 # reset on new connection

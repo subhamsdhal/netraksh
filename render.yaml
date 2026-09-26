@@ -96,6 +96,10 @@ services:
         value: onnx_cpu
       - key: DETECTOR_MODEL_ONNX
         value: /app/yolov8n.onnx
+      - key: EDGE_CONSTRAINED_CLOUD
+        value: "true"
+      - key: ANPR_OCR_BACKEND
+        value: disabled
       - key: SYNC_INTERVAL_SECONDS
         value: "2"
       - key: EDGE_ALLOW_KEY_GENERATION
@@ -133,6 +137,10 @@ services:
         value: onnx_cpu
       - key: DETECTOR_MODEL_ONNX
         value: /app/yolov8n.onnx
+      - key: EDGE_CONSTRAINED_CLOUD
+        value: "true"
+      - key: ANPR_OCR_BACKEND
+        value: disabled
       - key: SYNC_INTERVAL_SECONDS
         value: "2"
       - key: EDGE_ALLOW_KEY_GENERATION

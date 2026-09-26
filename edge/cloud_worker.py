@@ -55,6 +55,8 @@ def _run_edge() -> None:
         try:
             # Delay the pipeline import until after the HTTP listener is up.
             from edge.demo_runner import run_demo_pipeline
+            from edge.runtime_diagnostics import log_runtime_checkpoint
+            log_runtime_checkpoint("demo_runner_imported")
 
             _preflight(backend_url, camera_id, token)
             _state["worker_started_at"] = time.time()
@@ -126,6 +128,8 @@ def main() -> None:
     port = int(os.environ.get("PORT", "10000"))
     server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
     logger.info("[CloudWorker] Health listener bound on 0.0.0.0:%s", port)
+    from edge.runtime_diagnostics import log_runtime_checkpoint
+    log_runtime_checkpoint("cloud_worker_started")
     thread = threading.Thread(target=_run_edge, daemon=True, name="netraksh-edge")
     thread.start()
     try:

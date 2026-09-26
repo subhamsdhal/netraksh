@@ -53,6 +53,7 @@ from edge.temporal.track_features import TrackFeatureTracker
 from edge.telemetry import build_frame_snapshot, render_snapshot
 from edge.tracking.continuity_guard import TrackContinuityGuard
 from edge.tracking.continuity_guard import compute_histogram as compute_track_histogram
+from edge.runtime_diagnostics import log_runtime_checkpoint
 from shared.constants import (
     ABSTAIN_SNAPSHOT_INTERVAL_SECONDS,
     NIGHT_MOTION_COOLDOWN_SECONDS,
@@ -195,6 +196,7 @@ class EdgePipeline:
             model_size=self.yolo_model_path,
             device=config.get("device", "cpu"),
         )
+        log_runtime_checkpoint("pipeline_constructed_before_detector_load")
         self.adaptive_gate = AdaptiveComputeGate()
 
         # Night-motion fallback (architecture v4 §3) — was implemented but
@@ -218,6 +220,7 @@ class EdgePipeline:
         self.line_module = LineCrossingModule(self.zones)
         self.behavior_module = BehaviorModule(self.zones)
         self.anpr_module = ANPRModule(self.zones)
+        log_runtime_checkpoint("anpr_constructed")
 
         self.behavior_analytics_enabled = config.get("behavior_analytics", os.environ.get("BEHAVIOR_ANALYTICS", "false").lower() == "true")
 
@@ -233,6 +236,7 @@ class EdgePipeline:
         self._edge_auth_token = config.get("auth_token", os.environ.get("EDGE_AUTH_TOKEN", ""))
         self.face_recognizer = sync_from_backend(self._backend_url, auth_token=self._edge_auth_token)
         self.face_module = FaceDetectionModule(self.zones, recognizer=self.face_recognizer)
+        log_runtime_checkpoint("face_module_constructed")
 
         # Layer 6: Evidence
         key_dir = config.get("key_dir", "certs/edge")
@@ -350,6 +354,7 @@ class EdgePipeline:
         """
         logger.info("[Pipeline] Loading YOLO model...")
         self.detector.load()
+        log_runtime_checkpoint("onnx_detector_and_tracker_loaded")
 
         # Start sync in background thread
         sync_thread = threading.Thread(
@@ -654,6 +659,7 @@ class EdgePipeline:
 
     def _process_frame(self, frame, meta) -> None:
         """Process a single frame through the full pipeline."""
+        log_runtime_checkpoint("active_inference", active=True)
         self._verify_tick += 1
         self._last_video_time = meta.video_time_seconds
         self._last_frame_width = meta.width
