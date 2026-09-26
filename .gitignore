@@ -151,6 +151,7 @@ e2e_report.json
 
 # Generated screenshots
 *.png
+!frontend/src/assets/login-reference-approved.png
 
 # Temporary local runner/build scripts
 run_*.bat
