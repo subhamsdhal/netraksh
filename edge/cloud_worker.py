@@ -7,6 +7,7 @@ the listener is bound, which keeps cold-start health checks responsive.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -24,11 +25,36 @@ _state = {
 }
 
 
+def _materialize_cloud_keys(camera_id: str) -> None:
+    """Write stable cloud edge keys supplied through Render secret env vars."""
+    key_dir = os.environ.get("EDGE_KEY_DIR", "certs/edge")
+    os.makedirs(key_dir, exist_ok=True)
+    private_b64 = os.environ.get("EDGE_PRIVATE_KEY_B64", "").strip()
+    aes_b64 = os.environ.get("EDGE_EVIDENCE_KEY_B64", "").strip()
+    if not private_b64 or not aes_b64:
+        raise RuntimeError("EDGE_PRIVATE_KEY_B64 and EDGE_EVIDENCE_KEY_B64 are required")
+    private_path = os.path.join(key_dir, f"{camera_id}.key")
+    aes_path = os.path.join(key_dir, f"{camera_id}.aes")
+    with open(private_path, "wb") as fh:
+        fh.write(base64.b64decode(private_b64))
+    with open(aes_path, "wb") as fh:
+        raw = base64.b64decode(aes_b64)
+        if len(raw) != 32:
+            raise RuntimeError("EDGE_EVIDENCE_KEY_B64 must decode to exactly 32 bytes")
+        fh.write(raw)
+    try:
+        os.chmod(private_path, 0o600)
+        os.chmod(aes_path, 0o600)
+    except OSError:
+        pass
+
+
 def _run_edge() -> None:
     camera_id = os.environ.get("CAMERA_ID", "cam-border-01")
     video_source = os.environ.get("VIDEO_SOURCE", "demo/videos/uploaded_demo.mp4")
     backend_url = os.environ.get("BACKEND_URL", "https://netraksh.onrender.com")
     zones = os.environ.get("ZONES_CONFIG_PATH", "demo/scripts/zones_config.json")
+    _materialize_cloud_keys(camera_id)
 
     while True:
         try:
