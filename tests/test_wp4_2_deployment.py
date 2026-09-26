@@ -14,8 +14,10 @@ def test_backend_dockerfile_exists():
 def test_production_edge_entrypoint():
     with open("edge/Dockerfile", "r") as f:
         content = f.read()
-    assert 'CMD ["python", "edge/main.py"]' in content, "Production edge entrypoint must be edge/main.py"
-    assert "demo_runner.py" not in content, "demo_runner must NOT be production entrypoint"
+    assert 'CMD ["python", "-m", "edge.cloud_worker"]' in content, (
+        "Production edge entrypoint must be the unattended cloud worker"
+    )
+    assert "demo_runner.py" not in content, "Interactive script paths must NOT be the production entrypoint"
 
 
 def test_edge_image_no_private_certs():

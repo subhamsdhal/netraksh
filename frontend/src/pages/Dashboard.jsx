@@ -127,6 +127,25 @@ export default function Dashboard() {
     setCameraMedia((current) => updateCameraMediaState(current, cameraId, patch));
   };
 
+  const requestScenario = async (cameraId, payload) => {
+    if (cameraId) updateCameraMedia(cameraId, { edgeStatus: 'WAKING' });
+    try {
+      const response = await authFetch('/api/dashboard/video/scenario', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (cameraId) updateCameraMedia(cameraId, {
+        edgeStatus: result.edge_status === 'ready' ? 'READY' : result.edge_status === 'waking' ? 'WAKING' : 'WAITING',
+      });
+      return result;
+    } catch (_) {
+      if (cameraId) updateCameraMedia(cameraId, { edgeStatus: 'WAITING' });
+      return null;
+    }
+  };
+
   useEffect(() => {
     cameraMediaRef.current = cameraMedia;
   }, [cameraMedia]);
@@ -695,12 +714,13 @@ export default function Dashboard() {
                   <h2>{title}</h2>
                   <p>{cameraId ? `${cameraId.toUpperCase()} · ${locationLabel}` : 'No source selected'}</p>
                   {sourceState?.sourceName && <p className="dashboard-source-name">SOURCE: {sourceState.sourceName}</p>}
+                  {mediaState.edgeStatus === 'WAKING' && <p className="dashboard-source-name">WAKING AI WORKER...</p>}
                 </div>
                 <div className="dashboard-camera-card-controls">
                   <span className={`dashboard-camera-status status-${status.toLowerCase().replace(/\s+/g, '-')}`}>{statusLabel}</span>
                   {cameraId && canUpload && <div className="dashboard-slot-actions">
                     <button className="btn btn-sm btn-outline" onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
-                    {sourceState?.sourceId && !activeCameraIds.includes(cameraId) && <button className="btn btn-sm btn-outline" onClick={() => authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ camera_id: cameraId, video_session_id: sourceState.sourceId, scenario: 'normal', video_time: 0 }) }).catch(() => {})}>START / ANALYZE</button>}
+                    {sourceState?.sourceId && !activeCameraIds.includes(cameraId) && <button className="btn btn-sm btn-outline" onClick={() => requestScenario(cameraId, { camera_id: cameraId, video_session_id: sourceState.sourceId, scenario: 'normal', video_time: 0 })}>START / ANALYZE</button>}
                     {activeCameraIds.includes(cameraId) && <button className="btn btn-sm btn-outline" onClick={() => {
                       authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ camera_id: cameraId, video_session_id: sourceState?.sourceId || null, scenario: 'paused', video_time: 0 }) }).catch(() => {});
                       // Keep the selected source bound to this slot while it is

@@ -20,6 +20,9 @@ COPY backend/ /app/backend/
 COPY shared/ /app/shared/
 COPY alembic/ /app/alembic/
 COPY alembic.ini /app/alembic.ini
+# Browser fallback for the bundled evaluator demo. Uploaded media uses the
+# configured durable object store; this immutable asset is image content.
+COPY demo/videos/uploaded_demo.mp4 /app/demo/videos/uploaded_demo.mp4
 
 # TLS material is deployment-specific and must be mounted when mTLS/TLS is
 # enabled.  Do not make the default image build depend on untracked secrets.

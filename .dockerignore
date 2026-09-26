@@ -21,9 +21,13 @@ logs
 *.sqlite
 *.sqlite3
 edge/data
-demo/videos
+demo/videos/*
+!demo/videos/uploaded_demo.mp4
 *.pt
+!yolov8n.pt
 *.onnx
+!lpd_yunet.onnx
+!face_recognition_sface_2021dec.onnx
 certs
 .env
 .env.*

@@ -100,11 +100,15 @@ class RedactingJSONFormatter(logging.Formatter):
 def setup_json_logging(level=logging.INFO):
     """Sets up the root logger to use the RedactingJSONFormatter."""
     root = logging.getLogger()
-    # Clear existing handlers
-    if root.hasHandlers():
-        root.handlers.clear()
+    # Replace only our own prior handler. Clearing every root handler breaks
+    # hosting/observability integrations and test capture installed by the
+    # surrounding process.
+    for existing in list(root.handlers):
+        if getattr(existing, "_netraksh_json_handler", False):
+            root.removeHandler(existing)
         
     handler = logging.StreamHandler()
+    handler._netraksh_json_handler = True
     handler.setFormatter(RedactingJSONFormatter())
     root.addHandler(handler)
     root.setLevel(level)

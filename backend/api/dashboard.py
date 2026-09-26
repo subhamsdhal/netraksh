@@ -33,10 +33,20 @@ import time
 import uuid
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
-from backend.security.auth import require_operator_or_admin
+from backend.config import settings
+from backend.security.auth import require_edge_auth, require_operator_or_admin
+from backend.services.video_storage import (
+    activate_session,
+    get_active_session,
+    get_uploaded_session,
+    signed_media_url,
+    store_uploaded_session,
+    update_active_session,
+)
 
 # Import the shared in-memory state from the demo module.  This is a plain
 # module-level dict — the same object across all imports — so writing here
@@ -105,6 +115,30 @@ def _ffmpeg_bin() -> str | None:
     return shutil.which("ffmpeg")
 
 
+def _durable_video_enabled() -> bool:
+    """Production uploads use the configured shared S3-compatible store."""
+    return settings.OBJECT_STORAGE_PROVIDER == "s3"
+
+
+async def _wake_edge_service(camera_id: str | None) -> str:
+    """Best-effort wake request for a free Render edge web service."""
+    env_key = {
+        "cam-border-01": "EDGE_WAKE_URL_CAM_BORDER_01",
+        "cam-checkpoint-01": "EDGE_WAKE_URL_CAM_CHECKPOINT_01",
+    }.get(str(camera_id or ""))
+    wake_url = os.environ.get(env_key, "").strip() if env_key else ""
+    if not wake_url:
+        return "not_configured"
+    try:
+        timeout = httpx.Timeout(connect=2.0, read=5.0, write=2.0, pool=2.0)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            response = await client.get(f"{wake_url.rstrip('/')}/wake")
+            return "ready" if response.is_success else "waking"
+    except httpx.HTTPError as exc:
+        logger.info("[Dashboard] Edge wake request unavailable (%s)", type(exc).__name__)
+        return "waking"
+
+
 def _session_media_path(session_id: str) -> Path | None:
     """Resolve the browser preview belonging to exactly one upload session."""
     try:
@@ -146,6 +180,29 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
       }
     """
     camera_id = request.query_params.get("camera_id")
+    if _durable_video_enabled() and camera_id:
+        durable = get_active_session(camera_id)
+        if durable:
+            preview_key = durable.get("preview_object_key")
+            source_key = durable.get("source_object_key")
+            browser_key = preview_key or (source_key if durable.get("content_type") == "video/mp4" else None)
+            if not browser_key:
+                return {
+                    "available": False,
+                    "camera_id": camera_id,
+                    "error": "no_browser_preview",
+                    "source_name": durable.get("source_name"),
+                }
+            session_id = durable.get("session_id")
+            return {
+                "available": True,
+                "preview_url": f"/api/dashboard/video/media/{session_id}?camera_id={camera_id}",
+                "source_name": durable.get("source_name"),
+                "session_id": session_id,
+                "camera_id": camera_id,
+                "scenario": durable.get("scenario", "paused"),
+                "processing_status": "active",
+            }
     scoped = (_demo_state.get("camera_sessions") or {}).get(camera_id, {}) if camera_id else {}
     source: str | None = scoped.get("video_source") if camera_id else _demo_state.get("video_source")
     session_id: str | None = scoped.get("video_session_id") if camera_id else _demo_state.get("video_session_id")
@@ -190,7 +247,11 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
     if abs_source.exists() and abs_source.suffix.lower() == ".mp4":
         return {
             "available": True,
-            "preview_url": f"/api/dashboard/video/media/{session_id}",
+            "preview_url": (
+                "/api/dashboard/video/current/media"
+                if abs_source.name == "uploaded_demo.mp4"
+                else f"/api/dashboard/video/media/{session_id}"
+            ),
             "source_name": abs_source.name,
             "session_id": session_id,
             "camera_id": camera_id,
@@ -218,13 +279,26 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
 # ---------------------------------------------------------------------------
 
 @router.get("/video/internal-sync")
-async def get_internal_sync(request: Request):
+async def get_internal_sync(request: Request, _edge=Depends(require_edge_auth)):
     """
-    Unauthenticated endpoint for the local edge runner to poll the current video
-    source and session ID. This replaces the need for the edge runner to poll
-    the development-only /demo/scenario endpoint.
+    Edge-authenticated control endpoint for workers to poll the current logical
+    video source and session. Object-backed sources include a short-lived
+    download URL; credentials are never returned.
     """
     camera_id = request.query_params.get("camera_id")
+    if _durable_video_enabled() and camera_id:
+        durable = get_active_session(camera_id)
+        if durable:
+            source_key = durable.get("source_object_key")
+            return {
+                "video_source": f"object://{source_key}",
+                "download_url": signed_media_url(source_key) if source_key else None,
+                "video_session_id": durable.get("session_id"),
+                "scenario": durable.get("scenario", "paused"),
+                "video_time": durable.get("video_time", 0.0),
+                "video_time_updated_at": durable.get("video_time_updated_at", 0.0),
+                "camera_id": camera_id,
+            }
     scoped = (_demo_state.get("camera_sessions") or {}).get(camera_id, {}) if camera_id else {}
     return {
         "video_source": scoped.get("video_source", _demo_state.get("video_source")),
@@ -256,7 +330,17 @@ async def post_video_scenario(
         target["video_time"] = float(payload["video_time"])
         import time
         target["video_time_updated_at"] = time.time()
-    return {"status": "success", "state": _demo_state}
+    if _durable_video_enabled() and camera_id:
+        changes = {
+            key: target[key]
+            for key in ("scenario", "video_time", "video_time_updated_at")
+            if key in target
+        }
+        update_active_session(camera_id, changes)
+    edge_status = "not_requested"
+    if camera_id and requested in {"normal", "paused"}:
+        edge_status = await _wake_edge_service(camera_id)
+    return {"status": "success", "state": _demo_state, "edge_status": edge_status}
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +381,22 @@ async def get_current_video_media(_user=Depends(require_operator_or_admin)):
 @router.get("/video/media/{session_id}")
 async def get_video_media_by_session(
     session_id: str,
+    request: Request,
     _user=Depends(require_operator_or_admin),
 ):
     """Serve one immutable upload session without consulting global state."""
+    camera_id = request.query_params.get("camera_id")
+    if _durable_video_enabled() and camera_id:
+        durable = get_uploaded_session(camera_id, session_id)
+        if not durable:
+            raise HTTPException(status_code=404, detail="Video session media not found")
+        object_key = durable.get("preview_object_key")
+        if not object_key and durable.get("content_type") == "video/mp4":
+            object_key = durable.get("source_object_key")
+        url = signed_media_url(object_key) if object_key else None
+        if not url:
+            raise HTTPException(status_code=415, detail="This video has no browser-compatible MP4 preview")
+        return RedirectResponse(url=url, status_code=307)
     media_path = _session_media_path(session_id)
     if not media_path:
         raise HTTPException(status_code=404, detail="Video session media not found")
@@ -445,6 +542,29 @@ async def upload_dashboard_video(
         preview_url = f"/api/dashboard/video/media/{new_session_id}"
         logger.info("[Dashboard] Serving original MP4 directly (ffmpeg not installed)")
 
+    if _durable_video_enabled():
+        if not camera_id:
+            target_path.unlink(missing_ok=True)
+            preview_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="camera_id is required for durable video uploads")
+        try:
+            store_uploaded_session(
+                camera_id=camera_id,
+                session_id=new_session_id,
+                source_path=target_path,
+                preview_path=preview_path if preview_path.is_file() else None,
+                source_name=target_path.name,
+                content_type=content_type,
+            )
+        except Exception:
+            logger.exception("[Dashboard] Durable video upload failed")
+            raise HTTPException(status_code=502, detail="Durable video storage failed")
+        finally:
+            target_path.unlink(missing_ok=True)
+            preview_path.unlink(missing_ok=True)
+        if preview_url:
+            preview_url = f"/api/dashboard/video/media/{new_session_id}?camera_id={camera_id}"
+
     # Do NOT update shared demo state here so edge runner does not start immediately.
     # The frontend will call /analyze to trigger playback.
     if camera_id:
@@ -503,6 +623,17 @@ async def analyze_dashboard_video(
     This separates upload (buffering/transcoding) from actual playback/analysis,
     allowing the frontend to stay paused until the user hits Play.
     """
+    if _durable_video_enabled():
+        if not req.camera_id:
+            raise HTTPException(status_code=400, detail="camera_id is required")
+        durable = get_uploaded_session(req.camera_id, req.session_id)
+        if not durable:
+            raise HTTPException(status_code=404, detail="Video session was not found in durable storage")
+        if durable.get("source_name") != req.source_name:
+            raise HTTPException(status_code=409, detail="Video session is not associated with this camera/source")
+        activate_session(req.camera_id, req.session_id)
+        return {"status": "ok", "message": "Analysis started"}
+
     target_path = _confined_media_path(req.source_name, name_only=True)
     if target_path.suffix.lower() not in _ALLOWED_EXTENSIONS or not target_path.is_file():
         raise HTTPException(status_code=404, detail="Video file not found. Please upload again.")

@@ -40,6 +40,7 @@ None of these flags retroactively alter already-signed evidence packages.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import sys
@@ -47,6 +48,7 @@ import time
 import threading
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import cv2
 import numpy as np
@@ -77,6 +79,199 @@ _FAILURE_DURATION_S = 60.0
 _failure_until: float = 0.0
 
 
+def _is_resolvable_edge_source(source: object) -> bool:
+    """Return whether a dashboard-requested source can be opened by this edge.
+
+    Dashboard uploads are stored on the control-plane filesystem.  Their
+    repository-relative paths are meaningful to Render, but not necessarily to
+    an independently running edge device.  A local CLI source therefore stays
+    authoritative unless the requested replacement is a file on this edge, a
+    local capture device, or a supported stream URL.
+    """
+    value = str(source or "").strip()
+    if not value:
+        return False
+    if value.lower() in {"0", "1", "2", "webcam", "usb", "usb_camera"}:
+        return True
+    if urlparse(value).scheme.lower() in {"http", "https", "rtsp", "rtsps"}:
+        return True
+    return Path(value).is_file()
+
+
+def _runtime_state_paths(
+    camera_id: str,
+    backend_url: str,
+    session_id: Optional[str] = None,
+) -> dict[str, str]:
+    """Build backend-scoped durable state paths for one edge camera.
+
+    A retry outbox is durable only for the deployment that accepted its
+    records.  Namespace it by a stable digest of the configured backend origin
+    so records created for localhost or another deployment cannot be replayed
+    to a newly selected backend.
+    """
+    parsed = urlparse(backend_url.strip())
+    origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
+    scope = hashlib.sha256(origin.encode("utf-8")).hexdigest()[:12]
+    session_suffix = f"_{session_id}" if session_id else ""
+    runtime_root = Path(os.environ.get("EDGE_RUNTIME_DIR", "edge/data"))
+    return {
+        "chain_db_path": str(runtime_root / f"chain_{camera_id}_{scope}.db"),
+        "sync_db_path": str(runtime_root / f"sync_{camera_id}_{scope}{session_suffix}.db"),
+        "clip_dir": str(runtime_root / "clips" / f"{camera_id}_{scope}"),
+        "metrics_json_path": str(runtime_root / f"metrics_{camera_id}_{scope}.json"),
+    }
+
+
+def _materialize_remote_source(data: dict, camera_id: str) -> dict:
+    """Download a signed object URL into the worker's durable source cache.
+
+    The logical object reference remains server-side state.  A deterministic
+    per-session filename prevents a newly generated signed URL on each poll
+    from looking like a new source and restarting the pipeline.
+    """
+    download_url = str(data.get("download_url") or "").strip()
+    session_id = str(data.get("video_session_id") or "").strip()
+    if not download_url or not session_id:
+        return data
+    try:
+        session_id = str(__import__("uuid").UUID(session_id))
+    except (ValueError, AttributeError):
+        logger.warning("[DemoRunner] Ignoring remote source with invalid session ID")
+        return data
+
+    parsed = urlparse(download_url)
+    suffix = Path(parsed.path).suffix.lower()
+    if suffix not in {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}:
+        suffix = ".video"
+    cache_root = Path(
+        os.environ.get(
+            "EDGE_SOURCE_CACHE_DIR",
+            str(Path(os.environ.get("EDGE_RUNTIME_DIR", "edge/data")) / "sources"),
+        )
+    )
+    destination = cache_root / camera_id / f"{session_id}{suffix}"
+    if destination.is_file() and destination.stat().st_size > 0:
+        hydrated = dict(data)
+        hydrated["video_source"] = str(destination)
+        return hydrated
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    part_path = destination.with_suffix(destination.suffix + ".part")
+    max_bytes = int(os.environ.get("EDGE_MAX_SOURCE_BYTES", str(500 * 1024 * 1024)))
+    try:
+        import httpx
+
+        timeout = httpx.Timeout(connect=5.0, read=120.0, write=10.0, pool=5.0)
+        total = 0
+        with httpx.stream("GET", download_url, timeout=timeout, follow_redirects=True) as response:
+            response.raise_for_status()
+            with open(part_path, "wb") as handle:
+                for chunk in response.iter_bytes(1024 * 1024):
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError("remote video exceeds EDGE_MAX_SOURCE_BYTES")
+                    handle.write(chunk)
+        if total == 0:
+            raise ValueError("remote video is empty")
+        os.replace(part_path, destination)
+    except Exception as exc:
+        part_path.unlink(missing_ok=True)
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        logger.warning(
+            "[DemoRunner] Remote source download failed: %s%s",
+            type(exc).__name__,
+            f" (HTTP {status_code})" if status_code is not None else "",
+        )
+        return data
+    hydrated = dict(data)
+    hydrated["video_source"] = str(destination)
+    return hydrated
+
+
+def _control_seek_target(
+    requested_time: object,
+    source_kind: str,
+    duration_seconds: Optional[float],
+) -> Optional[float]:
+    """Return a valid explicit control-plane seek target, if any.
+
+    The browser reports an absolute media position every few seconds; it is
+    not a durable wall-clock from which an edge process may extrapolate after
+    the browser stops reporting.  Finite media additionally cannot accept an
+    out-of-range seek.  ``None`` means wait for a fresh, valid control update
+    while local decoding continues from its current position.
+    """
+    try:
+        target = float(requested_time)
+    except (TypeError, ValueError):
+        return None
+    if target < 0:
+        return None
+    if source_kind == "LOCAL_FINITE_FILE":
+        if duration_seconds is None:
+            return None
+        if target >= duration_seconds:
+            return None
+    return target
+
+
+def _apply_control_sync(data: dict) -> bool:
+    """Atomically apply a resolvable control-plane video session.
+
+    Playback time and pause state belong to the session that supplied the
+    source.  If that source cannot exist on this edge, none of its session
+    state may steer the configured local source.
+    """
+    new_source = data.get("video_source")
+    new_session_id = data.get("video_session_id")
+    rejected_key = (str(new_source), str(new_session_id))
+
+    if new_source and not _is_resolvable_edge_source(new_source):
+        if _scenario.get("rejected_source_session") != rejected_key:
+            logger.warning(
+                "[DemoRunner] Ignoring unavailable control-plane source/session; "
+                "retaining the configured edge source"
+            )
+            _scenario["rejected_source_session"] = rejected_key
+        return False
+
+    if new_session_id and not new_source:
+        if _scenario.get("rejected_source_session") != rejected_key:
+            logger.warning(
+                "[DemoRunner] Ignoring control-plane session without a resolvable source"
+            )
+            _scenario["rejected_source_session"] = rejected_key
+        return False
+
+    _scenario.pop("rejected_source_session", None)
+    new_scenario = data.get("scenario", "normal")
+    new_video_time = data.get("video_time")
+
+    if new_scenario != _scenario.get("current"):
+        logger.info("[DemoRunner] Scenario changed: %s → %s", _scenario.get("current"), new_scenario)
+        _scenario["current"] = new_scenario
+    if new_video_time is not None:
+        _scenario["video_time"] = float(new_video_time)
+    if "video_time_updated_at" in data:
+        _scenario["video_time_updated_at"] = float(data["video_time_updated_at"])
+    elif new_video_time is not None:
+        _scenario["video_time_updated_at"] = time.time()
+
+    had_source = bool(_scenario.get("video_source"))
+    if new_source and (
+        new_source != _scenario.get("video_source")
+        or (new_session_id and new_session_id != _scenario.get("video_session_id"))
+    ):
+        if had_source:
+            logger.info("[DemoRunner] Video source/session changed; triggering restart")
+            _scenario["should_restart"] = True
+        _scenario["video_source"] = new_source
+    if new_session_id:
+        _scenario["video_session_id"] = new_session_id
+    return True
+
+
 def _poll_scenario(backend_url: str, camera_id: str, interval: float = 5.0) -> None:
     """
     Background thread: poll GET /demo/scenario every `interval` seconds
@@ -89,43 +284,16 @@ def _poll_scenario(backend_url: str, camera_id: str, interval: float = 5.0) -> N
         return
     while True:
         try:
-            resp = httpx.get(f"{backend_url}/api/dashboard/video/internal-sync", params={"camera_id": camera_id}, timeout=2.0)
+            token = os.environ.get("EDGE_AUTH_TOKEN", "")
+            headers = {"Authorization": f"Bearer {token}"} if token else {}
+            resp = httpx.get(
+                f"{backend_url}/api/dashboard/video/internal-sync",
+                params={"camera_id": camera_id},
+                headers=headers,
+                timeout=httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0),
+            )
             if resp.status_code == 200:
-                data = resp.json()
-                new_scenario = data.get("scenario", "normal")
-                new_source = data.get("video_source")
-                new_session_id = data.get("video_session_id")
-                new_video_time = data.get("video_time")
-
-                # The browser may explicitly upload a new local source for
-                # this camera. Preserve that source/session even in demo-loop
-                # mode so the worker analyzes the file the operator selected;
-                # the CLI vtest source remains the fallback only when no
-                # browser session is configured.
-
-                if new_scenario != _scenario["current"]:
-                    logger.info(
-                        f"[DemoRunner] Scenario changed: {_scenario['current']} → {new_scenario}"
-                    )
-                    _scenario["current"] = new_scenario
-                
-                if new_video_time is not None:
-                    _scenario["video_time"] = float(new_video_time)
-                if "video_time_updated_at" in data:
-                    _scenario["video_time_updated_at"] = float(data["video_time_updated_at"])
-                elif new_video_time is not None:
-                    _scenario["video_time_updated_at"] = time.time()
-                
-                # If a new video source is provided, and it's different, trigger restart
-                if new_source and (
-                    new_source != _scenario.get("video_source")
-                    or (new_session_id and new_session_id != _scenario.get("video_session_id"))
-                ):
-                    logger.info(f"[DemoRunner] Video source/session changed to {new_source} ({new_session_id}), triggering restart...")
-                    _scenario["should_restart"] = True
-                    _scenario["video_source"] = new_source
-                if new_session_id:
-                    _scenario["video_session_id"] = new_session_id
+                _apply_control_sync(_materialize_remote_source(resp.json(), camera_id))
                 _scenario["initialized"] = True
         except Exception as exc:
             logger.debug(f"[DemoRunner] Scenario poll failed (non-fatal): {exc}")
@@ -350,18 +518,15 @@ class DemoAwareEdgePipeline(EdgePipeline):
 
             last = None
             last_applied_target = None
+            last_rejected_seek = None
             while getattr(self, "_running", True):
                 s = _scenario["current"]
                 if s != last:
                     want_offline = (s == "offline")
                     try:
-                        logger.info("PAUSE_DIAG: entering set_simulate_offline")
                         self.sync_client.set_simulate_offline(want_offline)
-                        logger.info("PAUSE_DIAG: set_simulate_offline completed")
                         if hasattr(self, 'adapter'):
-                            logger.info("PAUSE_DIAG: about to set adapter.paused")
                             self.adapter.paused = (s == "paused")
-                            logger.info(f"PAUSE_DIAG: adapter.paused set successfully, value={self.adapter.paused}")
                         logger.info(
                             f"[DemoRunner] sync_client.simulate_offline → {want_offline}, adapter.paused → {s == 'paused'}"
                         )
@@ -375,25 +540,36 @@ class DemoAwareEdgePipeline(EdgePipeline):
                     continue
 
                 # Check for explicit seek requests
-                logger.info("PAUSE_DIAG: entering seek section")
                 target_time = _scenario.get("video_time")
-                target_updated = _scenario.get("video_time_updated_at", time.time())
-                
+
                 if target_time is not None and hasattr(self, 'adapter'):
-                    if s == "paused":
-                        extrapolated_target = target_time
-                    else:
-                        if target_updated == 0.0:
-                            extrapolated_target = target_time
-                        else:
-                            extrapolated_target = target_time + (time.time() - target_updated)
-                        
+                    source_kind = getattr(self.adapter, "source_kind", "OTHER")
+                    duration_seconds = getattr(self.adapter, "duration_seconds", None)
+                    seek_target = _control_seek_target(
+                        target_time, source_kind, duration_seconds
+                    )
+                    if seek_target is None:
+                        if source_kind == "LOCAL_FINITE_FILE" and duration_seconds:
+                            rejected_seek = (target_time, duration_seconds)
+                            if rejected_seek != last_rejected_seek:
+                                logger.warning(
+                                    "[DemoRunner] Ignoring out-of-range control-plane seek for finite source "
+                                    "(requested=%s, duration=%.3fs)",
+                                    target_time,
+                                    duration_seconds,
+                                )
+                                last_rejected_seek = rejected_seek
+                        time.sleep(1.0)
+                        continue
+
+                    last_rejected_seek = None
+
                     # Only seek if the difference is significant (> 2.0s) to avoid micro-stutters
                     current_edge_time = getattr(self.adapter, "_last_video_time", 0.0)
-                    drift = extrapolated_target - current_edge_time
+                    drift = seek_target - current_edge_time
                     if abs(drift) > 2.0 and target_time != last_applied_target:
-                        logger.info(f"[DemoRunner] Seeking Edge to match Browser time: {extrapolated_target}s (drift: {drift:.2f}s)")
-                        self.adapter.seek_to(extrapolated_target)
+                        logger.info(f"[DemoRunner] Seeking Edge to match Browser time: {seek_target}s (drift: {drift:.2f}s)")
+                        self.adapter.seek_to(seek_target)
                         last_applied_target = target_time
                     # DO NOT clear _scenario["video_time"] so we can continue tracking drift
 
@@ -462,7 +638,6 @@ def run_demo_pipeline(
     _scenario["should_restart"] = False
 
     while True:
-        demo_loop_enabled = os.environ.get("DEMO_LOOP_VIDEO", "true").lower() == "true"
         # The CLI replay is the fallback, but an explicit browser upload must
         # take precedence so Start/Analyze uses the selected local file.
         uploaded_source = _scenario.get("video_source")
@@ -470,7 +645,7 @@ def run_demo_pipeline(
         use_uploaded_source = bool(uploaded_source and uploaded_session and uploaded_source != video_source)
         current_source = uploaded_source if use_uploaded_source else video_source
         current_session = uploaded_session if use_uploaded_source else None
-        session_suffix = f"_{current_session}" if current_session else ""
+        state_paths = _runtime_state_paths(camera_id, backend_url, current_session)
         config = {
             "camera_id": camera_id,
             "camera_name": camera_id,
@@ -483,15 +658,16 @@ def run_demo_pipeline(
             "backend_url": backend_url,
             "auth_token": os.environ.get("EDGE_AUTH_TOKEN", ""),
             "zones_config_path": zones_config_path,
-            "key_dir": "certs/edge",
+            "key_dir": os.environ.get("EDGE_KEY_DIR", "certs/edge"),
+            "allow_key_generation": os.environ.get("EDGE_ALLOW_KEY_GENERATION", "false").lower() == "true",
             # Per-camera chain/sync DBs so two simultaneous pipelines don't collide
-            "chain_db_path": f"edge/data/chain_{camera_id}.db",
+            "chain_db_path": state_paths["chain_db_path"],
             # A finite upload gets its own durable outbox. This preserves old
             # unsent evidence without allowing a large legacy backlog to
             # starve the active operator session.
-            "sync_db_path": f"edge/data/sync_{camera_id}{session_suffix}.db",
-            "clip_dir": "edge/data/clips",
-            "metrics_json_path": f"edge/data/metrics_{camera_id}.json",
+            "sync_db_path": state_paths["sync_db_path"],
+            "clip_dir": state_paths["clip_dir"],
+            "metrics_json_path": state_paths["metrics_json_path"],
             "fps_declared": 30.0,
             "simulate_frozen": False,
             "simulate_night": False,

@@ -240,7 +240,11 @@ class EdgePipeline:
             private_key_path=os.path.join(key_dir, f"{self.camera_id}.key"),
             public_key_path=os.path.join(key_dir, f"{self.camera_id}.pub"),
         )
-        self.key_manager.load_or_generate()
+        allow_key_generation = config.get(
+            "allow_key_generation",
+            os.environ.get("EDGE_ALLOW_KEY_GENERATION", "false").lower() == "true",
+        )
+        self.key_manager.load_or_generate(allow_generate=allow_key_generation)
 
         chain_path = config.get("chain_db_path", f"edge/data/chain_{self.camera_id}.db")
         self.chain_store = EvidenceChainStore(chain_path)
@@ -407,9 +411,13 @@ class EdgePipeline:
         verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
         if verify is False:
             verify = True # Should be caught by sync_client, but enforce here
-            
+
         client = httpx.Client(
-            timeout=1.0,
+            # A telemetry item can contain two JPEGs.  One second is a valid
+            # fast-fail budget for a tiny heartbeat but not for an HTTPS frame
+            # upload to a hosted control plane, where a normal upload can take
+            # longer without being a transport failure.
+            timeout=httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0),
             verify=verify,
             cert=self.sync_client._client_cert
         )
@@ -421,34 +429,74 @@ class EdgePipeline:
                     clean_preview = payload.pop("_clean_preview_jpeg_base64", None)
                     annotated_preview = payload.pop("_annotated_preview_jpeg_base64", None)
                     if clean_preview and annotated_preview:
-                        frame_response = client.post(
-                            f"{self._backend_url}/system/telemetry/frame",
-                            json={
-                                "camera_id": payload["camera_id"],
-                                "analysis_session_id": payload.get("analysis_session_id"),
-                                "frame_index": payload.get("frame_index"),
-                                "source_timestamp": payload.get("source_timestamp"),
-                                "processed_timestamp": payload.get("processed_timestamp"),
-                                "person_count": payload.get("person_count", 0),
-                                "vehicle_count": payload.get("vehicle_count", 0),
-                                "track_count": payload.get("track_count", 0),
-                                "clean_jpeg_base64": clean_preview,
-                                "annotated_jpeg_base64": annotated_preview,
-                            },
-                            headers=self._edge_auth_headers(),
-                        )
-                        if not frame_response.is_success:
+                        try:
+                            frame_response = client.post(
+                                f"{self._backend_url}/system/telemetry/frame",
+                                json={
+                                    "camera_id": payload["camera_id"],
+                                    "analysis_session_id": payload.get("analysis_session_id"),
+                                    "frame_index": payload.get("frame_index"),
+                                    "source_timestamp": payload.get("source_timestamp"),
+                                    "processed_timestamp": payload.get("processed_timestamp"),
+                                    "person_count": payload.get("person_count", 0),
+                                    "vehicle_count": payload.get("vehicle_count", 0),
+                                    "track_count": payload.get("track_count", 0),
+                                    "clean_jpeg_base64": clean_preview,
+                                    "annotated_jpeg_base64": annotated_preview,
+                                },
+                                headers=self._edge_auth_headers(),
+                            )
+                            if frame_response.status_code != 202:
+                                payload["preview_available"] = False
+                                self._record_telemetry_transport_error(
+                                    "frame", status_code=frame_response.status_code
+                                )
+                        except httpx.RequestError as exc:
                             payload["preview_available"] = False
-                    client.post(telemetry_url, json=payload, headers=self._edge_auth_headers())
-                except httpx.RequestError:
-                    self._telemetry_metrics["errors"] += 1
-                self.telemetry_queue.task_done()
+                            self._record_telemetry_transport_error("frame", exception=exc)
+
+                    try:
+                        telemetry_response = client.post(
+                            telemetry_url, json=payload, headers=self._edge_auth_headers()
+                        )
+                        if telemetry_response.status_code != 202:
+                            self._record_telemetry_transport_error(
+                                "snapshot", status_code=telemetry_response.status_code
+                            )
+                    except httpx.RequestError as exc:
+                        self._record_telemetry_transport_error("snapshot", exception=exc)
+                finally:
+                    self.telemetry_queue.task_done()
             except Empty:
                 continue
             except Exception as e:
                 self._telemetry_metrics["errors"] += 1
-                logger.error(f"[Telemetry] Unexpected error: {e}")
+                logger.error("[Telemetry] Unexpected worker error: %s: %s", type(e).__name__, e)
         client.close()
+
+    def _record_telemetry_transport_error(
+        self,
+        channel: str,
+        *,
+        status_code: Optional[int] = None,
+        exception: Optional[Exception] = None,
+    ) -> None:
+        """Count and safely identify a telemetry transport failure.
+
+        Never log headers, credentials, or the JPEG/telemetry payload.  The
+        channel plus status or exception type is sufficient to distinguish a
+        rejected request from a connection/read/write timeout in field logs.
+        """
+        self._telemetry_metrics["errors"] += 1
+        if status_code is not None:
+            logger.warning("[Telemetry] %s upload rejected: HTTP %s", channel, status_code)
+        elif exception is not None:
+            logger.warning(
+                "[Telemetry] %s upload transport error: %s: %s",
+                channel,
+                type(exception).__name__,
+                exception,
+            )
 
     def _run_frame_loop(self) -> None:
         """Main frame processing loop."""
@@ -517,13 +565,15 @@ class EdgePipeline:
         # first frame so telemetry and newly persisted events cannot be mixed
         # with the previous pass through the file.
         self.stream_id = str(uuid.uuid4())
-        self.packager.stream_id = self.stream_id
+        if hasattr(self, "packager"):
+            self.packager.stream_id = self.stream_id
         self._telemetry_sequence = 0
         self._last_telemetry_time = 0.0
-        while not self.telemetry_queue.empty():
+        telemetry_queue = getattr(self, "telemetry_queue", None)
+        while telemetry_queue is not None and not telemetry_queue.empty():
             try:
-                self.telemetry_queue.get_nowait()
-                self.telemetry_queue.task_done()
+                telemetry_queue.get_nowait()
+                telemetry_queue.task_done()
             except Empty:
                 break
 
@@ -608,6 +658,14 @@ class EdgePipeline:
         self._last_video_time = meta.video_time_seconds
         self._last_frame_width = meta.width
         self._last_frame_height = meta.height
+
+        # The adapter learns the authoritative stream FPS only after opening
+        # the source.  Health must compare processing cadence with that source
+        # rate, not with a stale caller default (for example 30 against a
+        # 10-FPS replay file).
+        source_fps = getattr(meta, "fps_declared", None)
+        if isinstance(source_fps, (int, float)) and source_fps > 0:
+            self.health_monitor.fps_declared = float(source_fps)
 
         # --- Performance instrumentation: t0 (frame received) ---
         t_frame_start = time.perf_counter()

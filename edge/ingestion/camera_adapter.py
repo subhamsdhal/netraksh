@@ -87,6 +87,7 @@ class CameraAdapter:
         self.simulate_frozen = simulate_frozen or os.environ.get("SIMULATE_FROZEN_CAMERA", "").lower() == "true"
         self.simulate_night = simulate_night or os.environ.get("SIMULATE_NIGHT_CONDITION", "").lower() == "true"
         self._fps_declared: float = target_fps or 25.0
+        self._duration_seconds: Optional[float] = None
         self._width: int = 640
         self._height: int = 480
         self._frozen_frame: Optional[np.ndarray] = None
@@ -133,6 +134,11 @@ class CameraAdapter:
     @property
     def demo_replay(self) -> bool:
         return self.source_kind == "LOCAL_FINITE_FILE" and self.loop_video
+
+    @property
+    def duration_seconds(self) -> Optional[float]:
+        """Native duration of an opened finite source, when available."""
+        return self._duration_seconds
 
     def _set_state(self, new_state: StreamState):
         with self._state_lock:
@@ -206,6 +212,12 @@ class CameraAdapter:
                 
                 if cap is not None and cap.isOpened():
                     self._fps_declared = cap.get(cv2.CAP_PROP_FPS) or 25.0
+                    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                    self._duration_seconds = (
+                        frame_count / self._fps_declared
+                        if is_video_file and frame_count > 0 and self._fps_declared > 0
+                        else None
+                    )
                     self._width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                     self._height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                     self._set_state(StreamState.CONNECTED)

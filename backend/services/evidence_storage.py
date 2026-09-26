@@ -133,6 +133,11 @@ class EvidenceStorageBackend(ABC):
         """Backward compatibility alias for get_object."""
         return self.get_object(ref)
 
+    def put_file(self, object_key: str, file_path: str, content_type: str = "application/octet-stream") -> None:
+        """Upload a file without requiring callers to retain its bytes."""
+        with open(file_path, "rb") as source:
+            self.put_object(object_key, source.read(), content_type)
+
 
 class LocalFilesystemStorage(EvidenceStorageBackend):
     def __init__(self, clips_dir: str):
@@ -179,6 +184,16 @@ class LocalFilesystemStorage(EvidenceStorageBackend):
         except Exception as e:
             raise StorageUploadError(f"Failed to write local object: {str(e)}")
 
+    def put_file(self, object_key: str, file_path: str, content_type: str = "application/octet-stream") -> None:
+        import shutil
+
+        safe_path = self._get_safe_path(object_key)
+        os.makedirs(os.path.dirname(safe_path), exist_ok=True)
+        try:
+            shutil.copyfile(file_path, safe_path)
+        except Exception as e:
+            raise StorageUploadError(f"Failed to copy local object: {str(e)}")
+
     def get_object(self, object_key: str) -> bytes:
         safe_path = self._get_safe_path(object_key)
         if not os.path.exists(safe_path):
@@ -212,6 +227,7 @@ class S3Storage(EvidenceStorageBackend):
     def __init__(self, endpoint: str, bucket: str, access_key: str, secret_key: str, region: str):
         try:
             import boto3
+            from botocore.config import Config
             from botocore.exceptions import ClientError as _ClientError
         except ImportError:
             raise ImportError(
@@ -225,7 +241,8 @@ class S3Storage(EvidenceStorageBackend):
             endpoint_url=endpoint or None,
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
-            region_name=region or "us-east-1"
+            region_name=region or "us-east-1",
+            config=Config(s3={"addressing_style": "path"}) if endpoint else None,
         )
 
     def put_object(self, object_key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
@@ -238,6 +255,17 @@ class S3Storage(EvidenceStorageBackend):
             )
         except self._ClientError as e:
             raise StorageUploadError(f"Failed to upload to S3: {str(e)}")
+
+    def put_file(self, object_key: str, file_path: str, content_type: str = "application/octet-stream") -> None:
+        try:
+            self.s3.upload_file(
+                file_path,
+                self.bucket,
+                object_key,
+                ExtraArgs={"ContentType": content_type},
+            )
+        except self._ClientError as e:
+            raise StorageUploadError(f"Failed to upload file to S3: {str(e)}")
 
     def get_object(self, object_key: str) -> bytes:
         try:

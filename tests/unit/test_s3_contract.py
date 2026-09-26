@@ -89,3 +89,15 @@ def test_s3_generate_signed_url(s3_storage):
     assert 'test-bucket' in url
     assert 'test-key' in url
     assert 'Signature=' in url or 'X-Amz-Signature=' in url
+
+
+def test_s3_custom_endpoint_uses_path_style_addressing():
+    storage = S3Storage(
+        endpoint="https://project-ref.storage.supabase.co/storage/v1/s3",
+        bucket="test-bucket",
+        access_key="test",
+        secret_key="test",
+        region="ap-south-1",
+    )
+
+    assert storage.s3.meta.config.s3["addressing_style"] == "path"
