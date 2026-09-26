@@ -292,6 +292,17 @@ export default function Dashboard() {
                 });
               }
             }
+          } else {
+            // A prior browser-only upload cannot be resumed in the
+            // storage-backed deployment. Remove only that stale slot record;
+            // do not leave its obsolete session ID able to control the cloud
+            // worker on a subsequent start/stop action.
+            setSlotSources((current) => {
+              if (!current[cameraId]) return current;
+              const next = { ...current };
+              delete next[cameraId];
+              return next;
+            });
           }
         } catch (_) { /* a missing scoped source is an honest empty state */ }
       }));

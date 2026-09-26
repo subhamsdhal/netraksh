@@ -3,6 +3,8 @@ import uuid
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from backend.services import video_storage
 from backend.services.evidence_storage import EvidenceNotFoundError
 
@@ -92,3 +94,23 @@ def test_internal_sync_empty_camera_control_returns_200_shape(monkeypatch):
     result = asyncio.run(dashboard.get_internal_sync(request))
     assert result["camera_id"] == "cam-border-01"
     assert "download_url" not in result
+
+
+def test_scenario_rejects_obsolete_session_when_no_durable_control_exists(monkeypatch):
+    """An expired browser slot must not pause the configured cloud replay."""
+    from backend.api import dashboard
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "get_active_session", lambda camera_id: None)
+    payload = {
+        "camera_id": "cam-border-01",
+        "video_session_id": "obsolete-browser-session",
+        "scenario": "paused",
+        "video_time": 0,
+    }
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(dashboard.post_video_scenario(payload))
+
+    assert exc.value.status_code == 409

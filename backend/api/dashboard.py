@@ -321,6 +321,22 @@ async def post_video_scenario(
     """
     requested = payload.get("scenario")
     camera_id = payload.get("camera_id")
+    active_session = None
+    if _durable_video_enabled() and camera_id:
+        active_session = get_active_session(camera_id)
+        requested_session_id = payload.get("video_session_id")
+        # A browser can retain a legacy local-storage slot after its upload
+        # was never persisted to object storage.  Do not let that obsolete
+        # identifier pause or seek the configured cloud replay.  A real,
+        # activated durable session remains fully controllable as before.
+        if requested_session_id and (
+            active_session is None
+            or requested_session_id != active_session.get("session_id")
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Video session is not the active durable source for this camera",
+            )
     target = _demo_state.setdefault("camera_sessions", {}).setdefault(camera_id, {}) if camera_id else _demo_state
     if requested in {"normal", "fog", "failure", "offline", "paused", "stopped"}:
         target["scenario"] = requested
@@ -336,7 +352,8 @@ async def post_video_scenario(
             for key in ("scenario", "video_time", "video_time_updated_at")
             if key in target
         }
-        update_active_session(camera_id, changes)
+        if active_session is not None:
+            update_active_session(camera_id, changes)
     edge_status = "not_requested"
     if camera_id and requested in {"normal", "paused"}:
         edge_status = await _wake_edge_service(camera_id)
