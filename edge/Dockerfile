@@ -17,7 +17,7 @@ RUN groupadd -r netraksh && useradd -r -g netraksh -d /tmp/netraksh-edge -s /usr
 
 COPY edge/requirements-cloud.txt /app/requirements-cloud.txt
 RUN pip install --no-cache-dir -r requirements-cloud.txt \
-    && python -c "import cv2; assert hasattr(cv2, 'face') and hasattr(cv2.face, 'LBPHFaceRecognizer_create')" \
+    && python -c "import cv2, yaml; assert hasattr(cv2, 'face') and hasattr(cv2.face, 'LBPHFaceRecognizer_create')" \
     && ! python -c "import torch" \
     && ! python -c "import easyocr" \
     && ! python -c "import ultralytics"

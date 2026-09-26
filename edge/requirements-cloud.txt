@@ -4,6 +4,7 @@ opencv-contrib-python-headless==4.10.0.84
 lapx==0.5.11
 numpy==1.26.4
 onnxruntime==1.20.1
+PyYAML==6.0.2
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 cryptography>=41.0.0
