@@ -37,6 +37,7 @@ export function scenarioAction(cameraId, sourceState, scenario, wakeEdge = false
     video_time: 0,
   };
   if (wakeEdge) payload.wake_edge = true;
+  if (scenario === 'paused' || scenario === 'stopped') payload.control_action = 'stop';
   if (sourceState.sourceMode === 'durable') {
     if (!sourceState.sourceId) return null;
     payload.video_session_id = sourceState.sourceId;

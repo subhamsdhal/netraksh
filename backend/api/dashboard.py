@@ -391,8 +391,14 @@ async def post_video_scenario(
     requested = payload.get("scenario")
     camera_id = payload.get("camera_id")
     requested_mode = payload.get("source_mode")
+    control_action = payload.get("control_action")
+    is_explicit_start = requested == "normal" and payload.get("wake_edge") is True
+    is_explicit_stop = requested in {"paused", "stopped"} and control_action == "stop"
+    is_authoritative_control = is_explicit_start or is_explicit_stop
     if requested_mode not in {None, "bundled", "durable"}:
         raise HTTPException(status_code=400, detail="Invalid video source mode")
+    if control_action not in {None, "stop"}:
+        raise HTTPException(status_code=400, detail="Invalid camera control action")
     active_session = None
     if _durable_video_enabled() and camera_id:
         active_session = get_valid_active_session(camera_id)
@@ -401,12 +407,12 @@ async def post_video_scenario(
         # was never persisted to object storage.  Do not let that obsolete
         # identifier pause or seek the configured cloud replay.  A real,
         # activated durable session remains fully controllable as before.
-        if requested_mode == "bundled" and requested_session_id:
+        if is_authoritative_control and requested_mode == "bundled" and requested_session_id:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Bundled video source must not include a durable session ID",
             )
-        if requested_mode == "durable" and (
+        if is_authoritative_control and requested_mode == "durable" and (
             not requested_session_id
             or active_session is None
             or requested_session_id != active_session.get("session_id")
@@ -415,7 +421,7 @@ async def post_video_scenario(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Video session is not the active durable source for this camera",
             )
-        if requested_mode is None and requested_session_id and (
+        if is_authoritative_control and requested_mode is None and requested_session_id and (
             active_session is None
             or requested_session_id != active_session.get("session_id")
         ):
@@ -423,19 +429,23 @@ async def post_video_scenario(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Video session is not the active durable source for this camera",
             )
-    if requested_mode == "bundled" and camera_id:
+    if is_authoritative_control and requested_mode == "bundled" and camera_id:
         target = _bundled_control(camera_id)
     else:
         target = _demo_state.setdefault("camera_sessions", {}).setdefault(camera_id, {}) if camera_id else _demo_state
-    if requested in {"normal", "fog", "failure", "offline", "paused", "stopped"}:
+    if is_authoritative_control:
         target["scenario"] = requested
-    if requested_mode == "bundled":
+    if is_authoritative_control and requested_mode == "bundled":
         target["source_mode"] = "bundled"
         target["video_source"] = _BUNDLED_SOURCE
         target["video_session_id"] = None
-    elif "video_session_id" in payload:
+    elif is_authoritative_control and "video_session_id" in payload:
         target["video_session_id"] = payload["video_session_id"]
-    if "video_time" in payload:
+    session_matches = (
+        active_session is not None
+        and payload.get("video_session_id") == active_session.get("session_id")
+    )
+    if "video_time" in payload and (is_authoritative_control or session_matches):
         target["video_time"] = float(payload["video_time"])
         import time
         target["video_time_updated_at"] = time.time()
@@ -445,14 +455,14 @@ async def post_video_scenario(
             for key in ("scenario", "video_time", "video_time_updated_at")
             if key in target
         }
-        if active_session is not None and requested_mode != "bundled":
+        if active_session is not None and requested_mode != "bundled" and (is_authoritative_control or session_matches):
             update_active_session(camera_id, changes)
     edge_status = "not_requested"
     # Browser playback reports its current time every two seconds.  Those
     # synchronization heartbeats (including pause/metadata events) must never
     # keep a sleeping free-tier worker awake.  Waking is an explicit operator
     # action, requested only by START / ANALYZE in the dashboard.
-    if camera_id and requested == "normal" and payload.get("wake_edge") is True:
+    if camera_id and is_explicit_start:
         edge_status = await _wake_edge_service(camera_id)
     return {"status": "success", "state": _demo_state, "edge_status": edge_status}
 

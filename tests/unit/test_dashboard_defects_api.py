@@ -119,6 +119,10 @@ def test_playback_sync_does_not_wake_edge(monkeypatch):
 
     monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: False)
     monkeypatch.setattr(dashboard, "_wake_edge_service", fake_wake)
+    previous = dict(dashboard._demo_state)
+    dashboard._demo_state["camera_sessions"] = {
+        "cam-checkpoint-01": {"source_mode": "bundled", "scenario": "paused"},
+    }
     asyncio.run(dashboard.post_video_scenario({
         "camera_id": "cam-checkpoint-01", "scenario": "normal", "video_time": 2.0,
     }, _user={}))
@@ -126,6 +130,9 @@ def test_playback_sync_does_not_wake_edge(monkeypatch):
         "camera_id": "cam-checkpoint-01", "scenario": "paused", "video_time": 2.0,
     }, _user={}))
     assert calls == []
+    assert dashboard._demo_state["camera_sessions"]["cam-checkpoint-01"]["scenario"] == "paused"
+    dashboard._demo_state.clear()
+    dashboard._demo_state.update(previous)
 
 
 def test_explicit_start_wakes_edge_once(monkeypatch):
@@ -191,6 +198,7 @@ def test_bundled_camera2_stop_does_not_mutate_camera1(monkeypatch):
             "camera_id": "cam-checkpoint-01",
             "source_mode": "bundled",
             "scenario": "paused",
+            "control_action": "stop",
         }, _user={}))
         sessions = dashboard._demo_state["camera_sessions"]
         assert sessions["cam-checkpoint-01"]["scenario"] == "paused"
@@ -261,6 +269,7 @@ def test_durable_mode_requires_the_exact_active_session(monkeypatch):
             "camera_id": "cam-checkpoint-01",
             "source_mode": "durable",
             "scenario": "normal",
+            "wake_edge": True,
         }
         if session_id is not None:
             payload["video_session_id"] = session_id
@@ -281,6 +290,7 @@ def test_matching_durable_session_remains_controllable(monkeypatch):
         "source_mode": "durable",
         "video_session_id": "real-session",
         "scenario": "paused",
+        "control_action": "stop",
         "video_time": 3,
     }, _user={}))
 

@@ -44,6 +44,7 @@ describe('dashboard video control ownership', () => {
       source_mode: 'durable',
       video_session_id: 'session-1',
       scenario: 'paused',
+      control_action: 'stop',
     });
   });
 

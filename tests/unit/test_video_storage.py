@@ -140,8 +140,10 @@ def test_scenario_rejects_obsolete_session_when_no_durable_control_exists(monkey
     monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: None)
     payload = {
         "camera_id": "cam-border-01",
+        "source_mode": "durable",
         "video_session_id": "obsolete-browser-session",
         "scenario": "paused",
+        "control_action": "stop",
         "video_time": 0,
     }
 
