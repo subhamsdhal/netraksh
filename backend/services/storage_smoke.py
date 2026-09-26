@@ -42,14 +42,23 @@ def run_startup_storage_smoke_test(
         metadata = storage.head_object(object_key)
         if metadata.get("ContentLength") != len(_PAYLOAD):
             raise RuntimeError("temporary object length mismatch")
+        logger.info("Storage smoke test head=PASS")
         if storage.get_object(object_key) != _PAYLOAD:
             raise RuntimeError("temporary object readback mismatch")
+        logger.info("Storage smoke test get=PASS")
 
         signed_url = storage.generate_signed_url(object_key, expires_in=60)
         if not signed_url:
             raise RuntimeError("signed URL generation returned no URL")
         response = fetch(signed_url)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError:
+            # The status is operationally useful and contains no credential
+            # material.  Do not log the exception because it may embed the
+            # pre-signed URL.
+            logger.error("Storage smoke test signed_download=FAIL status=%s", response.status_code)
+            raise
         if response.content != _PAYLOAD:
             raise RuntimeError("signed download content mismatch")
         logger.info("Storage smoke test signed_download=PASS status=%s", response.status_code)
@@ -61,9 +70,10 @@ def run_startup_storage_smoke_test(
     finally:
         try:
             storage.delete_object(object_key)
+            logger.info("Storage smoke test delete=PASS")
             if storage.object_exists(object_key):
                 raise RuntimeError("temporary object remains after cleanup")
-            logger.info("Storage smoke test cleanup=PASS")
+            logger.info("Storage smoke test absent_after_delete=PASS")
         except Exception as exc:
             logger.error("Storage smoke test cleanup=FAIL operation=%s", type(exc).__name__)
             success = False

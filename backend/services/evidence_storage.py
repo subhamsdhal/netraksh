@@ -280,7 +280,14 @@ class S3Storage(EvidenceStorageBackend):
             aws_access_key_id=access_key,
             aws_secret_access_key=secret_key,
             region_name=region or "us-east-1",
-            config=Config(s3={"addressing_style": "path"}) if endpoint else None,
+            # Supabase's S3 endpoint requires AWS Signature Version 4 for
+            # presigned URLs as well as normal client requests.  Pinning the
+            # signing version prevents botocore from selecting legacy query
+            # signing for a custom endpoint in us-east-1.
+            config=Config(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+            ) if endpoint else None,
         )
 
     def put_object(self, object_key: str, data: bytes, content_type: str = "application/octet-stream") -> None:

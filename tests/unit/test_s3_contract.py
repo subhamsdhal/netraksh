@@ -144,3 +144,4 @@ def test_s3_custom_endpoint_uses_path_style_addressing():
     )
 
     assert storage.s3.meta.config.s3["addressing_style"] == "path"
+    assert storage.s3.meta.config.signature_version == "s3v4"
