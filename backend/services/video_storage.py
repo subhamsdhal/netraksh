@@ -108,6 +108,32 @@ def activate_session(camera_id: str, session_id: str) -> dict[str, Any]:
     return control
 
 
+def activate_bundled_source(
+    camera_id: str,
+    *,
+    scenario: str,
+    video_source: str,
+    video_time: float = 0.0,
+    video_time_updated_at: float = 0.0,
+) -> dict[str, Any]:
+    """Persist camera-scoped control for media bundled in the edge image.
+
+    This record deliberately has no session ID or object key.  It is control
+    plane state only; the bundled video is never uploaded to object storage.
+    """
+    control = {
+        "camera_id": _safe_camera_id(camera_id),
+        "source_mode": "bundled",
+        "video_source": video_source,
+        "video_session_id": None,
+        "scenario": scenario,
+        "video_time": float(video_time),
+        "video_time_updated_at": float(video_time_updated_at),
+    }
+    _put_json(control_key(camera_id), control)
+    return control
+
+
 def get_active_session(camera_id: str) -> dict[str, Any] | None:
     return _get_json(control_key(camera_id))
 

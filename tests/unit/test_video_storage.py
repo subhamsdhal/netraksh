@@ -78,6 +78,23 @@ def test_active_video_control_updates_without_changing_source(monkeypatch, tmp_p
     assert after["video_time"] == 12.5
 
 
+def test_bundled_control_is_persisted_without_media_or_fake_session(monkeypatch):
+    storage = MemoryStorage()
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)
+
+    control = video_storage.activate_bundled_source(
+        "cam-checkpoint-01",
+        scenario="normal",
+        video_source="demo/videos/uploaded_demo.mp4",
+        video_time=0,
+    )
+
+    assert control["source_mode"] == "bundled"
+    assert control["video_session_id"] is None
+    assert "source_object_key" not in control
+    assert set(storage.objects) == {video_storage.control_key("cam-checkpoint-01")}
+
+
 def test_get_active_session_returns_none_when_control_object_is_missing(monkeypatch):
     class EmptyStorage:
         def get_object(self, key):

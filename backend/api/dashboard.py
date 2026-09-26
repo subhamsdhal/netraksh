@@ -40,7 +40,9 @@ from fastapi.responses import FileResponse, RedirectResponse
 from backend.config import settings
 from backend.security.auth import require_edge_auth, require_operator_or_admin
 from backend.services.video_storage import (
+    activate_bundled_source,
     activate_session,
+    get_active_session,
     get_valid_active_session,
     get_uploaded_session,
     signed_media_url,
@@ -140,7 +142,18 @@ def _bundled_control(camera_id: str | None) -> dict:
 
 def _selected_bundled_control(camera_id: str | None) -> dict | None:
     target = (_demo_state.get("camera_sessions") or {}).get(camera_id)
-    return target if target and target.get("source_mode") == "bundled" else None
+    if target and target.get("source_mode") == "bundled":
+        return target
+    if not camera_id or not _durable_video_enabled():
+        return None
+    stored = get_active_session(camera_id)
+    if not stored or stored.get("source_mode") != "bundled":
+        return None
+    # Mirror the durable control record into process memory for legacy callers
+    # and for the response shape returned by the control endpoint.
+    target = _bundled_control(camera_id)
+    target.update(stored)
+    return target
 
 
 async def _wake_edge_service(camera_id: str | None) -> str:
@@ -449,6 +462,15 @@ async def post_video_scenario(
         target["video_time"] = float(payload["video_time"])
         import time
         target["video_time_updated_at"] = time.time()
+    if _durable_video_enabled() and camera_id and is_authoritative_control and requested_mode == "bundled":
+        stored = activate_bundled_source(
+            camera_id,
+            scenario=target["scenario"],
+            video_source=_BUNDLED_SOURCE,
+            video_time=target.get("video_time", 0.0),
+            video_time_updated_at=target.get("video_time_updated_at", 0.0),
+        )
+        target.update(stored)
     if _durable_video_enabled() and camera_id:
         changes = {
             key: target[key]
@@ -464,6 +486,16 @@ async def post_video_scenario(
     # action, requested only by START / ANALYZE in the dashboard.
     if camera_id and is_explicit_start:
         edge_status = await _wake_edge_service(camera_id)
+    if is_authoritative_control:
+        logger.info(
+            "[Dashboard] Camera control camera_id=%s source_mode=%s action=%s scenario=%s wake=%s edge_status=%s",
+            camera_id,
+            requested_mode,
+            "start" if is_explicit_start else "stop",
+            requested,
+            is_explicit_start,
+            edge_status,
+        )
     return {"status": "success", "state": _demo_state, "edge_status": edge_status}
 
 

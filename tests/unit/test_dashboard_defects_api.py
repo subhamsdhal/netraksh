@@ -161,6 +161,7 @@ def test_bundled_camera2_start_needs_no_session_and_wakes_only_camera2(monkeypat
 
     monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
     monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: None)
+    monkeypatch.setattr(dashboard, "activate_bundled_source", lambda camera_id, **control: {"camera_id": camera_id, "source_mode": "bundled", "video_session_id": None, **control})
     monkeypatch.setattr(dashboard, "_wake_edge_service", fake_wake)
     previous = dict(dashboard._demo_state)
     try:
@@ -188,6 +189,7 @@ def test_bundled_camera2_start_needs_no_session_and_wakes_only_camera2(monkeypat
 def test_bundled_camera2_stop_does_not_mutate_camera1(monkeypatch):
     monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
     monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: None)
+    monkeypatch.setattr(dashboard, "activate_bundled_source", lambda camera_id, **control: {"camera_id": camera_id, "source_mode": "bundled", "video_session_id": None, **control})
     previous = dict(dashboard._demo_state)
     try:
         dashboard._demo_state["camera_sessions"] = {
@@ -211,6 +213,7 @@ def test_bundled_camera2_stop_does_not_mutate_camera1(monkeypatch):
 def test_bundled_current_video_and_internal_sync_never_sign_media(monkeypatch):
     monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
     monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: None)
+    monkeypatch.setattr(dashboard, "get_active_session", lambda camera_id: None)
     monkeypatch.setattr(dashboard, "signed_media_url", lambda *_args, **_kwargs: pytest.fail("bundled mode must not sign media"))
     request = Request({"type": "http", "query_string": b"camera_id=cam-checkpoint-01"})
 
@@ -234,6 +237,7 @@ def test_explicit_bundled_selection_overrides_an_old_valid_durable_control(monke
     }
     monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
     monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: durable)
+    monkeypatch.setattr(dashboard, "get_active_session", lambda camera_id: durable)
     monkeypatch.setattr(dashboard, "signed_media_url", lambda *_args, **_kwargs: pytest.fail("selected bundled mode must not sign durable media"))
     previous = dict(dashboard._demo_state)
     try:
@@ -304,3 +308,28 @@ def test_bundled_default_has_no_fake_session_uuid():
 
     assert demo._state["source_mode"] == "bundled"
     assert demo._state["video_session_id"] is None
+
+
+def test_bundled_control_survives_process_memory_reset(monkeypatch):
+    stored = {
+        "camera_id": "cam-checkpoint-01",
+        "source_mode": "bundled",
+        "video_source": dashboard._BUNDLED_SOURCE,
+        "video_session_id": None,
+        "scenario": "normal",
+        "video_time": 0.0,
+        "video_time_updated_at": 1.0,
+    }
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "get_active_session", lambda camera_id: stored if camera_id == "cam-checkpoint-01" else None)
+    previous = dict(dashboard._demo_state)
+    try:
+        dashboard._demo_state["camera_sessions"] = {}
+        request = Request({"type": "http", "query_string": b"camera_id=cam-checkpoint-01"})
+        sync = asyncio.run(dashboard.get_internal_sync(request))
+        assert sync["source_mode"] == "bundled"
+        assert sync["scenario"] == "normal"
+        assert sync["video_session_id"] is None
+    finally:
+        dashboard._demo_state.clear()
+        dashboard._demo_state.update(previous)
