@@ -8,6 +8,7 @@ the listener is bound, which keeps cold-start health checks responsive.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -31,17 +32,37 @@ def _materialize_cloud_keys(camera_id: str) -> None:
     os.makedirs(key_dir, exist_ok=True)
     private_b64 = os.environ.get("EDGE_PRIVATE_KEY_B64", "").strip()
     aes_b64 = os.environ.get("EDGE_EVIDENCE_KEY_B64", "").strip()
-    if not private_b64 or not aes_b64:
-        raise RuntimeError("EDGE_PRIVATE_KEY_B64 and EDGE_EVIDENCE_KEY_B64 are required")
     private_path = os.path.join(key_dir, f"{camera_id}.key")
     aes_path = os.path.join(key_dir, f"{camera_id}.aes")
+
+    if private_b64 and aes_b64:
+        private_bytes = base64.b64decode(private_b64)
+        aes_bytes = base64.b64decode(aes_b64)
+    else:
+        # Free-tier fallback: derive stable, domain-separated edge key
+        # material from the already-required high-entropy EDGE_AUTH_TOKEN.
+        # Nothing is committed and cold starts retain the same identity.
+        token = os.environ.get("EDGE_AUTH_TOKEN", "")
+        if not token:
+            raise RuntimeError("EDGE_AUTH_TOKEN is required")
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        seed = hashlib.sha256(("netraksh-ed25519:" + token + ":" + camera_id).encode()).digest()
+        private_key = Ed25519PrivateKey.from_private_bytes(seed)
+        private_bytes = private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        aes_bytes = hashlib.sha256(("netraksh-aes256:" + token + ":" + camera_id).encode()).digest()
+
+    if len(aes_bytes) != 32:
+        raise RuntimeError("Evidence key must be exactly 32 bytes")
+
     with open(private_path, "wb") as fh:
-        fh.write(base64.b64decode(private_b64))
+        fh.write(private_bytes)
     with open(aes_path, "wb") as fh:
-        raw = base64.b64decode(aes_b64)
-        if len(raw) != 32:
-            raise RuntimeError("EDGE_EVIDENCE_KEY_B64 must decode to exactly 32 bytes")
-        fh.write(raw)
+        fh.write(aes_bytes)
     try:
         os.chmod(private_path, 0o600)
         os.chmod(aes_path, 0o600)
