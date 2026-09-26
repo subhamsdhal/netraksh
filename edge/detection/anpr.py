@@ -360,7 +360,9 @@ class EasyOCREngine(OCREngine):
     def __init__(self, languages: List[str] = None):
         self._languages = languages or ["en"]
         self._reader = None
-        self._init_reader()
+        # Lazy-load EasyOCR on the first actual plate read. This preserves
+        # full ANPR behavior while avoiding a large Torch allocation during
+        # cold start on memory-constrained cloud demo instances.
         
     def _init_reader(self):
         try:
@@ -372,8 +374,10 @@ class EasyOCREngine(OCREngine):
 
     def read(self, image: np.ndarray) -> Optional[OCRResult]:
         if self._reader is None:
+            self._init_reader()
+        if self._reader is None:
             return None
-            
+
         try:
             results = self._reader.readtext(image, detail=1, paragraph=False)
             if not results:
