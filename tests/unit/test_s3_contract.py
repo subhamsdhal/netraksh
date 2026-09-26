@@ -1,6 +1,7 @@
 import pytest
 from botocore.stub import Stubber
 import boto3
+from botocore.exceptions import ClientError
 from backend.services.evidence_storage import S3Storage, EvidenceNotFoundError, StorageUploadError
 
 @pytest.fixture
@@ -54,6 +55,19 @@ def test_s3_get_object_missing(s3_storage, stubber):
     with pytest.raises(EvidenceNotFoundError):
         s3_storage.get_object('test-key')
 
+
+def test_s3_get_object_http_404_with_blank_code_is_missing(s3_storage, stubber):
+    stubber.add_client_error('get_object', '', '', http_status_code=404)
+    with pytest.raises(EvidenceNotFoundError):
+        s3_storage.get_object('empty-key')
+
+
+@pytest.mark.parametrize('status, code', [(403, 'AccessDenied'), (500, 'InternalError')])
+def test_s3_get_object_non_missing_errors_are_not_swallowed(s3_storage, stubber, status, code):
+    stubber.add_client_error('get_object', code, 'safe failure', http_status_code=status)
+    with pytest.raises(ClientError):
+        s3_storage.get_object('test-key')
+
 def test_s3_head_object(s3_storage, stubber):
     expected_params = {'Bucket': 'test-bucket', 'Key': 'test-key'}
     stubber.add_response('head_object', {'ContentLength': 100}, expected_params)
@@ -67,6 +81,12 @@ def test_s3_head_object_missing(s3_storage, stubber):
     with pytest.raises(EvidenceNotFoundError):
         s3_storage.head_object('test-key')
 
+
+def test_s3_head_object_http_404_with_unusual_code_is_missing(s3_storage, stubber):
+    stubber.add_client_error('head_object', 'NoSuchObject', 'not found', http_status_code=404)
+    with pytest.raises(EvidenceNotFoundError):
+        s3_storage.head_object('missing-key')
+
 def test_s3_object_exists(s3_storage, stubber):
     expected_params = {'Bucket': 'test-bucket', 'Key': 'test-key'}
     stubber.add_response('head_object', {}, expected_params)
@@ -74,6 +94,29 @@ def test_s3_object_exists(s3_storage, stubber):
     
     stubber.add_client_error('head_object', '404', 'Not Found')
     assert s3_storage.object_exists('missing-key') is False
+
+
+def test_s3_object_exists_non_missing_error_is_not_swallowed(s3_storage, stubber):
+    stubber.add_client_error('head_object', 'InternalError', 'safe failure', http_status_code=500)
+    with pytest.raises(ClientError):
+        s3_storage.object_exists('test-key')
+
+
+def test_s3_diagnostics_do_not_log_secrets(s3_storage, stubber, caplog):
+    caplog.set_level('WARNING')
+    stubber.add_client_error(
+        'get_object',
+        'AccessDenied',
+        'Authorization=secret-token https://example.invalid/signed?X-Amz-Signature=secret',
+        http_status_code=403,
+    )
+    with pytest.raises(ClientError):
+        s3_storage.get_object('test-key')
+    text = caplog.text
+    assert 'AccessDenied' in text and '403' in text
+    assert 'secret-token' not in text
+    assert 'X-Amz-Signature' not in text
+    assert 'example.invalid' not in text
 
 def test_s3_delete_object(s3_storage, stubber):
     expected_params = {'Bucket': 'test-bucket', 'Key': 'test-key'}

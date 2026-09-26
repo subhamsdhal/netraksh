@@ -1,5 +1,6 @@
 import json
 import uuid
+import asyncio
 from pathlib import Path
 
 from backend.services import video_storage
@@ -70,3 +71,24 @@ def test_active_video_control_updates_without_changing_source(monkeypatch, tmp_p
     assert after["source_object_key"] == before["source_object_key"]
     assert after["scenario"] == "normal"
     assert after["video_time"] == 12.5
+
+
+def test_get_active_session_returns_none_when_control_object_is_missing(monkeypatch):
+    class EmptyStorage:
+        def get_object(self, key):
+            raise EvidenceNotFoundError(key)
+
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: EmptyStorage())
+    assert video_storage.get_active_session("cam-border-01") is None
+
+
+def test_internal_sync_empty_camera_control_returns_200_shape(monkeypatch):
+    from starlette.requests import Request
+    from backend.api import dashboard
+
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "get_active_session", lambda camera_id: None)
+    request = Request({"type": "http", "query_string": b"camera_id=cam-border-01"})
+    result = asyncio.run(dashboard.get_internal_sync(request))
+    assert result["camera_id"] == "cam-border-01"
+    assert "download_url" not in result

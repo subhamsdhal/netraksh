@@ -7,8 +7,46 @@ Boto3 is imported lazily inside S3Storage so that this module can be imported
 on deployments that only use the local filesystem and have not installed boto3.
 """
 import os
+import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+_MISSING_CODES = {"NoSuchKey", "NotFound", "404"}
+_SENSITIVE_ERROR_TEXT = re.compile(
+    r"authorization|access.?key|secret|credential|token|signature|presign|https?://|x-amz",
+    re.IGNORECASE,
+)
+
+
+def _s3_error_details(exc: Exception) -> tuple[int | None, str, str]:
+    response = getattr(exc, "response", {}) or {}
+    metadata = response.get("ResponseMetadata", {}) or {}
+    status = metadata.get("HTTPStatusCode")
+    error = response.get("Error", {}) or {}
+    code = str(error.get("Code", ""))
+    message = str(error.get("Message", ""))
+    if not message or _SENSITIVE_ERROR_TEXT.search(message):
+        message = "<redacted>" if message else ""
+    return status, code, message
+
+
+def _log_s3_failure(operation: str, exc: Exception) -> tuple[int | None, str]:
+    status, code, message = _s3_error_details(exc)
+    logger.warning(
+        "S3 %s failed status=%s code=%s message=%s",
+        operation,
+        status if status is not None else "unknown",
+        code or "<blank>",
+        message or "<blank>",
+    )
+    return status, code
+
+
+def _is_missing_s3_error(status: int | None, code: str) -> bool:
+    return status == 404 or code in _MISSING_CODES
 
 class EvidenceNotFoundError(Exception):
     pass
@@ -272,7 +310,8 @@ class S3Storage(EvidenceStorageBackend):
             response = self.s3.get_object(Bucket=self.bucket, Key=object_key)
             return response['Body'].read()
         except self._ClientError as e:
-            if e.response['Error']['Code'] in ('NoSuchKey', '404'):
+            status, code = _log_s3_failure("get_object", e)
+            if _is_missing_s3_error(status, code):
                 raise EvidenceNotFoundError(f"S3 Object {object_key} not found.")
             raise
 
@@ -280,7 +319,8 @@ class S3Storage(EvidenceStorageBackend):
         try:
             return self.s3.head_object(Bucket=self.bucket, Key=object_key)
         except self._ClientError as e:
-            if e.response['Error']['Code'] in ('NoSuchKey', '404'):
+            status, code = _log_s3_failure("head_object", e)
+            if _is_missing_s3_error(status, code):
                 raise EvidenceNotFoundError(f"S3 Object {object_key} not found.")
             raise
 
@@ -289,7 +329,8 @@ class S3Storage(EvidenceStorageBackend):
             self.s3.head_object(Bucket=self.bucket, Key=object_key)
             return True
         except self._ClientError as e:
-            if e.response['Error']['Code'] in ('NoSuchKey', '404'):
+            status, code = _log_s3_failure("object_exists", e)
+            if _is_missing_s3_error(status, code):
                 return False
             raise
 
