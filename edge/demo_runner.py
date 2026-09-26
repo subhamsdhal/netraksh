@@ -77,6 +77,19 @@ _FAILURE_DURATION_S = 60.0
 _failure_until: float = 0.0
 
 
+def _source_resolvable_on_edge(source: Optional[str]) -> bool:
+    """Only accept a control-plane source this worker can actually open."""
+    value = str(source or "").strip()
+    if not value:
+        return False
+    lower = value.lower()
+    if lower.startswith(("http://", "https://", "rtsp://", "rtsps://")):
+        return True
+    if value.isdigit() or lower in {"webcam", "usb", "usb_camera"}:
+        return True
+    return Path(value).exists()
+
+
 def _poll_scenario(backend_url: str, camera_id: str, interval: float = 5.0) -> None:
     """
     Background thread: poll GET /demo/scenario every `interval` seconds
@@ -116,15 +129,26 @@ def _poll_scenario(backend_url: str, camera_id: str, interval: float = 5.0) -> N
                 elif new_video_time is not None:
                     _scenario["video_time_updated_at"] = time.time()
                 
-                # If a new video source is provided, and it's different, trigger restart
-                if new_source and (
-                    new_source != _scenario.get("video_source")
-                    or (new_session_id and new_session_id != _scenario.get("video_session_id"))
-                ):
-                    logger.info(f"[DemoRunner] Video source/session changed to {new_source} ({new_session_id}), triggering restart...")
-                    _scenario["should_restart"] = True
-                    _scenario["video_source"] = new_source
-                if new_session_id:
+                # Treat source and session metadata as one coherent unit. A
+                # backend-local path must never replace the edge source unless
+                # it is actually resolvable in this worker.
+                source_changed = bool(
+                    new_source and (
+                        new_source != _scenario.get("video_source")
+                        or (new_session_id and new_session_id != _scenario.get("video_session_id"))
+                    )
+                )
+                if source_changed:
+                    if _source_resolvable_on_edge(new_source):
+                        logger.info("[DemoRunner] Video source/session changed; triggering restart")
+                        _scenario["should_restart"] = True
+                        _scenario["video_source"] = new_source
+                        _scenario["video_session_id"] = new_session_id
+                    else:
+                        logger.warning(
+                            "[DemoRunner] Ignoring unavailable control-plane source; retaining the configured edge source"
+                        )
+                elif new_session_id and new_source == _scenario.get("video_source"):
                     _scenario["video_session_id"] = new_session_id
                 _scenario["initialized"] = True
         except Exception as exc:
@@ -355,13 +379,9 @@ class DemoAwareEdgePipeline(EdgePipeline):
                 if s != last:
                     want_offline = (s == "offline")
                     try:
-                        logger.info("PAUSE_DIAG: entering set_simulate_offline")
                         self.sync_client.set_simulate_offline(want_offline)
-                        logger.info("PAUSE_DIAG: set_simulate_offline completed")
                         if hasattr(self, 'adapter'):
-                            logger.info("PAUSE_DIAG: about to set adapter.paused")
                             self.adapter.paused = (s == "paused")
-                            logger.info(f"PAUSE_DIAG: adapter.paused set successfully, value={self.adapter.paused}")
                         logger.info(
                             f"[DemoRunner] sync_client.simulate_offline → {want_offline}, adapter.paused → {s == 'paused'}"
                         )
@@ -374,28 +394,27 @@ class DemoAwareEdgePipeline(EdgePipeline):
                     time.sleep(1.0)
                     continue
 
-                # Check for explicit seek requests
-                logger.info("PAUSE_DIAG: entering seek section")
+                # Browser position is an explicit media-clock value, not a
+                # wall-clock origin. Never extrapolate a stale update timestamp.
                 target_time = _scenario.get("video_time")
-                target_updated = _scenario.get("video_time_updated_at", time.time())
-                
-                if target_time is not None and hasattr(self, 'adapter'):
-                    if s == "paused":
-                        extrapolated_target = target_time
-                    else:
-                        if target_updated == 0.0:
-                            extrapolated_target = target_time
-                        else:
-                            extrapolated_target = target_time + (time.time() - target_updated)
-                        
-                    # Only seek if the difference is significant (> 2.0s) to avoid micro-stutters
+                if target_time is not None and hasattr(self, "adapter"):
+                    target = max(0.0, float(target_time))
                     current_edge_time = getattr(self.adapter, "_last_video_time", 0.0)
-                    drift = extrapolated_target - current_edge_time
-                    if abs(drift) > 2.0 and target_time != last_applied_target:
-                        logger.info(f"[DemoRunner] Seeking Edge to match Browser time: {extrapolated_target}s (drift: {drift:.2f}s)")
-                        self.adapter.seek_to(extrapolated_target)
-                        last_applied_target = target_time
-                    # DO NOT clear _scenario["video_time"] so we can continue tracking drift
+                    drift = target - current_edge_time
+                    if abs(drift) > 2.0 and target != last_applied_target:
+                        duration = getattr(self.adapter, "duration_seconds", None)
+                        if duration is not None and target >= duration:
+                            logger.warning(
+                                "[DemoRunner] Ignoring out-of-range control-plane seek %.3fs for %.3fs source",
+                                target, duration,
+                            )
+                            last_applied_target = target
+                        elif self.adapter.seek_to(target):
+                            logger.info(
+                                "[DemoRunner] Seeking Edge to match Browser time: %.3fs (drift: %.2fs)",
+                                target, drift,
+                            )
+                            last_applied_target = target
 
                 time.sleep(1.0)
 
