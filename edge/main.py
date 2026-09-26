@@ -631,6 +631,11 @@ class EdgePipeline:
         t_frame_start = time.perf_counter()
 
         # === Layer 2: Gate 1 — Camera Health ===
+        # The capture adapter is authoritative for the actual source FPS.
+        # This avoids comparing a 10/30 FPS finite source against a stale
+        # hardcoded declaration supplied before VideoCapture opens.
+        if getattr(meta, "fps_declared", 0):
+            self.health_monitor.fps_declared = float(meta.fps_declared)
         health = self.health_monitor.update(frame, meta.timestamp, self.adapter.state)
         self._last_health = health
 
