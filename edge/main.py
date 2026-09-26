@@ -408,8 +408,9 @@ class EdgePipeline:
         if verify is False:
             verify = True # Should be caught by sync_client, but enforce here
             
+        timeout = httpx.Timeout(10.0, connect=5.0, read=10.0, write=10.0)
         client = httpx.Client(
-            timeout=1.0,
+            timeout=timeout,
             verify=verify,
             cert=self.sync_client._client_cert
         )
@@ -421,33 +422,50 @@ class EdgePipeline:
                     clean_preview = payload.pop("_clean_preview_jpeg_base64", None)
                     annotated_preview = payload.pop("_annotated_preview_jpeg_base64", None)
                     if clean_preview and annotated_preview:
-                        frame_response = client.post(
-                            f"{self._backend_url}/system/telemetry/frame",
-                            json={
-                                "camera_id": payload["camera_id"],
-                                "analysis_session_id": payload.get("analysis_session_id"),
-                                "frame_index": payload.get("frame_index"),
-                                "source_timestamp": payload.get("source_timestamp"),
-                                "processed_timestamp": payload.get("processed_timestamp"),
-                                "person_count": payload.get("person_count", 0),
-                                "vehicle_count": payload.get("vehicle_count", 0),
-                                "track_count": payload.get("track_count", 0),
-                                "clean_jpeg_base64": clean_preview,
-                                "annotated_jpeg_base64": annotated_preview,
-                            },
+                        try:
+                            frame_response = client.post(
+                                f"{self._backend_url}/system/telemetry/frame",
+                                json={
+                                    "camera_id": payload["camera_id"],
+                                    "analysis_session_id": payload.get("analysis_session_id"),
+                                    "frame_index": payload.get("frame_index"),
+                                    "source_timestamp": payload.get("source_timestamp"),
+                                    "processed_timestamp": payload.get("processed_timestamp"),
+                                    "person_count": payload.get("person_count", 0),
+                                    "vehicle_count": payload.get("vehicle_count", 0),
+                                    "track_count": payload.get("track_count", 0),
+                                    "clean_jpeg_base64": clean_preview,
+                                    "annotated_jpeg_base64": annotated_preview,
+                                },
+                                headers=self._edge_auth_headers(),
+                            )
+                            if not frame_response.is_success:
+                                self._telemetry_metrics["errors"] += 1
+                                payload["preview_available"] = False
+                                logger.warning("[Telemetry] frame HTTP %s", frame_response.status_code)
+                        except httpx.RequestError as exc:
+                            self._telemetry_metrics["errors"] += 1
+                            payload["preview_available"] = False
+                            logger.warning("[Telemetry] frame %s", type(exc).__name__)
+                    try:
+                        snapshot_response = client.post(
+                            telemetry_url,
+                            json=payload,
                             headers=self._edge_auth_headers(),
                         )
-                        if not frame_response.is_success:
-                            payload["preview_available"] = False
-                    client.post(telemetry_url, json=payload, headers=self._edge_auth_headers())
-                except httpx.RequestError:
-                    self._telemetry_metrics["errors"] += 1
-                self.telemetry_queue.task_done()
+                        if not snapshot_response.is_success:
+                            self._telemetry_metrics["errors"] += 1
+                            logger.warning("[Telemetry] snapshot HTTP %s", snapshot_response.status_code)
+                    except httpx.RequestError as exc:
+                        self._telemetry_metrics["errors"] += 1
+                        logger.warning("[Telemetry] snapshot %s", type(exc).__name__)
+                finally:
+                    self.telemetry_queue.task_done()
             except Empty:
                 continue
             except Exception as e:
                 self._telemetry_metrics["errors"] += 1
-                logger.error(f"[Telemetry] Unexpected error: {e}")
+                logger.error("[Telemetry] Unexpected %s: %s", type(e).__name__, e)
         client.close()
 
     def _run_frame_loop(self) -> None:
