@@ -19,6 +19,15 @@ export function sourceStateFromCurrentVideo(state) {
   return null;
 }
 
+export function bundledSourceState(scenario = 'paused') {
+  return {
+    sourceMode: 'bundled',
+    sourceId: null,
+    sourceName: 'BUNDLED CLOUD DEMO',
+    runState: scenario === 'normal' ? 'ACTIVE' : 'PAUSED',
+  };
+}
+
 export function scenarioAction(cameraId, sourceState, scenario, wakeEdge = false) {
   if (!cameraId || !sourceState?.sourceMode) return null;
   const payload = {

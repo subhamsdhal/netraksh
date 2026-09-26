@@ -138,6 +138,11 @@ def _bundled_control(camera_id: str | None) -> dict:
     return target
 
 
+def _selected_bundled_control(camera_id: str | None) -> dict | None:
+    target = (_demo_state.get("camera_sessions") or {}).get(camera_id)
+    return target if target and target.get("source_mode") == "bundled" else None
+
+
 async def _wake_edge_service(camera_id: str | None) -> str:
     """Best-effort wake request for a free Render edge web service."""
     env_key = {
@@ -199,6 +204,17 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
     """
     camera_id = request.query_params.get("camera_id")
     if _durable_video_enabled() and camera_id:
+        selected_bundled = _selected_bundled_control(camera_id)
+        if selected_bundled is not None:
+            return {
+                "available": True,
+                "source_mode": "bundled",
+                "source_name": "BUNDLED CLOUD DEMO",
+                "session_id": None,
+                "camera_id": camera_id,
+                "scenario": selected_bundled.get("scenario", "paused"),
+                "processing_status": "idle",
+            }
         durable = get_valid_active_session(camera_id)
         if durable:
             preview_key = durable.get("preview_object_key")
@@ -317,6 +333,17 @@ async def get_internal_sync(request: Request, _edge=Depends(require_edge_auth)):
     """
     camera_id = request.query_params.get("camera_id")
     if _durable_video_enabled() and camera_id:
+        selected_bundled = _selected_bundled_control(camera_id)
+        if selected_bundled is not None:
+            return {
+                "source_mode": "bundled",
+                "video_source": _BUNDLED_SOURCE,
+                "video_session_id": None,
+                "scenario": selected_bundled.get("scenario", "paused"),
+                "video_time": selected_bundled.get("video_time", 0.0),
+                "video_time_updated_at": selected_bundled.get("video_time_updated_at", 0.0),
+                "camera_id": camera_id,
+            }
         durable = get_valid_active_session(camera_id)
         if durable:
             source_key = durable.get("source_object_key")

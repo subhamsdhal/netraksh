@@ -9,7 +9,7 @@ import { parseUtc } from '../utils/time';
 import { DEMO_CAMERA_LABELS, MAX_VISIBLE_CAMERAS, selectDemoCameraSlots } from '../utils/demoCameraSlots';
 import { deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
-import { scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
+import { bundledSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 
 // Reads structured scores from the event instead of string-parsing the reason.
 function parseDecisionReason(ev) {
@@ -309,6 +309,12 @@ export default function Dashboard() {
                     },
                   };
                 });
+              } else if (restoredSource.sourceMode === 'durable') {
+                // A durable record whose browser media can no longer be read
+                // is not allowed to keep replaying a stale session ID. Keep
+                // its historical objects untouched and return this demo slot
+                // to the worker-bundled source.
+                restored[cameraId] = bundledSourceState(state.scenario);
               }
             }
           } else {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { durableHeartbeat, scenarioAction, sourceStateFromCurrentVideo } from '../src/utils/dashboardVideoControl';
+import { bundledSourceState, durableHeartbeat, scenarioAction, sourceStateFromCurrentVideo } from '../src/utils/dashboardVideoControl';
 
 describe('dashboard video control ownership', () => {
   it('replaces a stale browser session with the bundled source contract', () => {
@@ -27,6 +27,15 @@ describe('dashboard video control ownership', () => {
       wake_edge: true,
     });
     expect(payload).not.toHaveProperty('video_session_id');
+  });
+
+  it('provides an explicit bundled fallback when durable preview hydration fails', () => {
+    expect(bundledSourceState('paused')).toEqual({
+      sourceMode: 'bundled',
+      sourceId: null,
+      sourceName: 'BUNDLED CLOUD DEMO',
+      runState: 'PAUSED',
+    });
   });
 
   it('keeps durable session validation in explicit actions', () => {

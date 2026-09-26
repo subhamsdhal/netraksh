@@ -218,6 +218,39 @@ def test_bundled_current_video_and_internal_sync_never_sign_media(monkeypatch):
     assert "download_url" not in sync
 
 
+def test_explicit_bundled_selection_overrides_an_old_valid_durable_control(monkeypatch):
+    durable = {
+        "session_id": "real-session",
+        "source_object_key": "video-sessions/cam-checkpoint-01/real-session/source.mp4",
+        "scenario": "paused",
+    }
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: durable)
+    monkeypatch.setattr(dashboard, "signed_media_url", lambda *_args, **_kwargs: pytest.fail("selected bundled mode must not sign durable media"))
+    previous = dict(dashboard._demo_state)
+    try:
+        dashboard._demo_state["camera_sessions"] = {
+            "cam-border-01": {"source_mode": "durable", "scenario": "normal"},
+            "cam-checkpoint-01": {
+                "source_mode": "bundled",
+                "video_source": dashboard._BUNDLED_SOURCE,
+                "video_session_id": None,
+                "scenario": "normal",
+            },
+        }
+        request = Request({"type": "http", "query_string": b"camera_id=cam-checkpoint-01"})
+        current = asyncio.run(dashboard.get_current_video(request))
+        sync = asyncio.run(dashboard.get_internal_sync(request))
+        assert current["source_mode"] == "bundled"
+        assert current["scenario"] == "normal"
+        assert sync["source_mode"] == "bundled"
+        assert sync["scenario"] == "normal"
+        assert dashboard._demo_state["camera_sessions"]["cam-border-01"]["scenario"] == "normal"
+    finally:
+        dashboard._demo_state.clear()
+        dashboard._demo_state.update(previous)
+
+
 def test_durable_mode_requires_the_exact_active_session(monkeypatch):
     active = {"session_id": "real-session"}
     monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
