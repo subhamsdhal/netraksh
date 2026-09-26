@@ -112,6 +112,28 @@ def get_active_session(camera_id: str) -> dict[str, Any] | None:
     return _get_json(control_key(camera_id))
 
 
+def get_valid_active_session(camera_id: str) -> dict[str, Any] | None:
+    """Return an active durable session only when all referenced objects exist.
+
+    A control record can outlive its metadata or media object.  That stale
+    record is not a durable source and must not prevent the camera from using
+    its worker-bundled demo fallback.
+    """
+    current = get_active_session(camera_id)
+    if not current:
+        return None
+    session_id = current.get("session_id")
+    source_key = current.get("source_object_key")
+    if not session_id or not source_key:
+        return None
+    metadata = get_uploaded_session(camera_id, session_id)
+    if not metadata or metadata.get("source_object_key") != source_key:
+        return None
+    if not get_evidence_storage().object_exists(source_key):
+        return None
+    return current
+
+
 def update_active_session(camera_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
     current = get_active_session(camera_id)
     if current is None:

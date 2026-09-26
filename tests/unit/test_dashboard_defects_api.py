@@ -143,3 +143,121 @@ def test_explicit_start_wakes_edge_once(monkeypatch):
     }, _user={}))
     assert calls == ["cam-checkpoint-01"]
     assert result["edge_status"] == "ready"
+
+
+def test_bundled_camera2_start_needs_no_session_and_wakes_only_camera2(monkeypatch):
+    calls = []
+
+    async def fake_wake(camera_id):
+        calls.append(camera_id)
+        return "ready"
+
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: None)
+    monkeypatch.setattr(dashboard, "_wake_edge_service", fake_wake)
+    previous = dict(dashboard._demo_state)
+    try:
+        dashboard._demo_state["camera_sessions"] = {
+            "cam-border-01": {"source_mode": "bundled", "scenario": "normal", "video_source": dashboard._BUNDLED_SOURCE},
+        }
+        result = asyncio.run(dashboard.post_video_scenario({
+            "camera_id": "cam-checkpoint-01",
+            "source_mode": "bundled",
+            "scenario": "normal",
+            "video_time": 0,
+            "wake_edge": True,
+        }, _user={}))
+
+        camera2 = result["state"]["camera_sessions"]["cam-checkpoint-01"]
+        assert camera2["scenario"] == "normal"
+        assert camera2["video_session_id"] is None
+        assert calls == ["cam-checkpoint-01"]
+        assert dashboard._demo_state["camera_sessions"]["cam-border-01"]["scenario"] == "normal"
+    finally:
+        dashboard._demo_state.clear()
+        dashboard._demo_state.update(previous)
+
+
+def test_bundled_camera2_stop_does_not_mutate_camera1(monkeypatch):
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: None)
+    previous = dict(dashboard._demo_state)
+    try:
+        dashboard._demo_state["camera_sessions"] = {
+            "cam-border-01": {"source_mode": "bundled", "scenario": "normal", "video_source": dashboard._BUNDLED_SOURCE},
+            "cam-checkpoint-01": {"source_mode": "bundled", "scenario": "normal", "video_source": dashboard._BUNDLED_SOURCE},
+        }
+        asyncio.run(dashboard.post_video_scenario({
+            "camera_id": "cam-checkpoint-01",
+            "source_mode": "bundled",
+            "scenario": "paused",
+        }, _user={}))
+        sessions = dashboard._demo_state["camera_sessions"]
+        assert sessions["cam-checkpoint-01"]["scenario"] == "paused"
+        assert sessions["cam-border-01"]["scenario"] == "normal"
+    finally:
+        dashboard._demo_state.clear()
+        dashboard._demo_state.update(previous)
+
+
+def test_bundled_current_video_and_internal_sync_never_sign_media(monkeypatch):
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: None)
+    monkeypatch.setattr(dashboard, "signed_media_url", lambda *_args, **_kwargs: pytest.fail("bundled mode must not sign media"))
+    request = Request({"type": "http", "query_string": b"camera_id=cam-checkpoint-01"})
+
+    current = asyncio.run(dashboard.get_current_video(request))
+    sync = asyncio.run(dashboard.get_internal_sync(request))
+
+    assert current["source_mode"] == "bundled"
+    assert current["session_id"] is None
+    assert "preview_url" not in current
+    assert sync["source_mode"] == "bundled"
+    assert sync["video_source"] == dashboard._BUNDLED_SOURCE
+    assert sync["video_session_id"] is None
+    assert "download_url" not in sync
+
+
+def test_durable_mode_requires_the_exact_active_session(monkeypatch):
+    active = {"session_id": "real-session"}
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: active)
+
+    for session_id in (None, "stale-session"):
+        payload = {
+            "camera_id": "cam-checkpoint-01",
+            "source_mode": "durable",
+            "scenario": "normal",
+        }
+        if session_id is not None:
+            payload["video_session_id"] = session_id
+        with pytest.raises(dashboard.HTTPException) as exc:
+            asyncio.run(dashboard.post_video_scenario(payload, _user={}))
+        assert exc.value.status_code == 409
+
+
+def test_matching_durable_session_remains_controllable(monkeypatch):
+    updates = []
+    active = {"session_id": "real-session", "scenario": "paused"}
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: active)
+    monkeypatch.setattr(dashboard, "update_active_session", lambda camera_id, changes: updates.append((camera_id, changes)))
+
+    result = asyncio.run(dashboard.post_video_scenario({
+        "camera_id": "cam-checkpoint-01",
+        "source_mode": "durable",
+        "video_session_id": "real-session",
+        "scenario": "paused",
+        "video_time": 3,
+    }, _user={}))
+
+    assert result["status"] == "success"
+    assert updates[0][0] == "cam-checkpoint-01"
+    assert updates[0][1]["video_time"] == 3.0
+
+
+def test_bundled_default_has_no_fake_session_uuid():
+    from backend.api import demo
+
+    assert demo._state["source_mode"] == "bundled"
+    assert demo._state["video_session_id"] is None

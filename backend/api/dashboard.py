@@ -41,7 +41,7 @@ from backend.config import settings
 from backend.security.auth import require_edge_auth, require_operator_or_admin
 from backend.services.video_storage import (
     activate_session,
-    get_active_session,
+    get_valid_active_session,
     get_uploaded_session,
     signed_media_url,
     store_uploaded_session,
@@ -85,6 +85,8 @@ _MAX_VIDEO_UPLOAD_BYTES = 200 * 1024 * 1024
 
 # Relative to repo root (where uvicorn is launched)
 _VIDEOS_SUBDIR = Path("demo") / "videos"
+_BUNDLED_SOURCE = "demo/videos/uploaded_demo.mp4"
+_BUNDLED_CAMERA_IDS = frozenset({"cam-border-01", "cam-checkpoint-01"})
 
 
 def _videos_dir() -> Path:
@@ -118,6 +120,22 @@ def _ffmpeg_bin() -> str | None:
 def _durable_video_enabled() -> bool:
     """Production uploads use the configured shared S3-compatible store."""
     return settings.OBJECT_STORAGE_PROVIDER == "s3"
+
+
+def _bundled_control(camera_id: str | None) -> dict:
+    """Return camera-scoped control for the immutable worker-bundled demo."""
+    target = _demo_state.setdefault("camera_sessions", {}).setdefault(camera_id, {})
+    if target.get("source_mode") != "bundled":
+        target.clear()
+        target.update({
+            "source_mode": "bundled",
+            "video_source": _BUNDLED_SOURCE,
+            "video_session_id": None,
+            "scenario": "paused",
+            "video_time": 0.0,
+            "video_time_updated_at": 0.0,
+        })
+    return target
 
 
 async def _wake_edge_service(camera_id: str | None) -> str:
@@ -181,7 +199,7 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
     """
     camera_id = request.query_params.get("camera_id")
     if _durable_video_enabled() and camera_id:
-        durable = get_active_session(camera_id)
+        durable = get_valid_active_session(camera_id)
         if durable:
             preview_key = durable.get("preview_object_key")
             source_key = durable.get("source_object_key")
@@ -196,12 +214,24 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
             session_id = durable.get("session_id")
             return {
                 "available": True,
+                "source_mode": "durable",
                 "preview_url": f"/api/dashboard/video/media/{session_id}?camera_id={camera_id}",
                 "source_name": durable.get("source_name"),
                 "session_id": session_id,
                 "camera_id": camera_id,
                 "scenario": durable.get("scenario", "paused"),
                 "processing_status": "active",
+            }
+        if camera_id in _BUNDLED_CAMERA_IDS:
+            bundled = _bundled_control(camera_id)
+            return {
+                "available": True,
+                "source_mode": "bundled",
+                "source_name": "BUNDLED CLOUD DEMO",
+                "session_id": None,
+                "camera_id": camera_id,
+                "scenario": bundled.get("scenario", "paused"),
+                "processing_status": "idle",
             }
     scoped = (_demo_state.get("camera_sessions") or {}).get(camera_id, {}) if camera_id else {}
     source: str | None = scoped.get("video_source") if camera_id else _demo_state.get("video_source")
@@ -287,16 +317,28 @@ async def get_internal_sync(request: Request, _edge=Depends(require_edge_auth)):
     """
     camera_id = request.query_params.get("camera_id")
     if _durable_video_enabled() and camera_id:
-        durable = get_active_session(camera_id)
+        durable = get_valid_active_session(camera_id)
         if durable:
             source_key = durable.get("source_object_key")
             return {
                 "video_source": f"object://{source_key}",
+                "source_mode": "durable",
                 "download_url": signed_media_url(source_key) if source_key else None,
                 "video_session_id": durable.get("session_id"),
                 "scenario": durable.get("scenario", "paused"),
                 "video_time": durable.get("video_time", 0.0),
                 "video_time_updated_at": durable.get("video_time_updated_at", 0.0),
+                "camera_id": camera_id,
+            }
+        if camera_id in _BUNDLED_CAMERA_IDS:
+            bundled = _bundled_control(camera_id)
+            return {
+                "source_mode": "bundled",
+                "video_source": _BUNDLED_SOURCE,
+                "video_session_id": None,
+                "scenario": bundled.get("scenario", "paused"),
+                "video_time": bundled.get("video_time", 0.0),
+                "video_time_updated_at": bundled.get("video_time_updated_at", 0.0),
                 "camera_id": camera_id,
             }
     scoped = (_demo_state.get("camera_sessions") or {}).get(camera_id, {}) if camera_id else {}
@@ -321,15 +363,32 @@ async def post_video_scenario(
     """
     requested = payload.get("scenario")
     camera_id = payload.get("camera_id")
+    requested_mode = payload.get("source_mode")
+    if requested_mode not in {None, "bundled", "durable"}:
+        raise HTTPException(status_code=400, detail="Invalid video source mode")
     active_session = None
     if _durable_video_enabled() and camera_id:
-        active_session = get_active_session(camera_id)
+        active_session = get_valid_active_session(camera_id)
         requested_session_id = payload.get("video_session_id")
         # A browser can retain a legacy local-storage slot after its upload
         # was never persisted to object storage.  Do not let that obsolete
         # identifier pause or seek the configured cloud replay.  A real,
         # activated durable session remains fully controllable as before.
-        if requested_session_id and (
+        if requested_mode == "bundled" and requested_session_id:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Bundled video source must not include a durable session ID",
+            )
+        if requested_mode == "durable" and (
+            not requested_session_id
+            or active_session is None
+            or requested_session_id != active_session.get("session_id")
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Video session is not the active durable source for this camera",
+            )
+        if requested_mode is None and requested_session_id and (
             active_session is None
             or requested_session_id != active_session.get("session_id")
         ):
@@ -337,10 +396,17 @@ async def post_video_scenario(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Video session is not the active durable source for this camera",
             )
-    target = _demo_state.setdefault("camera_sessions", {}).setdefault(camera_id, {}) if camera_id else _demo_state
+    if requested_mode == "bundled" and camera_id:
+        target = _bundled_control(camera_id)
+    else:
+        target = _demo_state.setdefault("camera_sessions", {}).setdefault(camera_id, {}) if camera_id else _demo_state
     if requested in {"normal", "fog", "failure", "offline", "paused", "stopped"}:
         target["scenario"] = requested
-    if "video_session_id" in payload:
+    if requested_mode == "bundled":
+        target["source_mode"] = "bundled"
+        target["video_source"] = _BUNDLED_SOURCE
+        target["video_session_id"] = None
+    elif "video_session_id" in payload:
         target["video_session_id"] = payload["video_session_id"]
     if "video_time" in payload:
         target["video_time"] = float(payload["video_time"])
@@ -352,7 +418,7 @@ async def post_video_scenario(
             for key in ("scenario", "video_time", "video_time_updated_at")
             if key in target
         }
-        if active_session is not None:
+        if active_session is not None and requested_mode != "bundled":
             update_active_session(camera_id, changes)
     edge_status = "not_requested"
     # Browser playback reports its current time every two seconds.  Those

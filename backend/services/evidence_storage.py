@@ -35,7 +35,8 @@ def _s3_error_details(exc: Exception) -> tuple[int | None, str, str]:
 
 def _log_s3_failure(operation: str, exc: Exception) -> tuple[int | None, str]:
     status, code, message = _s3_error_details(exc)
-    logger.warning(
+    log = logger.debug if _is_missing_s3_error(status, code) else logger.warning
+    log(
         "S3 %s failed status=%s code=%s message=%s",
         operation,
         status if status is not None else "unknown",

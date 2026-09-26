@@ -31,7 +31,6 @@ from sqlalchemy.orm import Session
 from backend.database.session import get_db
 import shutil
 import os
-import uuid
 import subprocess
 from backend.security.auth import get_current_user
 
@@ -39,13 +38,15 @@ router = APIRouter(prefix="/demo", tags=["demo"])
 
 # ---------------------------------------------------------------------------
 # In-memory scenario state — a plain dict so any import of this module
-# shares the same object.  Resets to 'normal' on each server restart.
+# shares the same object.  Starts paused on each server restart so polling
+# cannot activate a free-tier worker without an explicit operator action.
 # ---------------------------------------------------------------------------
 _state: dict = {
-    "scenario": "normal",
+    "scenario": "paused",
+    "source_mode": "bundled",
     "video_source": "demo/videos/uploaded_demo.mp4",
     "video_preview": None,
-    "video_session_id": str(uuid.uuid4()),
+    "video_session_id": None,
     "camera_sessions": {},
 }
 

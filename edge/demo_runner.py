@@ -130,6 +130,12 @@ def _materialize_remote_source(data: dict, camera_id: str) -> dict:
     per-session filename prevents a newly generated signed URL on each poll
     from looking like a new source and restarting the pipeline.
     """
+    if data.get("source_mode") == "bundled":
+        bundled = dict(data)
+        bundled["video_source"] = "demo/videos/uploaded_demo.mp4"
+        bundled["video_session_id"] = None
+        bundled.pop("download_url", None)
+        return bundled
     download_url = str(data.get("download_url") or "").strip()
     session_id = str(data.get("video_session_id") or "").strip()
     if not download_url or not session_id:
@@ -223,8 +229,9 @@ def _apply_control_sync(data: dict) -> bool:
     source.  If that source cannot exist on this edge, none of its session
     state may steer the configured local source.
     """
+    source_mode = data.get("source_mode")
     new_source = data.get("video_source")
-    new_session_id = data.get("video_session_id")
+    new_session_id = None if source_mode == "bundled" else data.get("video_session_id")
     rejected_key = (str(new_source), str(new_session_id))
 
     if new_source and not _is_resolvable_edge_source(new_source):
@@ -267,7 +274,9 @@ def _apply_control_sync(data: dict) -> bool:
             logger.info("[DemoRunner] Video source/session changed; triggering restart")
             _scenario["should_restart"] = True
         _scenario["video_source"] = new_source
-    if new_session_id:
+    if source_mode == "bundled":
+        _scenario["video_session_id"] = None
+    elif new_session_id:
         _scenario["video_session_id"] = new_session_id
     return True
 

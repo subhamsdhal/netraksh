@@ -27,6 +27,9 @@ class MemoryStorage:
     def generate_signed_url(self, key, expires_in=900):
         return f"https://storage.example.test/{key}?signed=yes"
 
+    def object_exists(self, key):
+        return key in self.objects
+
 
 def test_uploaded_video_state_uses_logical_object_keys(monkeypatch, tmp_path):
     storage = MemoryStorage()
@@ -84,12 +87,44 @@ def test_get_active_session_returns_none_when_control_object_is_missing(monkeypa
     assert video_storage.get_active_session("cam-border-01") is None
 
 
+def test_valid_active_session_rejects_a_control_whose_source_is_missing(monkeypatch):
+    storage = MemoryStorage()
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)
+    session_id = str(uuid.uuid4())
+    metadata = {
+        "session_id": session_id,
+        "camera_id": "cam-checkpoint-01",
+        "source_object_key": f"video-sessions/cam-checkpoint-01/{session_id}/source.mp4",
+    }
+    storage.put_object(video_storage.session_metadata_key("cam-checkpoint-01", session_id), json.dumps(metadata).encode())
+    storage.put_object(video_storage.control_key("cam-checkpoint-01"), json.dumps(metadata).encode())
+
+    assert video_storage.get_valid_active_session("cam-checkpoint-01") is None
+
+
+def test_valid_active_session_accepts_matching_metadata_and_source(monkeypatch):
+    storage = MemoryStorage()
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)
+    session_id = str(uuid.uuid4())
+    source_key = f"video-sessions/cam-checkpoint-01/{session_id}/source.mp4"
+    metadata = {
+        "session_id": session_id,
+        "camera_id": "cam-checkpoint-01",
+        "source_object_key": source_key,
+    }
+    storage.put_object(video_storage.session_metadata_key("cam-checkpoint-01", session_id), json.dumps(metadata).encode())
+    storage.put_object(video_storage.control_key("cam-checkpoint-01"), json.dumps(metadata).encode())
+    storage.put_object(source_key, b"video")
+
+    assert video_storage.get_valid_active_session("cam-checkpoint-01")["session_id"] == session_id
+
+
 def test_internal_sync_empty_camera_control_returns_200_shape(monkeypatch):
     from starlette.requests import Request
     from backend.api import dashboard
 
     monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
-    monkeypatch.setattr(dashboard, "get_active_session", lambda camera_id: None)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: None)
     request = Request({"type": "http", "query_string": b"camera_id=cam-border-01"})
     result = asyncio.run(dashboard.get_internal_sync(request))
     assert result["camera_id"] == "cam-border-01"
@@ -102,7 +137,7 @@ def test_scenario_rejects_obsolete_session_when_no_durable_control_exists(monkey
     from fastapi import HTTPException
 
     monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
-    monkeypatch.setattr(dashboard, "get_active_session", lambda camera_id: None)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: None)
     payload = {
         "camera_id": "cam-border-01",
         "video_session_id": "obsolete-browser-session",

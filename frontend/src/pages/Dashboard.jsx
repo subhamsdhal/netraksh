@@ -9,6 +9,7 @@ import { parseUtc } from '../utils/time';
 import { DEMO_CAMERA_LABELS, MAX_VISIBLE_CAMERAS, selectDemoCameraSlots } from '../utils/demoCameraSlots';
 import { deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
+import { durableHeartbeat, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 
 // Reads structured scores from the event instead of string-parsing the reason.
 function parseDecisionReason(ev) {
@@ -128,6 +129,7 @@ export default function Dashboard() {
   };
 
   const requestScenario = async (cameraId, payload) => {
+    if (!payload) return null;
     if (cameraId) updateCameraMedia(cameraId, { edgeStatus: 'WAKING' });
     try {
       const response = await authFetch('/api/dashboard/video/scenario', {
@@ -136,6 +138,7 @@ export default function Dashboard() {
         body: JSON.stringify(payload),
       });
       const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || 'Camera control request failed');
       if (cameraId) updateCameraMedia(cameraId, {
         // A successful /wake response means the free worker's HTTP listener
         // answered; it does not prove inference has resumed.  Keep the honest
@@ -265,12 +268,26 @@ export default function Dashboard() {
           const response = await authFetch(`/api/dashboard/video/current?camera_id=${encodeURIComponent(cameraId)}`);
           if (!response.ok) return;
           const state = await response.json();
-          if (state.available && state.session_id) {
-            restored[cameraId] = {
-              sourceId: state.session_id,
-              sourceName: state.source_name || 'Configured video source',
-              runState: state.scenario === 'paused' ? 'PAUSED' : 'ACTIVE',
-            };
+          const restoredSource = sourceStateFromCurrentVideo(state);
+          if (restoredSource) {
+            restored[cameraId] = restoredSource;
+            if (restoredSource.sourceMode === 'bundled') {
+              setCameraMedia((current) => {
+                const previous = current[cameraId]?.mediaUrl;
+                if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous);
+                return {
+                  ...current,
+                  [cameraId]: {
+                    ...current[cameraId],
+                    mediaUrl: null,
+                    sessionId: null,
+                    playbackEnded: false,
+                    uploadError: null,
+                    isUploading: false,
+                  },
+                };
+              });
+            }
             if (state.preview_url) {
               const mediaResponse = await authFetch(state.preview_url);
               if (mediaResponse.ok) {
@@ -309,7 +326,10 @@ export default function Dashboard() {
         } catch (_) { /* a missing scoped source is an honest empty state */ }
       }));
       if (mounted && Object.keys(restored).length) {
-        setSlotSources((current) => ({ ...restored, ...current }));
+        // The authenticated backend is authoritative. This ordering replaces
+        // a stale localStorage upload session with bundled mode when its S3
+        // objects no longer exist.
+        setSlotSources((current) => ({ ...current, ...restored }));
       }
     };
     restoreScopedSources();
@@ -436,6 +456,7 @@ export default function Dashboard() {
       setSlotSources((current) => ({
         ...current,
         [cameraId]: {
+          sourceMode: 'durable',
           sourceId: uploaded.session_id || null,
           sourceName: uploaded.source_name || file.name,
           runState: 'LOADED',
@@ -739,9 +760,10 @@ export default function Dashboard() {
                   <span className={`dashboard-camera-status status-${status.toLowerCase().replace(/\s+/g, '-')}`}>{statusLabel}</span>
                   {cameraId && canUpload && <div className="dashboard-slot-actions">
                     <button className="btn btn-sm btn-outline" onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
-                    {sourceState?.sourceId && !activeCameraIds.includes(cameraId) && <button className="btn btn-sm btn-outline" onClick={() => requestScenario(cameraId, { camera_id: cameraId, video_session_id: sourceState.sourceId, scenario: 'normal', video_time: 0, wake_edge: true })}>START / ANALYZE</button>}
+                    {sourceState?.sourceMode && !activeCameraIds.includes(cameraId) && <button className="btn btn-sm btn-outline" onClick={() => requestScenario(cameraId, scenarioAction(cameraId, sourceState, 'normal', true))}>START / ANALYZE</button>}
                     {activeCameraIds.includes(cameraId) && <button className="btn btn-sm btn-outline" onClick={() => {
-                      authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ camera_id: cameraId, video_session_id: sourceState?.sourceId || null, scenario: 'paused', video_time: 0 }) }).catch(() => {});
+                      const payload = scenarioAction(cameraId, sourceState, 'paused');
+                      if (payload) authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => {});
                       // Keep the selected source bound to this slot while it is
                       // paused so the operator can START / ANALYZE the same
                       // uploaded file again. Clearing the slot and deleting
@@ -786,8 +808,14 @@ export default function Dashboard() {
                     canUpload={canUpload}
                     uploadError={mediaState.uploadError || null}
                     onVideoEnded={() => updateCameraMedia(cameraId, { playbackEnded: true })}
-                    onStartAnalysis={(time) => authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ camera_id: cameraId, video_session_id: mediaState.sessionId || sourceState?.sourceId || null, scenario: demoScenario || 'normal', video_time: time }) }).catch(() => {})}
-                    onPauseAnalysis={(time) => authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ camera_id: cameraId, video_session_id: mediaState.sessionId || sourceState?.sourceId || null, scenario: 'paused', video_time: time }) }).catch(() => {})}
+                    onStartAnalysis={(time) => {
+                      const payload = durableHeartbeat(cameraId, sourceState, mediaState.sessionId, time);
+                      if (payload) authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => {});
+                    }}
+                    onPauseAnalysis={(time) => {
+                      const payload = durableHeartbeat(cameraId, sourceState, mediaState.sessionId, time);
+                      if (payload) authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => {});
+                    }}
                   />
                 ) : (
                   <div className="dashboard-camera-empty"><ShieldAlert size={22} /><strong>CAMERA SLOT {slotIndex + 1} · NOT CONFIGURED</strong><span>No video source selected.</span></div>
@@ -901,36 +929,6 @@ export default function Dashboard() {
               canUpload={canUpload}
               uploadError={uploadError}
               onVideoEnded={() => updateCameraMedia(activeCameraId, { playbackEnded: true })}
-              onStartAnalysis={(time) => {
-                if (playbackEnded) {
-                  // Reuse the same videoSessionId to preserve the active session and events
-                  // Do NOT generate a new crypto.randomUUID() for a loop of the same video.
-                  
-                  // Fire POST before clearing playbackEnded state
-                  authFetch('/api/dashboard/video/scenario', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ camera_id: activeCameraId, video_session_id: videoSessionId, scenario: demoScenario || 'normal', video_time: 0 })
-                  }).catch(e => console.error("Failed to set new session", e));
-
-                  // Keep the existing videoSessionId
-                  updateCameraMedia(activeCameraId, { sessionStartTime: Date.now(), playbackEnded: false });
-                  setLatestEvent(null);
-                } else {
-                  authFetch('/api/dashboard/video/scenario', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ camera_id: activeCameraId, video_session_id: videoSessionId, scenario: demoScenario || 'normal', video_time: time })
-                  }).catch(e => console.error("Failed to sync play time", e));
-                }
-              }}
-              onPauseAnalysis={(time) => {
-                 authFetch('/api/dashboard/video/scenario', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ camera_id: activeCameraId, video_session_id: videoSessionId, scenario: 'paused', video_time: time })
-                  }).catch(e => console.error("Failed to sync pause", e));
-              }}
             />
           </div>
 

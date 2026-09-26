@@ -146,3 +146,23 @@ def test_signed_source_is_cached_by_session_without_logging_url(monkeypatch, tmp
     cached = Path(hydrated["video_source"])
     assert cached.read_bytes() == b"video-bytes"
     assert "secret-signature" not in caplog.text
+
+
+def test_bundled_control_uses_the_worker_local_source_without_a_session(monkeypatch):
+    monkeypatch.setattr(Path, "is_file", lambda self: str(self).replace("\\", "/") == "demo/videos/uploaded_demo.mp4")
+    hydrated = _materialize_remote_source({
+        "source_mode": "bundled",
+        "video_source": "object://stale/source.mp4",
+        "download_url": "https://storage.example.test/stale?signature",
+        "video_session_id": "stale-session",
+        "scenario": "normal",
+    }, "cam-checkpoint-01")
+
+    assert hydrated["video_source"] == "demo/videos/uploaded_demo.mp4"
+    assert hydrated["video_session_id"] is None
+    assert "download_url" not in hydrated
+    _set_local_session()
+    _scenario["video_session_id"] = "old-session"
+    assert _apply_control_sync(hydrated) is True
+    assert _scenario["video_session_id"] is None
+    assert _scenario["current"] == "normal"
