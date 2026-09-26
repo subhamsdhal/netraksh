@@ -3,6 +3,7 @@ import {
   deriveDashboardMode, filterLiveEvents, selectReliabilityEvent,
   shouldAcceptTelemetry, telemetryStatusAt, latestEventForSession, formatLatestEvent,
   frameResponseMatchesTelemetry,
+  isActiveTelemetry,
 } from '../src/utils/dashboardScope';
 
 describe('dynamic dashboard camera scope', () => {
@@ -51,6 +52,12 @@ describe('camera telemetry correctness', () => {
     expect(telemetryStatusAt(telemetry, 16_999)).toBe('LIVE');
     expect(telemetryStatusAt(telemetry, 18_000)).toBe('STALE');
     expect(telemetryStatusAt(telemetry, 41_000)).toBe('OFFLINE');
+  });
+
+  it('does not treat stale telemetry as an active camera source', () => {
+    const telemetry = { timestamp: 10_000, expected_interval_ms: 2_000 };
+    expect(isActiveTelemetry(telemetry, 16_999)).toBe(true);
+    expect(isActiveTelemetry(telemetry, 18_000)).toBe(false);
   });
 
   it('selects and labels only the latest event from the current session', () => {

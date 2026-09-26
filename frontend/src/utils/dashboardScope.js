@@ -3,6 +3,10 @@ export function deriveDashboardMode(activeCameraIds = []) {
   return count === 0 ? 'EMPTY' : count === 1 ? 'SINGLE' : 'DUAL';
 }
 
+export function isActiveTelemetry(telemetry, now = Date.now()) {
+  return telemetryStatusAt(telemetry, now) === 'LIVE';
+}
+
 export function filterLiveEvents(events = [], activeCameraIds = [], cameraFilter = 'ALL') {
   const active = new Set(activeCameraIds.filter(Boolean));
   return events.filter((event) => active.has(event.camera_id)

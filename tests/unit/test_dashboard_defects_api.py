@@ -107,3 +107,39 @@ def test_internal_sync_keeps_camera_sessions_separate(tmp_path, monkeypatch):
     finally:
         dashboard._demo_state.clear()
         dashboard._demo_state.update(previous)
+
+
+def test_playback_sync_does_not_wake_edge(monkeypatch):
+    """Two-second play/pause heartbeats must not keep free workers awake."""
+    calls = []
+
+    async def fake_wake(camera_id):
+        calls.append(camera_id)
+        return "ready"
+
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: False)
+    monkeypatch.setattr(dashboard, "_wake_edge_service", fake_wake)
+    asyncio.run(dashboard.post_video_scenario({
+        "camera_id": "cam-checkpoint-01", "scenario": "normal", "video_time": 2.0,
+    }, _user={}))
+    asyncio.run(dashboard.post_video_scenario({
+        "camera_id": "cam-checkpoint-01", "scenario": "paused", "video_time": 2.0,
+    }, _user={}))
+    assert calls == []
+
+
+def test_explicit_start_wakes_edge_once(monkeypatch):
+    calls = []
+
+    async def fake_wake(camera_id):
+        calls.append(camera_id)
+        return "ready"
+
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: False)
+    monkeypatch.setattr(dashboard, "_wake_edge_service", fake_wake)
+    result = asyncio.run(dashboard.post_video_scenario({
+        "camera_id": "cam-checkpoint-01", "scenario": "normal",
+        "video_time": 0, "wake_edge": True,
+    }, _user={}))
+    assert calls == ["cam-checkpoint-01"]
+    assert result["edge_status"] == "ready"

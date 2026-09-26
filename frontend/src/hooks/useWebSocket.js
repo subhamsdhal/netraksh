@@ -76,7 +76,12 @@ export default function useWebSocket(url, { fetchInitial = true } = {}) {
       setCameras(cams);
       const hMap = {};
       cams.forEach(c => {
-        hMap[c.camera_id] = { health_state: c.health_state, camera_id: c.camera_id };
+        hMap[c.camera_id] = {
+          health_state: c.health_state,
+          health_reason: c.health_reason,
+          fps_actual: c.fps_actual,
+          camera_id: c.camera_id,
+        };
       });
       setHealth(hMap);
     }

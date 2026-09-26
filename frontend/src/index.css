@@ -1512,7 +1512,8 @@ button {
 .dashboard-camera-card h2 { margin: 0.2rem 0; font: 700 1.05rem var(--font-display); color: var(--text-main); }
 .dashboard-camera-card p { margin: 0; color: var(--text-muted); font: 0.72rem var(--font-mono); }
 .dashboard-camera-card-controls { display: flex; align-items: flex-start; flex-direction: column; gap: 0.4rem; min-width: 10rem; }
-.dashboard-slot-actions { display: flex; gap: .35rem; flex-wrap: wrap; }
+.dashboard-slot-actions { display: flex; gap: .65rem; flex-wrap: wrap; align-items: center; }
+.dashboard-slot-actions .btn { white-space: nowrap; }
 .dashboard-camera-card-controls select { max-width: 13rem; }
 .dashboard-camera-status { align-self: flex-end; font: 700 0.62rem var(--font-display); letter-spacing: 0.08em; padding: 0.22rem 0.45rem; border: 1px solid var(--border-color); border-radius: 999px; }
 .status-live { color: var(--color-ok); border-color: rgba(74,222,128,.5); } .status-offline, .status-not-connected { color: var(--text-muted); }

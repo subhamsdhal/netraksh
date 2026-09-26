@@ -7,7 +7,7 @@ import { WS_URL, BACKEND_URL, authFetch } from '../services/auth';
 import useAuth from '../hooks/useAuth';
 import { parseUtc } from '../utils/time';
 import { DEMO_CAMERA_LABELS, MAX_VISIBLE_CAMERAS, selectDemoCameraSlots } from '../utils/demoCameraSlots';
-import { deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent } from '../utils/dashboardScope';
+import { deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
 
 // Reads structured scores from the event instead of string-parsing the reason.
@@ -92,7 +92,7 @@ function explainDecision(parsed) {
 
 export default function Dashboard() {
   const {
-    events, health, metrics, liveTracks, cameras, correlation, isConnected,
+    events, health, metrics, liveTracks, cameras, isConnected,
     connectionStatus, refreshEventsForContext, refreshTelemetryForContext,
   } = useWebSocket(WS_URL);
   const { scenario: demoScenario } = useDemoScenario();
@@ -137,7 +137,10 @@ export default function Dashboard() {
       });
       const result = await response.json().catch(() => ({}));
       if (cameraId) updateCameraMedia(cameraId, {
-        edgeStatus: result.edge_status === 'ready' ? 'READY' : result.edge_status === 'waking' ? 'WAKING' : 'WAITING',
+        // A successful /wake response means the free worker's HTTP listener
+        // answered; it does not prove inference has resumed.  Keep the honest
+        // WAKING state until fresh telemetry makes the camera LIVE.
+        edgeStatus: ['ready', 'waking'].includes(result.edge_status) ? 'WAKING' : 'WAITING',
       });
       return result;
     } catch (_) {
@@ -220,9 +223,8 @@ export default function Dashboard() {
   const dedicatedDemoView = visibleCameraIds.filter(Boolean).length > 0
     && visibleCameraIds.filter(Boolean).every((id) => Boolean(DEMO_CAMERA_LABELS[id]));
   const activeCameraIds = useMemo(() => visibleCameraIds.filter((id) => {
-    const status = cameraModels.find((camera) => camera.cameraId === id)?.status;
-    return status === 'LIVE' || status === 'STALE';
-  }), [visibleCameraIds.join('|'), cameraModels]);
+    return isActiveTelemetry(liveTracks[id], now);
+  }), [visibleCameraIds.join('|'), liveTracks, now]);
   const dashboardMode = deriveDashboardMode(activeCameraIds);
   const reliabilityScopeCameraId = reliabilityCameraId && activeCameraIds.includes(reliabilityCameraId)
     ? reliabilityCameraId : activeCameraIds[0] || null;
@@ -367,7 +369,10 @@ export default function Dashboard() {
   }, [visibleContextKey, refreshEventsForContext, refreshTelemetryForContext]);
 
   useEffect(() => {
-    if (activeCameraIds.length < 2) return undefined;
+    if (activeCameraIds.length < 2) {
+      setCorrelationState(null);
+      return undefined;
+    }
     let mounted = true;
     const refreshCorrelation = async () => {
       try {
@@ -576,7 +581,10 @@ export default function Dashboard() {
   const scopedLatestEvent = selectReliabilityEvent(displayEvents, reliabilityScopeCameraId, activeCameraIds);
   const reliabilityEvent = scopedLatestEvent || (latestEvent?.camera_id === reliabilityScopeCameraId ? latestEvent : null);
   const parsed = reliabilityEvent ? parseDecisionReason(reliabilityEvent) : null;
-  const effectiveCorrelation = correlation || correlationState;
+  // Only the REST result is scoped to the currently live cameras and their
+  // current streams.  A websocket correlation message can legitimately
+  // describe an earlier session, so it must not override this scoped view.
+  const effectiveCorrelation = dashboardMode === 'DUAL' ? correlationState : null;
   const healthState = reliabilityEvent?.camera_health_state
     || (reliabilityEvent && health[reliabilityEvent.camera_id]?.health_state); // 'OK' | 'DEGRADED' | 'FAILED'
   const sceneCondition = reliabilityEvent?.scene_condition;
@@ -669,7 +677,7 @@ export default function Dashboard() {
 
       <div className="dashboard-live-strip">
         <div><span>CAMERA</span><strong title={activeCamera?.displayId}>{activeCamera?.friendlyName || 'Not configured'}</strong></div>
-        <div><span>CAMERA HEALTH</span><strong>{health[activeCameraId]?.health_state || 'UNKNOWN'}</strong></div>
+        <div><span>CAMERA HEALTH</span><strong>{health[activeCameraId]?.health_state || 'UNKNOWN'}{health[activeCameraId]?.health_reason && health[activeCameraId]?.health_state !== 'OK' ? ` · ${String(health[activeCameraId].health_reason).replace(/_/g, ' ')}` : ''}</strong></div>
         <div><span>FPS</span><strong>{metricsFresh && Number.isFinite(activeMetrics?.fps)
           ? activeMetrics.fps.toFixed(2)
           : Number.isFinite(health[activeCameraId]?.fps_actual)
@@ -725,13 +733,13 @@ export default function Dashboard() {
                   <h2>{title}</h2>
                   <p>{cameraId ? `${cameraId.toUpperCase()} · ${locationLabel}` : 'No source selected'}</p>
                   {sourceState?.sourceName && <p className="dashboard-source-name">SOURCE: {sourceState.sourceName}</p>}
-                  {mediaState.edgeStatus === 'WAKING' && <p className="dashboard-source-name">WAKING AI WORKER...</p>}
+                  {mediaState.edgeStatus === 'WAKING' && !telemetryAvailable && <p className="dashboard-source-name">WAKING AI WORKER...</p>}
                 </div>
                 <div className="dashboard-camera-card-controls">
                   <span className={`dashboard-camera-status status-${status.toLowerCase().replace(/\s+/g, '-')}`}>{statusLabel}</span>
                   {cameraId && canUpload && <div className="dashboard-slot-actions">
                     <button className="btn btn-sm btn-outline" onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
-                    {sourceState?.sourceId && !activeCameraIds.includes(cameraId) && <button className="btn btn-sm btn-outline" onClick={() => requestScenario(cameraId, { camera_id: cameraId, video_session_id: sourceState.sourceId, scenario: 'normal', video_time: 0 })}>START / ANALYZE</button>}
+                    {sourceState?.sourceId && !activeCameraIds.includes(cameraId) && <button className="btn btn-sm btn-outline" onClick={() => requestScenario(cameraId, { camera_id: cameraId, video_session_id: sourceState.sourceId, scenario: 'normal', video_time: 0, wake_edge: true })}>START / ANALYZE</button>}
                     {activeCameraIds.includes(cameraId) && <button className="btn btn-sm btn-outline" onClick={() => {
                       authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ camera_id: cameraId, video_session_id: sourceState?.sourceId || null, scenario: 'paused', video_time: 0 }) }).catch(() => {});
                       // Keep the selected source bound to this slot while it is
@@ -744,7 +752,7 @@ export default function Dashboard() {
                         ...current,
                         [cameraId]: current[cameraId] ? { ...current[cameraId], runState: 'PAUSED' } : current[cameraId],
                       }));
-                    }}>STOP</button>}
+                    }}>STOP ANALYSIS</button>}
                   </div>}
                   <select
                     aria-label={`Select camera slot ${slotIndex + 1}`}
@@ -787,15 +795,16 @@ export default function Dashboard() {
               </div>
               <div className="dashboard-camera-ai-row" aria-label="AI capability status">
                 {isDemoReplay && <span className="ai-demo">DEMO REPLAY</span>}
-                <span className="ai-active">DETECTION {cameraId ? 'READY' : 'WAITING'}</span>
-                <span className="ai-active">TRACKING {cameraId ? 'READY' : 'WAITING'}</span>
+                <span className={telemetryAvailable ? 'ai-active' : 'ai-context'}>DETECTION {telemetryAvailable ? 'LIVE' : liveStatus === 'STALE' ? 'STALE · LAST KNOWN' : 'WAITING'}</span>
+                <span className={telemetryAvailable ? 'ai-active' : 'ai-context'}>TRACKING {telemetryAvailable ? 'LIVE' : liveStatus === 'STALE' ? 'STALE · LAST KNOWN' : 'WAITING'}</span>
                 <span className="ai-context">SCENE {lightingState.replace(/_/g, ' ')}</span>
                 <span className="ai-context">ANALYTICS {analyticsMethod.replace(/_/g, ' ')}</span>
                 <span className="ai-context">LINE / FENCE EVENT {cameraId ? 'BACKEND' : 'WAITING'}</span>
-                <span className="ai-context">ANPR {cameraId ? 'SUPPORTED' : 'N/A'}</span>
+                <span className="ai-context">ANPR {cameraId ? 'LOCALIZATION AVAILABLE' : 'N/A'}</span>
+                <span className="ai-context">OCR {cameraId ? 'UNAVAILABLE · CLOUD MODE' : 'N/A'}</span>
               </div>
               <div className="dashboard-camera-telemetry" aria-label={`ANPR result for ${cameraId || 'empty slot'}`}>
-                <span><b>ANPR</b>{latestCameraEvent?.normalized_plate_text || latestCameraEvent?.plate_text || 'No plate read'}</span>
+                <span><b>ANPR OCR</b>{latestCameraEvent?.normalized_plate_text || latestCameraEvent?.plate_text || 'Unavailable in constrained cloud mode'}</span>
                 <span><b>CONFIDENCE</b>{latestCameraEvent?.plate_confidence == null ? 'N/A' : `${Math.round(Number(latestCameraEvent.plate_confidence) * 100)}%`}</span>
               </div>
               <div className="dashboard-camera-telemetry" aria-label={`Face watchlist result for ${cameraId || 'empty slot'}`}>
@@ -828,12 +837,13 @@ export default function Dashboard() {
         <div className="dashboard-events-table-wrap">
           {dashboardMode === 'EMPTY' ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">WAITING FOR SOURCE — ADD A VIDEO TO BEGIN ANALYSIS.</div></div> : displayEvents.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">No verified security events recorded for the active camera scope yet.</div></div> : (
             <table className="dashboard-events-table">
-              <thead><tr>{['TIME', 'CAMERA', 'EVENT', 'DECISION', 'SEVERITY', 'EVIDENCE'].map(label => <th key={label}>{label}</th>)}</tr></thead>
+              <thead><tr>{['TIME', 'EVENT ID', 'CAMERA', 'EVENT', 'DECISION', 'SEVERITY', 'EVIDENCE'].map(label => <th key={label}>{label}</th>)}</tr></thead>
               <tbody>{displayEvents.map((event, index) => {
                 const time = parseUtc(event.timestamp);
                 const camera = cameraModels.find(item => item.cameraId === event.camera_id);
                 return <tr key={event.event_id || event.id || `${event.timestamp}-${index}`}>
                   <td>{time && !Number.isNaN(time.getTime()) ? time.toISOString().substring(11, 19) : 'N/A'}</td>
+                  <td title={event.event_id || event.id || ''}>{String(event.event_id || event.id || 'N/A').slice(0, 8)}</td>
                   <td>{camera?.friendlyName || event.camera_id || 'Unknown camera'}</td>
                   <td>{String(event.event_type || event.detection_class || 'Security event').replace(/_/g, ' ').replace(/MOVEMENT UNCLASSIFIED/g, 'LOW LIGHT MOVEMENT')}{event.detection_method === 'MOTION_FALLBACK' ? ' · MOTION FALLBACK' : ''}</td>
                   <td className={`decision-${String(event.decision_state || event.decision || 'UNKNOWN').toLowerCase()}`}>{event.decision_state || event.decision || 'UNKNOWN'}</td>
@@ -1030,22 +1040,22 @@ export default function Dashboard() {
                   <span className="text-warning text-sm font-display">REQUIRES TWO ACTIVE CAMERA SOURCES</span>
                   <span className="text-xs text-muted">Add and start a second video to enable cross-camera event correlation.</span>
                 </div>
-              ) : effectiveCorrelation?.status === 'CORROBORATED' || latestEvent?.corroborated_by_event_id ? (
+              ) : effectiveCorrelation?.status === 'CORROBORATED' ? (
                 <div className="flex flex-col gap-1">
                   <div className="flex items-center gap-2">
                     <span className="text-ok text-lg">&#10003;</span>
                     <span className="text-sm font-display text-ok">
                       Corroborated by{' '}
-                      <span className="font-bold">{effectiveCorrelation?.secondary_camera_id || latestEvent?.corroborating_camera_id || 'second camera'}</span>
+                      <span className="font-bold">{effectiveCorrelation.secondary_camera_id || 'second camera'}</span>
                     </span>
                   </div>
                   <div className="flex gap-4 text-xs font-body text-muted">
                     <span>RULE MATCH</span>
-                    {(effectiveCorrelation?.time_delta_seconds ?? latestEvent?.corroboration_delta_t_s) != null && (
-                      <span>Δt = <span className="text-main">{Number(effectiveCorrelation?.time_delta_seconds ?? latestEvent?.corroboration_delta_t_s).toFixed(1)}s</span> apart</span>
+                    {effectiveCorrelation.time_delta_seconds != null && (
+                      <span>Δt = <span className="text-main">{Number(effectiveCorrelation.time_delta_seconds).toFixed(1)}s</span> apart</span>
                     )}
-                    {(effectiveCorrelation?.distance_m ?? latestEvent?.corroboration_distance_m) != null && (
-                      <span><span className="text-main">{Number(effectiveCorrelation?.distance_m ?? latestEvent?.corroboration_distance_m).toFixed(0)}m</span> separation</span>
+                    {effectiveCorrelation.distance_m != null && (
+                      <span><span className="text-main">{Number(effectiveCorrelation.distance_m).toFixed(0)}m</span> separation</span>
                     )}
                   </div>
                   <span className="text-[10px] text-muted italic mt-1">Same detection class appeared at a spatially-plausible camera within expected travel time. No identity re-id claimed.</span>

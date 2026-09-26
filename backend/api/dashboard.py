@@ -355,7 +355,11 @@ async def post_video_scenario(
         if active_session is not None:
             update_active_session(camera_id, changes)
     edge_status = "not_requested"
-    if camera_id and requested in {"normal", "paused"}:
+    # Browser playback reports its current time every two seconds.  Those
+    # synchronization heartbeats (including pause/metadata events) must never
+    # keep a sleeping free-tier worker awake.  Waking is an explicit operator
+    # action, requested only by START / ANALYZE in the dashboard.
+    if camera_id and requested == "normal" and payload.get("wake_edge") is True:
         edge_status = await _wake_edge_service(camera_id)
     return {"status": "success", "state": _demo_state, "edge_status": edge_status}
 

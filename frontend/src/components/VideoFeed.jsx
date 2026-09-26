@@ -530,7 +530,10 @@ export default function VideoFeed({
         src={analyzedFrameUrl}
         alt={`Annotated analyzed frame for ${cameraId}`}
         onLoad={updateRect}
-        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 0 }}
+        style={{
+          position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 0,
+          filter: telemetryStatus === 'LIVE' ? 'none' : 'grayscale(0.7) brightness(0.55)',
+        }}
       /> : mediaUrl ? <video
         ref={videoRef}
         src={mediaUrl}
@@ -722,6 +725,22 @@ export default function VideoFeed({
 
       {/* ── Scenario fallback overlay (fog / sensor failure / offline) ── */}
       <ScenarioOverlay scenario={demoScenario} />
+
+      {['STALE', 'OFFLINE'].includes(telemetryStatus) && analyzedFrameUrl && (
+        <div style={{
+          position: 'absolute', inset: 0, zIndex: 18, pointerEvents: 'none',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(2,6,23,0.18)',
+        }}>
+          <span style={{
+            padding: '0.45rem 0.75rem', border: '1px solid rgba(251,191,36,0.75)',
+            background: 'rgba(2,6,23,0.88)', color: '#fbbf24', borderRadius: '0.25rem',
+            fontFamily: 'var(--font-display)', fontSize: '0.7rem', letterSpacing: '0.09em',
+          }}>
+            LAST KNOWN FRAME · {telemetryStatus} TELEMETRY
+          </span>
+        </div>
+      )}
 
       {/* ── Corner HUD toggle button ── */}
       <button
