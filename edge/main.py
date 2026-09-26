@@ -80,6 +80,14 @@ def should_capture_abstain_snapshot(last_snapshot_time: float, now: float) -> bo
     return (now - last_snapshot_time) >= ABSTAIN_SNAPSHOT_INTERVAL_SECONDS
 
 
+def resolve_detector_model_path(config: dict) -> str:
+    """Return the model artifact that the selected detector runtime loads."""
+    configured_path = config.get("model_size", os.environ.get("YOLO_MODEL_PATH", "yolov8n.pt"))
+    if os.environ.get("DETECTOR_RUNTIME", "pytorch").lower() == "onnx_cpu":
+        return os.environ.get("DETECTOR_MODEL_ONNX", configured_path)
+    return configured_path
+
+
 def determine_severity(event: dict, reliability) -> Severity:
     """Heuristic severity assignment for MVP."""
     et = str(event.get("event_type", ""))
@@ -151,7 +159,7 @@ class EdgePipeline:
         self._running = False
 
         # Offline Model Readiness Validation (Batch 1 & 2)
-        self.yolo_model_path = config.get("model_size", os.environ.get("YOLO_MODEL_PATH", "yolov8n.pt"))
+        self.yolo_model_path = resolve_detector_model_path(config)
         if not os.path.exists(self.yolo_model_path):
             logger.error(f"[Pipeline] FATAL: Configured YOLO model not found at '{self.yolo_model_path}'")
             raise RuntimeError(f"YOLO offline model missing: {self.yolo_model_path}. Do not silently download during demo.")
