@@ -100,6 +100,7 @@ class CameraAdapter:
         self.paused = False
         self._seek_request = None
         self._last_video_time = 0.0
+        self._duration_seconds: Optional[float] = None
 
         # WP-4.1 State & Queue
         self._state = StreamState.INITIALIZING
@@ -133,6 +134,11 @@ class CameraAdapter:
     @property
     def demo_replay(self) -> bool:
         return self.source_kind == "LOCAL_FINITE_FILE" and self.loop_video
+
+    @property
+    def duration_seconds(self) -> Optional[float]:
+        """Finite source duration discovered from VideoCapture, when known."""
+        return self._duration_seconds
 
     def _set_state(self, new_state: StreamState):
         with self._state_lock:
@@ -179,9 +185,18 @@ class CameraAdapter:
                 logger.error("[Adapter] Reader thread failed to join within timeout (decoder may be hanging).")
             self._reader_thread = None
 
-    def seek_to(self, target_time_s: float) -> None:
-        """Request a seek to the specified video time in seconds."""
-        self._seek_request = target_time_s
+    def seek_to(self, target_time_s: float) -> bool:
+        """Request a bounded seek. Returns False for an invalid finite-file seek."""
+        target = max(0.0, float(target_time_s))
+        if self.source_kind == "LOCAL_FINITE_FILE" and self._duration_seconds:
+            if target >= self._duration_seconds:
+                logger.warning(
+                    "[Adapter] Rejecting out-of-range seek %.3fs for %.3fs finite source",
+                    target, self._duration_seconds,
+                )
+                return False
+        self._seek_request = target
+        return True
 
     def _reader_loop(self) -> None:
         """Background thread loop owning the VideoCapture."""
@@ -208,6 +223,14 @@ class CameraAdapter:
                     self._fps_declared = cap.get(cv2.CAP_PROP_FPS) or 25.0
                     self._width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
                     self._height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    if is_video_file:
+                        frame_total = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+                        self._duration_seconds = (
+                            frame_total / self._fps_declared
+                            if frame_total > 0 and self._fps_declared > 0 else None
+                        )
+                    else:
+                        self._duration_seconds = None
                     self._set_state(StreamState.CONNECTED)
                     attempt = 0
                     first_frame_received = False
