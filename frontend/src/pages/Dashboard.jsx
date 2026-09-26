@@ -9,7 +9,7 @@ import { parseUtc } from '../utils/time';
 import { DEMO_CAMERA_LABELS, MAX_VISIBLE_CAMERAS, selectDemoCameraSlots } from '../utils/demoCameraSlots';
 import { deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
-import { durableHeartbeat, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
+import { scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 
 // Reads structured scores from the event instead of string-parsing the reason.
 function parseDecisionReason(ev) {
@@ -808,14 +808,6 @@ export default function Dashboard() {
                     canUpload={canUpload}
                     uploadError={mediaState.uploadError || null}
                     onVideoEnded={() => updateCameraMedia(cameraId, { playbackEnded: true })}
-                    onStartAnalysis={(time) => {
-                      const payload = durableHeartbeat(cameraId, sourceState, mediaState.sessionId, time);
-                      if (payload) authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => {});
-                    }}
-                    onPauseAnalysis={(time) => {
-                      const payload = durableHeartbeat(cameraId, sourceState, mediaState.sessionId, time);
-                      if (payload) authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => {});
-                    }}
                   />
                 ) : (
                   <div className="dashboard-camera-empty"><ShieldAlert size={22} /><strong>CAMERA SLOT {slotIndex + 1} · NOT CONFIGURED</strong><span>No video source selected.</span></div>
