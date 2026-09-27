@@ -325,6 +325,8 @@ class SyncClient:
             payload_dict = json.loads(payload_json)
             ep_dict = payload_dict.get("evidence_package", {})
             event_id = ep_dict.get("event_id")
+            stream_id = ep_dict.get("stream_id")
+            analysis_session_id = ep_dict.get("analysis_session_id")
             evidence_clip_ref = ep_dict.get("evidence_clip_ref")
         except json.JSONDecodeError:
             return False, True, f"[{ErrorCategory.EVIDENCE_ERROR.value}] Failed to decode payload_json"
@@ -341,12 +343,28 @@ class SyncClient:
                 headers["Authorization"] = f"Bearer {self.auth_token}"
                 
             # STEP 1: Upload Metadata
+            logger.info(
+                "[EventTrace] POST_EVENTS_ATTEMPT event_id=%s stream_id=%s "
+                "analysis_session_id=%s seq=%s",
+                event_id,
+                stream_id,
+                analysis_session_id,
+                seq_num,
+            )
             with httpx.Client(verify=verify, cert=cert, timeout=30.0) as client:
                 response = client.post(
                     f"{self.backend_url}/events",
                     content=payload_json,
                     headers=headers,
                 )
+            logger.info(
+                "[EventTrace] POST_EVENTS_RESULT event_id=%s status=%s "
+                "stream_id=%s analysis_session_id=%s",
+                event_id,
+                response.status_code,
+                stream_id,
+                analysis_session_id,
+            )
             if response.status_code not in (200, 201):
                 # 408/425/429 are client-visible but transient conditions.
                 # Marking a rate-limited evidence event FAILED permanently

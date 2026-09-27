@@ -140,6 +140,7 @@ class TestQueueDepthUnaffected:
 def test_sync_payload_preserves_the_signed_analysis_session_scope(tmp_path):
     """Exercise the real outbox serialization used by POST /events."""
     package = _package("evt-scoped")
+    package.stream_id = "durable-source-1"
     package.analysis_session_id = "analysis-run-1"
     package.schema_version = "2.0"
     package.crypto_version = "crypto-v2"
@@ -151,6 +152,7 @@ def test_sync_payload_preserves_the_signed_analysis_session_scope(tmp_path):
     row = client._fetch_pending()[0]
     payload = json.loads(row[3])
     assert payload["sequence_number"] == 0
+    assert payload["evidence_package"]["stream_id"] == "durable-source-1"
     assert payload["evidence_package"]["analysis_session_id"] == "analysis-run-1"
     assert payload["evidence_package"]["crypto_version"] == "crypto-v2"
 

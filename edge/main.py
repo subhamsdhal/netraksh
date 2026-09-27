@@ -266,7 +266,9 @@ class EdgePipeline:
         self.chain_store = EvidenceChainStore(chain_path)
         self.packager = EvidencePackager(
             camera_id=self.camera_id,
-            stream_id=self.stream_id,
+            # stream_id is the durable uploaded-source identity.  The
+            # per-run analysis identity is carried separately below.
+            stream_id=self.source_stream_id,
             analysis_session_id=self.stream_id,
             key_manager=self.key_manager,
             chain_store=self.chain_store,
@@ -584,7 +586,7 @@ class EdgePipeline:
         # with the previous pass through the file.
         self.stream_id = str(uuid.uuid4())
         if hasattr(self, "packager"):
-            self.packager.stream_id = self.stream_id
+            self.packager.stream_id = self.source_stream_id
             self.packager.analysis_session_id = self.stream_id
         self._telemetry_sequence = 0
         self._last_telemetry_time = 0.0
@@ -1245,6 +1247,16 @@ class EdgePipeline:
             t_packaged = time.perf_counter()
             self.sync_client.enqueue(ep, seq_num)
             t_enqueued = time.perf_counter()
+
+            logger.info(
+                "[EventTrace] EVENT_OBJECT_CREATED event_id=%s camera_id=%s "
+                "stream_id=%s analysis_session_id=%s seq=%s",
+                ep.event_id,
+                ep.camera_id,
+                ep.stream_id,
+                ep.analysis_session_id,
+                seq_num,
+            )
 
             # --- Performance instrumentation: decision-to-enqueue latency ---
             timing = dict(getattr(self.packager, "last_timing", {}))
