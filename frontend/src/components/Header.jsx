@@ -33,10 +33,13 @@ export default function Header() {
   const [pendingAlerts, setPendingAlerts] = useState(null);
   const [chainStatus, setChainStatus]   = useState(null);
   const [edgeWakeUntil, setEdgeWakeUntil] = useState(0);
+  const [edgeTelemetrySignalAt, setEdgeTelemetrySignalAt] = useState(0);
 
   // ── Real connectivity & edge freshness ────────────────────────────────────
-  // lastEdgeTelemetryMs: wall-clock time of most recent live_telemetry packet
-  const lastEdgeTelemetryMs = lastTelemetryAt || 0;
+  // Accept freshness from both this header's socket hook and the application
+  // telemetry event emitted by any active dashboard socket. This prevents the
+  // top bar from remaining WAKING when real edge telemetry is already flowing.
+  const lastEdgeTelemetryMs = Math.max(lastTelemetryAt || 0, edgeTelemetrySignalAt || 0);
   // backendHealthy: whether GET /health returned 200 recently
   const [backendHealthy, setBackendHealthy] = useState(true);
 
@@ -77,8 +80,18 @@ export default function Header() {
       if (event?.detail?.status === 'WAKING') setEdgeWakeUntil(Date.now() + 305_000);
       if (event?.detail?.status === 'LIVE') setEdgeWakeUntil(0);
     };
+    const onTelemetry = (event) => {
+      const ts = Number(event?.detail?.ts);
+      const observedAt = Number.isFinite(ts) ? ts : Date.now();
+      setEdgeTelemetrySignalAt(observedAt);
+      setEdgeWakeUntil(0);
+    };
     window.addEventListener('netraksh:edge-wake', onWake);
-    return () => window.removeEventListener('netraksh:edge-wake', onWake);
+    window.addEventListener('netraksh-edge-telemetry', onTelemetry);
+    return () => {
+      window.removeEventListener('netraksh:edge-wake', onWake);
+      window.removeEventListener('netraksh-edge-telemetry', onTelemetry);
+    };
   }, []);
 
   // ── Sync status (real queue size from /sync/status) ─────────────────────
