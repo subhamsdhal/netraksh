@@ -229,6 +229,7 @@ export default function VideoFeed({
   onPauseAnalysis,
   sourceMode,
   expectedSessionId,
+  sourceRunState,
 }) {
   const containerRef = useRef(null);
   const videoRef = useRef(null);
@@ -261,18 +262,23 @@ export default function VideoFeed({
   // backend requires the same session + frame index, so an independent video
   // clock can never masquerade as the analyzed frame.
   useEffect(() => {
-    const sessionId = liveTracksData?.analysis_session_id || liveTracksData?.stream_id;
+    // stream_id binds telemetry to the selected durable upload. The frame
+    // endpoint, however, is keyed by analysis_session_id + frame_index.
+    // Keeping those identities separate prevents an old demo frame from
+    // being displayed for a newly selected upload.
+    const sourceSessionId = liveTracksData?.stream_id || null;
+    const analysisSessionId = liveTracksData?.analysis_session_id || sourceSessionId;
     const frameIndex = liveTracksData?.frame_index;
     if (!hudVisible) return undefined;
-    if (expectedSessionId && sessionId !== expectedSessionId) return undefined;
-    if (!cameraId || !sessionId || !Number.isFinite(frameIndex) || !liveTracksData?.preview_available) return undefined;
+    if (expectedSessionId && sourceSessionId !== expectedSessionId) return undefined;
+    if (!cameraId || !analysisSessionId || !Number.isFinite(frameIndex) || !liveTracksData?.preview_available) return undefined;
     let cancelled = false;
     let nextUrl = null;
     const params = new URLSearchParams({
-      analysis_session_id: sessionId,
+      analysis_session_id: analysisSessionId,
       frame_index: String(frameIndex),
       hud: 'true',
-      cache_bust: `${sessionId}:${frameIndex}:1`,
+      cache_bust: `${analysisSessionId}:${frameIndex}:1`,
     });
     authFetch(`/system/telemetry/frame/${encodeURIComponent(cameraId)}?${params.toString()}`)
       .then((response) => response.ok && frameResponseMatchesTelemetry(liveTracksData, response.headers) ? response.blob() : null)
@@ -492,7 +498,17 @@ export default function VideoFeed({
             className="dashboard-video-title font-display font-bold text-main"
             style={{ fontSize: '1rem', letterSpacing: '0.1em' }}
           >
-            {isUploading ? 'UPLOADING · VALIDATING · NORMALIZING VIDEO' : liveTracksData ? 'TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL' : 'NO VIDEO SOURCE'}
+            {isUploading
+              ? 'UPLOADING · VALIDATING · NORMALIZING VIDEO'
+              : ['ACTIVATING', 'WAKING'].includes(sourceRunState)
+                ? 'PREPARING CLOUD ANALYSIS'
+                : sourceRunState === 'READY_TO_START'
+                  ? 'VIDEO READY · STARTING AI WORKER'
+                  : (sourceMode === 'durable' && expectedSessionId && !liveTracksData)
+                    ? 'WAITING FOR FIRST ANALYZED FRAME'
+                    : liveTracksData
+                      ? 'TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL'
+                      : 'NO VIDEO SOURCE'}
           </span>
           {canUpload && !isUploading ? <div className="dashboard-video-upload" style={{
             background: 'var(--color-ok)', color: '#000',
