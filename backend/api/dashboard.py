@@ -52,6 +52,7 @@ from backend.services.video_storage import (
     start_active_session,
     store_uploaded_session,
     complete_active_session,
+    reconcile_inactive_control,
     update_active_session,
 )
 
@@ -76,6 +77,13 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+
+
+def _reconciled_durable(camera_id: str):
+    # Latest telemetry is a read-only proof input. Reconciliation never emits
+    # telemetry, changes source identity, increments a generation, or wakes a worker.
+    from backend.api.system import _latest_telemetry
+    return reconcile_inactive_control(camera_id, _latest_telemetry.get(camera_id))
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -367,7 +375,7 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
                 "scenario": selected_bundled.get("scenario", "paused"),
                 "processing_status": "active" if selected_bundled.get("scenario") == "normal" else "idle",
             }
-        durable = get_valid_active_session(camera_id)
+        durable = _reconciled_durable(camera_id)
         if durable:
             preview_key = durable.get("preview_object_key")
             source_key = durable.get("source_object_key")
@@ -502,7 +510,7 @@ async def get_internal_sync(request: Request, _edge=Depends(require_edge_auth)):
                 "video_time_updated_at": selected_bundled.get("video_time_updated_at", 0.0),
                 "camera_id": camera_id,
             }
-        durable = get_valid_active_session(camera_id)
+        durable = _reconciled_durable(camera_id)
         if durable:
             source_key = durable.get("source_object_key")
             return {

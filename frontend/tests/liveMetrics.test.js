@@ -6,7 +6,7 @@ const live = { timestamp: now - 100, processing_fps: 0.24, source_fps: 29.97 };
 
 describe('live dashboard metrics', () => {
   it('promotes fresh telemetry over stale waking intent', () => {
-    expect(deriveGlobalEdgeStatus({ analysisStates: [{ intent: 'WAKING' }], lastTelemetryAt: now - 100, edgeWakeUntil: now + 10_000, now })).toBe('ONLINE');
+    expect(deriveGlobalEdgeStatus({ analysisStates: [{ intent: 'WAKING', hasFreshCurrentTelemetry: true }], lastTelemetryAt: now - 100, edgeWakeUntil: now + 10_000, now })).toBe('ONLINE');
   });
 
   it('reports idle after completed processing with no active intent', () => {
@@ -28,6 +28,6 @@ describe('live dashboard metrics', () => {
   });
 
   it('does not let another camera intent alter the selected camera calculation', () => {
-    expect(deriveGlobalEdgeStatus({ analysisStates: [{ cameraId: 'cam-border-01', intent: 'ACTIVE' }], lastTelemetryAt: now - 100, now })).toBe('ONLINE');
+    expect(deriveGlobalEdgeStatus({ analysisStates: [{ cameraId: 'cam-border-01', intent: 'ACTIVE', hasFreshCurrentTelemetry: true }], lastTelemetryAt: now - 100, now })).toBe('ONLINE');
   });
 });

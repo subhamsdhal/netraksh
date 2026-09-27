@@ -186,6 +186,28 @@ def update_active_session(camera_id: str, changes: dict[str, Any]) -> dict[str, 
     return current
 
 
+def reconcile_inactive_control(camera_id: str, telemetry: dict[str, Any] | None = None, *, now: float | None = None) -> dict[str, Any] | None:
+    """Repair only a stale paused durable lifecycle without waking a worker."""
+    current = get_valid_active_session(camera_id)
+    if current is None:
+        return None
+    lifecycle = str(current.get("analysis_state") or "READY").upper()
+    scenario = str(current.get("scenario") or "paused").lower()
+    if scenario not in {"paused", "stopped"} or lifecycle not in {"WAKING", "ACTIVE"}:
+        return current
+    observed = telemetry or {}
+    timestamp = float(observed.get("processed_timestamp") or observed.get("timestamp") or 0)
+    current_time = time.time() if now is None else now
+    same_generation = int(observed.get("analysis_generation") or -1) == int(current.get("analysis_generation") or 0)
+    same_source = observed.get("stream_id") == current.get("session_id")
+    actively_processing = str(observed.get("analysis_state") or "").upper() == "PROCESSING"
+    if same_generation and same_source and actively_processing and current_time - timestamp < 30:
+        return current
+    current.update({"analysis_state": "PAUSED", "state_updated_at": current_time})
+    _put_json(control_key(camera_id), current)
+    return current
+
+
 def start_active_session(camera_id: str, session_id: str) -> tuple[dict[str, Any], bool]:
     """Atomically begin one durable analysis generation, or return its in-flight run."""
     current = get_valid_active_session(camera_id)

@@ -318,7 +318,10 @@ export default function Dashboard() {
           : status === 'LIVE' || status === 'STALE'
           ? 'ACTIVE'
           : 'IDLE';
-      return { cameraId, intent, ageMs };
+      const sameSource = source?.sourceMode !== 'durable' || telemetry?.stream_id === source?.sourceId;
+      const sameGeneration = source?.analysisGeneration == null
+        || Number(telemetry?.analysis_generation) === Number(source.analysisGeneration);
+      return { cameraId, intent, ageMs, hasFreshCurrentTelemetry: status === 'LIVE' && sameSource && sameGeneration };
     });
     window.dispatchEvent(new CustomEvent('netraksh:analysis-state', { detail: { cameraStates } }));
   }, [visibleCameraIds.join('|'), slotSources, scopedLiveTracks, now]);

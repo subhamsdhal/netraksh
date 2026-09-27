@@ -246,6 +246,7 @@ export default function VideoFeed({
   const [hudVisible, setHudVisible] = useState(sourceMode === 'durable');
   const [videoError, setVideoError] = useState(false);
   const [analyzedFrameUrl, setAnalyzedFrameUrl] = useState(null);
+  const [analyzedFrameStatus, setAnalyzedFrameStatus] = useState('WAITING FOR NEXT ANALYZED FRAME');
   const isDurableSource = sourceMode === 'durable';
   const showAnalyzedFrame = Boolean(
     analyzedFrameUrl
@@ -290,12 +291,26 @@ export default function VideoFeed({
       .then((blob) => {
         if (!blob || cancelled) return;
         nextUrl = URL.createObjectURL(blob);
-        setAnalyzedFrameUrl((previous) => {
-          if (previous) URL.revokeObjectURL(previous);
-          return nextUrl;
-        });
+        // Do not replace a valid FrameSnapshot until this exact response is
+        // decodable. A failed candidate keeps the prior image and its baked
+        // boxes/counts together instead of rendering a broken image.
+        const candidate = new Image();
+        candidate.onload = () => {
+          if (cancelled) return;
+          setAnalyzedFrameUrl((previous) => {
+            if (previous) URL.revokeObjectURL(previous);
+            return nextUrl;
+          });
+          setAnalyzedFrameStatus('LATEST ANALYZED FRAME');
+        };
+        candidate.onerror = () => {
+          URL.revokeObjectURL(nextUrl);
+          nextUrl = null;
+          if (!cancelled) setAnalyzedFrameStatus('WAITING FOR NEXT ANALYZED FRAME');
+        };
+        candidate.src = nextUrl;
       })
-      .catch(() => {});
+      .catch(() => { if (!cancelled) setAnalyzedFrameStatus('WAITING FOR NEXT ANALYZED FRAME'); });
     return () => { cancelled = true; if (nextUrl) URL.revokeObjectURL(nextUrl); };
   }, [cameraId, liveTracksData, hudVisible, isDurableSource, expectedSessionId]);
 
@@ -777,7 +792,7 @@ export default function VideoFeed({
           fontFamily: 'ui-monospace, monospace', fontSize: '0.55rem', letterSpacing: '0.07em',
           pointerEvents: 'none',
         }}>
-          LATEST ANALYZED FRAME · FRAME {liveTracksData?.frame_index ?? '—'} · PROCESSED {processedAgeSeconds == null ? 'RECENTLY' : `${processedAgeSeconds.toFixed(1)}s AGO`} · EXACT TELEMETRY SAMPLE
+          {analyzedFrameStatus} · FRAME {liveTracksData?.frame_index ?? '—'} · PROCESSED {processedAgeSeconds == null ? 'RECENTLY' : `${processedAgeSeconds.toFixed(1)}s AGO`} · EXACT TELEMETRY SAMPLE
         </div>
       )}
       {!showAnalyzedFrame && mediaUrl && isDurableSource && (
