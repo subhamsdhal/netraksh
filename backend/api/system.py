@@ -28,6 +28,7 @@ from backend.models.orm import (
 )
 from backend.security.auth import require_edge_auth
 from backend.security.auth import require_any_role
+from backend.services.video_storage import promote_active_session
 from shared.schemas import PipelineMetricsReport, PipelineMetricsResponse, LiveTelemetryPayload, TelemetryFramePayload
 from backend.api.websocket import broadcast_telemetry
 
@@ -354,6 +355,20 @@ async def post_telemetry(
             }
     if not _telemetry_is_newer(current, telemetry):
         return {"status": "ignored", "reason": "out_of_order"}
+    # The control record becomes ACTIVE only after a telemetry packet from the
+    # exact durable source and replay generation has been accepted. Timers and
+    # stale generations must never advance the lifecycle.
+    if (
+        payload.stream_id
+        and payload.analysis_session_id
+        and payload.analysis_generation is not None
+    ):
+        promote_active_session(
+            payload.camera_id,
+            payload.stream_id,
+            payload.analysis_generation,
+            payload.analysis_session_id,
+        )
     _latest_telemetry[payload.camera_id] = telemetry
     # Keep one durable latest snapshot per camera/session. This is intentionally
     # not a telemetry history table: it provides restart restoration without

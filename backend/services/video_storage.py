@@ -191,21 +191,62 @@ def start_active_session(camera_id: str, session_id: str) -> tuple[dict[str, Any
     current = get_valid_active_session(camera_id)
     if current is None or current.get("session_id") != session_id:
         raise FileNotFoundError("Video session is not the active durable source")
-    if current.get("analysis_state") in {"WAKING", "ACTIVE"}:
-        return current, False
+    lifecycle = str(current.get("analysis_state") or "READY").upper()
+    scenario = str(current.get("scenario") or "paused").lower()
+    # An in-flight generation is idempotent only when its control fields agree.
+    # A previous failed/cold worker can leave WAKING/ACTIVE beside a paused
+    # scenario; normalize that same generation instead of creating a duplicate.
+    if lifecycle in {"WAKING", "ACTIVE"}:
+        if scenario == "normal":
+            return {**current, "control_repaired": False}, False
+        now = time.time()
+        current.update({
+            "scenario": "normal",
+            "video_time": 0.0,
+            "video_time_updated_at": now,
+            "state_updated_at": now,
+        })
+        _put_json(control_key(camera_id), current)
+        return {**current, "control_repaired": True}, False
+    now = time.time()
     current.update({
         "scenario": "normal",
         "analysis_state": "WAKING",
         "analysis_generation": int(current.get("analysis_generation") or 0) + 1,
         "video_time": 0.0,
-        "video_time_updated_at": time.time(),
-        "state_updated_at": time.time(),
+        "video_time_updated_at": now,
+        "state_updated_at": now,
         "completion_time": None,
         "latest_analysis_session_id": None,
         "final_frame_index": None,
     })
     _put_json(control_key(camera_id), current)
-    return current, True
+    return {**current, "control_repaired": False}, True
+
+
+def promote_active_session(
+    camera_id: str,
+    session_id: str,
+    generation: int,
+    analysis_session_id: str,
+) -> dict[str, Any] | None:
+    """Promote only a matching, real durable generation after first telemetry."""
+    current = get_valid_active_session(camera_id)
+    if (
+        current is None
+        or current.get("session_id") != session_id
+        or int(current.get("analysis_generation") or 0) != int(generation)
+        or current.get("scenario") != "normal"
+        or current.get("analysis_state") != "WAKING"
+    ):
+        return None
+    current.update({
+        "analysis_state": "ACTIVE",
+        "latest_analysis_session_id": analysis_session_id,
+        "state_updated_at": time.time(),
+    })
+    _put_json(control_key(camera_id), current)
+    return current
 
 
 def complete_active_session(camera_id: str, session_id: str, generation: int, changes: dict[str, Any]) -> dict[str, Any] | None:

@@ -101,6 +101,57 @@ def test_explicit_replay_increments_generation_and_preserves_durable_stream(monk
     assert first["analysis_state"] == "WAKING"
 
 
+def test_start_repairs_stale_waking_paused_without_new_generation(monkeypatch, tmp_path):
+    storage = MemoryStorage()
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)
+    session_id = str(uuid.uuid4())
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    video_storage.store_uploaded_session(
+        camera_id="cam-border-01", session_id=session_id, source_path=source,
+        preview_path=None, source_name="cam 1.mp4", content_type="video/mp4",
+    )
+    active = video_storage.activate_session("cam-border-01", session_id)
+    active.update({"scenario": "paused", "analysis_state": "WAKING", "analysis_generation": 7})
+    video_storage._put_json(video_storage.control_key("cam-border-01"), active)
+
+    repaired, created = video_storage.start_active_session("cam-border-01", session_id)
+    repeated, repeated_created = video_storage.start_active_session("cam-border-01", session_id)
+
+    assert created is False
+    assert repeated_created is False
+    assert repaired["control_repaired"] is True
+    assert repaired["scenario"] == "normal"
+    assert repaired["analysis_state"] == "WAKING"
+    assert repaired["analysis_generation"] == repeated["analysis_generation"] == 7
+    assert repaired["session_id"] == session_id
+    assert repaired["video_time"] == 0.0
+
+
+def test_first_matching_telemetry_promotes_only_current_generation(monkeypatch, tmp_path):
+    storage = MemoryStorage()
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)
+    session_id = str(uuid.uuid4())
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    video_storage.store_uploaded_session(
+        camera_id="cam-border-01", session_id=session_id, source_path=source,
+        preview_path=None, source_name="cam 1.mp4", content_type="video/mp4",
+    )
+    video_storage.activate_session("cam-border-01", session_id)
+    started, _ = video_storage.start_active_session("cam-border-01", session_id)
+
+    assert video_storage.promote_active_session(
+        "cam-border-01", session_id, started["analysis_generation"] - 1, "old-run"
+    ) is None
+    promoted = video_storage.promote_active_session(
+        "cam-border-01", session_id, started["analysis_generation"], "current-run"
+    )
+
+    assert promoted["analysis_state"] == "ACTIVE"
+    assert promoted["latest_analysis_session_id"] == "current-run"
+
+
 def test_explicit_stop_persists_paused_lifecycle(monkeypatch, tmp_path):
     storage = MemoryStorage()
     monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)

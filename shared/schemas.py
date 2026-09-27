@@ -262,6 +262,9 @@ class LiveTelemetryPayload(BaseModel):
     frame_height: Optional[int] = None
     stream_id: Optional[str] = None
     analysis_session_id: Optional[str] = None
+    # Durable replay generation from the control plane. It prevents late
+    # telemetry from an older replay from advancing the current lifecycle.
+    analysis_generation: Optional[int] = None
     analysis_state: Optional[str] = None
     frame_index: Optional[int] = None
     source_timestamp: Optional[float] = None

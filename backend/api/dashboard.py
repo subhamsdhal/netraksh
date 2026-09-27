@@ -655,8 +655,18 @@ async def post_video_scenario(
                     "analysis_state": active_session.get("analysis_state"),
                     "analysis_generation": active_session.get("analysis_generation"),
                     "replay_started": created_generation,
+                    "control_repaired": active_session.get("control_repaired", False),
                 }
-            update_active_session(camera_id, changes)
+            updated_session = update_active_session(camera_id, changes)
+            if is_explicit_stop and updated_session is not None:
+                target.update(updated_session)
+                return {
+                    "status": "success",
+                    "state": _demo_state,
+                    "edge_status": "not_requested",
+                    "analysis_state": updated_session.get("analysis_state"),
+                    "analysis_generation": updated_session.get("analysis_generation"),
+                }
     edge_status = "not_requested"
     # Browser playback reports its current time every two seconds.  Those
     # synchronization heartbeats (including pause/metadata events) must never

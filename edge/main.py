@@ -158,6 +158,7 @@ class EdgePipeline:
         # Durable source identity remains stable across explicit replay
         # generations; stream_id above is the per-run analysis identity.
         self.source_stream_id = config.get("source_stream_id") or self.stream_id
+        self.analysis_generation = config.get("analysis_generation")
         self.zone_config_path = config.get("zones_config_path", "demo/scripts/zones_config.json")
         self._running = False
 
@@ -877,6 +878,7 @@ class EdgePipeline:
                 "frame_height": frame_h,
                 "stream_id": self.source_stream_id,
                 "analysis_session_id": self.stream_id,
+                "analysis_generation": self.analysis_generation,
                 "analysis_state": "PROCESSING",
                 "scene_condition": str(condition.condition),
                 "lighting_state": getattr(condition, "lighting_state", None),
@@ -1205,6 +1207,7 @@ class EdgePipeline:
                         "frame_height": self._last_frame_height,
                         "stream_id": self.source_stream_id,
                         "analysis_session_id": self.stream_id,
+                        "analysis_generation": self.analysis_generation,
                         "processed_timestamp": processed_timestamp,
                         "analysis_state": state,
                         "tracks": [],

@@ -313,6 +313,24 @@ def _apply_control_sync(data: dict) -> bool:
     return True
 
 
+def _durable_pipeline_allowed(session_id: str | None, lifecycle: str, scenario: str) -> bool:
+    """A durable replay may run only under one coherent control contract."""
+    return bool(session_id) and lifecycle.upper() in {"WAKING", "ACTIVE"} and scenario == "normal"
+
+
+def _apply_live_control(adapter, sync_client, scenario: str) -> None:
+    """Apply the latest poll result to an already-running pipeline."""
+    want_offline = scenario == "offline"
+    sync_client.set_simulate_offline(want_offline)
+    if adapter is not None:
+        adapter.paused = scenario == "paused"
+    logger.info(
+        "[DemoRunner] sync_client.simulate_offline → %s, adapter.paused → %s",
+        want_offline,
+        scenario == "paused",
+    )
+
+
 def _poll_scenario(backend_url: str, camera_id: str, interval: float = 5.0) -> None:
     """
     Background thread: poll GET /demo/scenario every `interval` seconds
@@ -563,14 +581,8 @@ class DemoAwareEdgePipeline(EdgePipeline):
             while getattr(self, "_running", True):
                 s = _scenario["current"]
                 if s != last:
-                    want_offline = (s == "offline")
                     try:
-                        self.sync_client.set_simulate_offline(want_offline)
-                        if hasattr(self, 'adapter'):
-                            self.adapter.paused = (s == "paused")
-                        logger.info(
-                            f"[DemoRunner] sync_client.simulate_offline → {want_offline}, adapter.paused → {s == 'paused'}"
-                        )
+                        _apply_live_control(getattr(self, "adapter", None), self.sync_client, s)
                     except Exception as exc:
                         logger.error(f"[DemoRunner] offline watcher error during scenario={s}: {exc}", exc_info=True)
                     last = s
@@ -687,13 +699,25 @@ def run_demo_pipeline(
         current_source = uploaded_source if use_uploaded_source else video_source
         current_session = uploaded_session if use_uploaded_source else None
         lifecycle = str(_scenario.get("analysis_state") or "READY").upper()
+        scenario = str(_scenario.get("current") or "paused").lower()
         # A cloud worker must remain a cheap control-plane poller until an
-        # explicit START creates a WAKING/ACTIVE durable generation.
-        if current_session and lifecycle not in {"WAKING", "ACTIVE"}:
-            logger.info(
-                "[DemoRunner] Durable source %s state=%s generation=%s; waiting for operator START / ANALYZE",
-                str(current_session)[:8], lifecycle, _scenario.get("analysis_generation", 0),
-            )
+        # explicit START creates a coherent WAKING/ACTIVE generation. A
+        # contradictory WAKING+paused record must not open the source and
+        # spin a paused pipeline with zero processed frames.
+        if current_session and not _durable_pipeline_allowed(current_session, lifecycle, scenario):
+            if lifecycle in {"WAKING", "ACTIVE"} and scenario != "normal":
+                logger.warning(
+                    "[DemoRunner] Control state inconsistent: lifecycle=%s scenario=%s; "
+                    "waiting for normalized START control",
+                    lifecycle, scenario,
+                )
+            else:
+                logger.info(
+                    "[DemoRunner] Durable source %s state=%s scenario=%s generation=%s; "
+                    "waiting for operator START / ANALYZE",
+                    str(current_session)[:8], lifecycle, scenario,
+                    _scenario.get("analysis_generation", 0),
+                )
             time.sleep(0.5)
             continue
         state_paths = _runtime_state_paths(camera_id, backend_url, current_session)
@@ -701,6 +725,7 @@ def run_demo_pipeline(
             "camera_id": camera_id,
             "camera_name": camera_id,
             "source_stream_id": current_session,
+            "analysis_generation": _scenario.get("analysis_generation", 0) if current_session else None,
             "stream_id": str(__import__("uuid").uuid4()) if current_session else None,
             "video_source": current_source,
             # User-uploaded sessions are finite jobs. Only explicit demo mode
