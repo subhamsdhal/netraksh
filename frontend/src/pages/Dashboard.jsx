@@ -257,6 +257,21 @@ export default function Dashboard() {
     return isActiveTelemetry(scopedLiveTracks[id], now);
   }), [visibleCameraIds.join('|'), scopedLiveTracks, now]);
   useEffect(() => {
+    const cameraStates = visibleCameraIds.filter(Boolean).map((cameraId) => {
+      const telemetry = scopedLiveTracks[cameraId];
+      const status = telemetryStatusAt(telemetry, now);
+      const source = slotSources[cameraId];
+      const ageMs = telemetry?.timestamp ? Math.max(0, now - telemetry.timestamp) : Infinity;
+      const intent = source?.runState === 'WAKING'
+        ? 'WAKING'
+        : status === 'LIVE' || status === 'STALE'
+          ? 'ACTIVE'
+          : 'IDLE';
+      return { cameraId, intent, ageMs };
+    });
+    window.dispatchEvent(new CustomEvent('netraksh:analysis-state', { detail: { cameraStates } }));
+  }, [visibleCameraIds.join('|'), slotSources, scopedLiveTracks, now]);
+  useEffect(() => {
     activeCameraIds.forEach((cameraId) => {
       window.dispatchEvent(new CustomEvent('netraksh:edge-wake', { detail: { cameraId, status: 'LIVE' } }));
       clearTimeout(wakeTimeoutsRef.current[cameraId]);
@@ -866,6 +881,11 @@ export default function Dashboard() {
           const liveStatus = telemetryStatusAt(telemetry, now);
           const telemetryAvailable = Boolean(telemetry && liveStatus === 'LIVE');
           const sourceState = cameraId ? slotSources[cameraId] : null;
+          const displayRunState = liveStatus === 'COMPLETED'
+            ? 'COMPLETED'
+            : telemetryAvailable
+              ? 'LIVE'
+              : sourceState?.runState || 'LOADED';
           const mediaState = cameraId ? (cameraMedia[cameraId] || {}) : {};
           const isDemoReplay = Boolean(telemetry?.demo_replay || DEMO_CAMERA_LABELS[cameraId]);
           const statusLabel = isDemoReplay && status === 'LIVE' ? 'ONLINE' : status;
@@ -889,7 +909,7 @@ export default function Dashboard() {
                   <h2>{title}</h2>
                   <p>{cameraId ? `${cameraId.toUpperCase()} · ${locationLabel}` : 'No source selected'}</p>
                   {sourceState?.sourceName && <p className="dashboard-source-name">SOURCE: {sourceState.sourceName}</p>}
-                  {sourceState?.sourceMode && <p className="dashboard-source-name">MODE: {sourceState.sourceMode === 'durable' ? 'USER UPLOAD' : 'BUNDLED DEMO'} · ANALYSIS: {sourceState.runState || 'LOADED'}</p>}
+                  {sourceState?.sourceMode && <p className="dashboard-source-name">MODE: {sourceState.sourceMode === 'durable' ? 'USER UPLOAD' : 'BUNDLED DEMO'} · ANALYSIS: {displayRunState}</p>}
                   <p className="dashboard-source-name">SUPPORTED: MP4 · AVI · MOV · MKV · WEBM · M4V</p>
                   {mediaState.edgeStatus === 'WAKING' && !telemetryAvailable && <p className="dashboard-source-name">WAKING AI WORKER...</p>}
                 </div>
@@ -946,7 +966,7 @@ export default function Dashboard() {
                     uploadError={mediaState.uploadError || null}
                     sourceMode={sourceState?.sourceMode || null}
                     expectedSessionId={sourceState?.sourceId || null}
-                    sourceRunState={sourceState?.runState || null}
+                    sourceRunState={displayRunState}
                     onVideoEnded={() => updateCameraMedia(cameraId, { playbackEnded: true })}
                   />
                 ) : (
@@ -972,12 +992,14 @@ export default function Dashboard() {
                 <span><b>SCORE</b>{latestFaceEvent?.recognition_score == null ? 'N/A' : Number(latestFaceEvent.recognition_score).toFixed(1)}</span>
               </div>
               <div className="dashboard-camera-telemetry">
-                <span><b>AI FPS</b>{cardFps == null ? 'N/A' : cardFps.toFixed(2)}</span>
+                <span><b>{liveStatus === 'COMPLETED' ? 'FINAL AI FPS' : 'AI FPS'}</b>{liveStatus === 'COMPLETED'
+                  ? (Number.isFinite(telemetry?.processing_fps) ? Number(telemetry.processing_fps).toFixed(2) : 'N/A · COMPLETED')
+                  : (cardFps == null ? 'N/A' : cardFps.toFixed(2))}</span>
                 <span><b>SOURCE FPS</b>{telemetry?.fps_declared == null ? (health[cameraId]?.fps_declared == null ? 'N/A' : Number(health[cameraId].fps_declared).toFixed(0)) : Number(telemetry.fps_declared).toFixed(0)}</span>
                 <span><b>PERSONS</b>{telemetryAvailable ? telemetry.person_count : 'N/A'}</span>
                 <span><b>VEHICLES</b>{telemetryAvailable ? telemetry.vehicle_count : 'N/A'}</span>
                 <span><b>TRACKS</b>{telemetryAvailable ? telemetry.track_count : 'N/A'}</span>
-                <span><b>LAST UPDATE</b>{updateAge == null ? 'Never' : liveStatus === 'OFFLINE' ? 'OFFLINE' : liveStatus === 'STALE' ? `STALE · ${(updateAge / 1000).toFixed(1)}s ago` : `${(updateAge / 1000).toFixed(1)}s ago`}</span>
+                <span><b>LAST UPDATE</b>{updateAge == null ? 'Never' : liveStatus === 'COMPLETED' ? `COMPLETED ${(updateAge / 1000).toFixed(1)}s AGO` : liveStatus === 'OFFLINE' ? 'OFFLINE' : liveStatus === 'STALE' ? `STALE · ${(updateAge / 1000).toFixed(1)}s ago` : `${(updateAge / 1000).toFixed(1)}s ago`}</span>
                 <span><b>LATEST EVENT</b>{formatLatestEvent(latestCameraEvent, now)}</span>
               </div>
             </article>

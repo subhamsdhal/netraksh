@@ -34,6 +34,7 @@ export default function Header() {
   const [chainStatus, setChainStatus]   = useState(null);
   const [edgeWakeUntil, setEdgeWakeUntil] = useState(0);
   const [edgeTelemetrySignalAt, setEdgeTelemetrySignalAt] = useState(0);
+  const [analysisStates, setAnalysisStates] = useState([]);
 
   // ── Real connectivity & edge freshness ────────────────────────────────────
   // Accept freshness from both this header's socket hook and the application
@@ -50,6 +51,18 @@ export default function Header() {
       setTimeStr(d.toISOString().substring(11, 19));
     }, 1000);
     return () => clearInterval(timer);
+  }, []);
+
+  // Dashboard publishes per-camera analysis intent separately from worker
+  // process connectivity. A finite upload that reached EOF is idle, not
+  // offline, even though its last telemetry packet is old.
+  useEffect(() => {
+    const onAnalysisState = (event) => {
+      const states = event?.detail?.cameraStates;
+      if (Array.isArray(states)) setAnalysisStates(states);
+    };
+    window.addEventListener('netraksh:analysis-state', onAnalysisState);
+    return () => window.removeEventListener('netraksh:analysis-state', onAnalysisState);
   }, []);
 
   // ── Backend health check (HTTP GET /health, every 10s) ──────────────────
@@ -150,21 +163,29 @@ export default function Header() {
     systemStatus === 'DEGRADED'    ? 'var(--color-warning)'  :
                                      'var(--color-danger)';
 
-  // EDGE: reflects actual telemetry freshness — NOT just WS connectivity
+  // EDGE: reflects analysis intent plus telemetry freshness. Worker/process
+  // health is intentionally not treated as active analysis.
   const edgeAgeMs = lastEdgeTelemetryMs ? (Date.now() - lastEdgeTelemetryMs) : Infinity;
   const edgeWaking = edgeWakeUntil > Date.now();
+  const activeStates = analysisStates.filter((state) => state.intent === 'ACTIVE');
+  const anyActive = activeStates.length > 0;
+  const anyWaking = analysisStates.some((state) => state.intent === 'WAKING') || (edgeWaking && !anyActive);
+  const activeTelemetryAgeMs = activeStates.reduce((oldest, state) => Math.max(oldest, state.ageMs ?? Infinity), 0);
   // Fresh telemetry is stronger evidence than an outstanding wake timer.
-  // A worker may start publishing before the local START/ANALYZE wake window
-  // expires; in that case the header must immediately report ONLINE instead
-  // of remaining stuck on WAKING for up to five minutes.
-  const edgeStatus =
-    edgeAgeMs < EDGE_STALE_MS    ? 'ONLINE'  :
-    edgeWaking                   ? 'WAKING'  :
-    edgeAgeMs < EDGE_OFFLINE_MS  ? 'STALE'   :
-                                   'OFFLINE';
+  // Until Dashboard publishes intent, retain the legacy telemetry-only
+  // fallback used by other protected pages.
+  const edgeStatus = analysisStates.length === 0
+    ? (edgeAgeMs < EDGE_STALE_MS ? 'ONLINE' : edgeWaking ? 'WAKING' : edgeAgeMs < EDGE_OFFLINE_MS ? 'STALE' : 'OFFLINE')
+    : anyWaking
+      ? 'WAKING'
+      : !anyActive
+        ? 'IDLE'
+        : activeTelemetryAgeMs < EDGE_STALE_MS
+          ? 'ONLINE'
+          : activeTelemetryAgeMs < EDGE_OFFLINE_MS ? 'STALE' : 'OFFLINE';
   const edgeColor =
     edgeStatus === 'ONLINE'  ? 'var(--color-ok)'     :
-    edgeStatus === 'STALE'   ? 'var(--color-warning)' :
+    edgeStatus === 'STALE' || edgeStatus === 'WAKING' ? 'var(--color-warning)' :
                                'var(--text-dim)';
 
   // SYNC: reflects WS link + queue state
