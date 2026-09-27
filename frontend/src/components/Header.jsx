@@ -32,6 +32,7 @@ export default function Header() {
   const [syncStatus, setSyncStatus]     = useState({ queued: 0, synced: 0, failed: 0 });
   const [pendingAlerts, setPendingAlerts] = useState(null);
   const [chainStatus, setChainStatus]   = useState(null);
+  const [edgeWakeUntil, setEdgeWakeUntil] = useState(0);
 
   // ── Real connectivity & edge freshness ────────────────────────────────────
   // lastEdgeTelemetryMs: wall-clock time of most recent live_telemetry packet
@@ -66,6 +67,19 @@ export default function Header() {
     const t = setInterval(check, 10_000);
     return () => clearInterval(t);
   }, [isAuthenticated]);
+
+  // Dashboard START / ANALYZE emits this local event while the backend keeps
+  // the bounded free-tier cold-start retry alive.  It prevents a sleeping
+  // worker from making the entire system look offline while control-plane and
+  // WebSocket connectivity are healthy.
+  useEffect(() => {
+    const onWake = (event) => {
+      if (event?.detail?.status === 'WAKING') setEdgeWakeUntil(Date.now() + 305_000);
+      if (event?.detail?.status === 'LIVE') setEdgeWakeUntil(0);
+    };
+    window.addEventListener('netraksh:edge-wake', onWake);
+    return () => window.removeEventListener('netraksh:edge-wake', onWake);
+  }, []);
 
   // ── Sync status (real queue size from /sync/status) ─────────────────────
   useEffect(() => {
@@ -125,7 +139,9 @@ export default function Header() {
 
   // EDGE: reflects actual telemetry freshness — NOT just WS connectivity
   const edgeAgeMs = lastEdgeTelemetryMs ? (Date.now() - lastEdgeTelemetryMs) : Infinity;
+  const edgeWaking = edgeWakeUntil > Date.now();
   const edgeStatus =
+    edgeWaking                  ? 'WAKING'  :
     edgeAgeMs < EDGE_STALE_MS   ? 'ONLINE'  :
     edgeAgeMs < EDGE_OFFLINE_MS  ? 'STALE'   :
                                    'OFFLINE';

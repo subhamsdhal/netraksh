@@ -125,6 +125,7 @@ export default function Dashboard() {
   const sourceRestoreReadyRef = useRef({});
   const fileInputRefs = useRef({});
   const autoStartedDemoCamerasRef = useRef(new Set());
+  const wakeTimeoutsRef = useRef({});
 
   const updateCameraMedia = (cameraId, patch) => {
     if (!cameraId) return;
@@ -135,6 +136,16 @@ export default function Dashboard() {
     if (!payload) return null;
     if (cameraId) {
       updateCameraMedia(cameraId, { edgeStatus: 'WAKING' });
+      if (payload.scenario === 'normal' && payload.wake_edge) {
+        window.dispatchEvent(new CustomEvent('netraksh:edge-wake', { detail: { cameraId, status: 'WAKING' } }));
+        clearTimeout(wakeTimeoutsRef.current[cameraId]);
+        wakeTimeoutsRef.current[cameraId] = setTimeout(() => {
+          updateCameraMedia(cameraId, { edgeStatus: 'TIMEOUT', uploadError: 'AI WORKER COLD START TIMED OUT — RETRY ANALYSIS' });
+          setSlotSources((current) => current[cameraId]
+            ? { ...current, [cameraId]: { ...current[cameraId], runState: 'ERROR' } }
+            : current);
+        }, 305_000);
+      }
       setSlotSources((current) => ({
         ...current,
         [cameraId]: current[cameraId]
@@ -245,6 +256,13 @@ export default function Dashboard() {
   const activeCameraIds = useMemo(() => visibleCameraIds.filter((id) => {
     return isActiveTelemetry(scopedLiveTracks[id], now);
   }), [visibleCameraIds.join('|'), scopedLiveTracks, now]);
+  useEffect(() => {
+    activeCameraIds.forEach((cameraId) => {
+      window.dispatchEvent(new CustomEvent('netraksh:edge-wake', { detail: { cameraId, status: 'LIVE' } }));
+      clearTimeout(wakeTimeoutsRef.current[cameraId]);
+      delete wakeTimeoutsRef.current[cameraId];
+    });
+  }, [activeCameraIds.join('|')]);
   useEffect(() => {
     if (!activeCameraIds.length) return;
     setSlotSources((current) => {

@@ -223,7 +223,10 @@ def _selected_bundled_control(camera_id: str | None) -> dict | None:
 
 
 _edge_wake_tasks: dict[str, asyncio.Task] = {}
-_EDGE_WAKE_RETRY_DELAYS = (2, 3, 5, 8, 10, 10, 10, 10, 10, 10)
+# Free Render instances can take several minutes to cold-start.  Keep this
+# bounded and only schedule it after an explicit START / ANALYZE request; the
+# dashboard's ordinary polling never calls this path.
+_EDGE_WAKE_RETRY_DELAYS = (2, 3, 5, 8) + (10,) * 28  # ~298 seconds
 
 
 def _edge_wake_url(camera_id: str | None) -> str:
