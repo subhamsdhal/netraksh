@@ -122,6 +122,7 @@ export default function Dashboard() {
   const [now, setNow] = useState(Date.now());
   const [backendStatus, setBackendStatus] = useState('CHECKING');
   const fileInputRefs = useRef({});
+  const autoStartedDemoCamerasRef = useRef(new Set());
 
   const updateCameraMedia = (cameraId, patch) => {
     if (!cameraId) return;
@@ -341,6 +342,22 @@ export default function Dashboard() {
     restoreScopedSources();
     return () => { mounted = false; };
   }, [visibleCameraIds.join('|')]);
+  useEffect(() => {
+    // Submission/evaluator mode: the two named SIH demo cameras are fully cloud-hosted.
+    // A page visit is the user action that starts them; no terminal/local worker is
+    // required. Each camera is started at most once per mounted dashboard so normal
+    // React re-renders cannot create a wake loop.
+    visibleCameraIds.filter(Boolean).forEach((cameraId) => {
+      if (!DEMO_CAMERA_LABELS[cameraId]) return;
+      if (activeCameraIds.includes(cameraId)) return;
+      if (autoStartedDemoCamerasRef.current.has(cameraId)) return;
+      autoStartedDemoCamerasRef.current.add(cameraId);
+      const bundled = bundledSourceState('paused');
+      setSlotSources((current) => ({ ...current, [cameraId]: bundled }));
+      requestScenario(cameraId, scenarioAction(cameraId, bundled, 'normal', true));
+    });
+  }, [visibleCameraIds.join('|'), activeCameraIds.join('|')]);
+
   useEffect(() => {
     if (dashboardMode !== 'DUAL') setEventCameraFilter('ALL');
     if (!activeCameraIds.includes(reliabilityCameraId)) setReliabilityCameraId(activeCameraIds[0] || null);
