@@ -262,9 +262,11 @@ export default function Dashboard() {
       const status = telemetryStatusAt(telemetry, now);
       const source = slotSources[cameraId];
       const ageMs = telemetry?.timestamp ? Math.max(0, now - telemetry.timestamp) : Infinity;
-      const intent = source?.runState === 'WAKING'
-        ? 'WAKING'
-        : status === 'LIVE' || status === 'STALE'
+      const intent = status === 'COMPLETED'
+        ? 'IDLE'
+        : source?.runState === 'WAKING'
+          ? 'WAKING'
+          : status === 'LIVE' || status === 'STALE'
           ? 'ACTIVE'
           : 'IDLE';
       return { cameraId, intent, ageMs };
