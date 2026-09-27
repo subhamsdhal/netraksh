@@ -438,6 +438,27 @@ def test_matching_durable_session_remains_controllable(monkeypatch):
     assert updates[0][1]["video_time"] == 3.0
 
 
+def test_durable_start_response_reports_normalized_scenario(monkeypatch):
+    active = {"session_id": "real-session", "scenario": "paused"}
+    started = {"session_id": "real-session", "scenario": "normal", "analysis_state": "WAKING", "analysis_generation": 5}
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: active)
+    monkeypatch.setattr(dashboard, "start_active_session", lambda camera_id, session_id: (started, True))
+
+    async def wake(camera_id):
+        return "waking"
+
+    monkeypatch.setattr(dashboard, "_wake_edge_service", wake)
+    result = asyncio.run(dashboard.post_video_scenario({
+        "camera_id": "cam-border-01", "source_mode": "durable", "video_session_id": "real-session",
+        "scenario": "normal", "video_time": 0, "wake_edge": True,
+    }, _user={}))
+
+    assert result["scenario"] == "normal"
+    assert result["analysis_state"] == "WAKING"
+    assert result["analysis_generation"] == 5
+
+
 def test_bundled_default_has_no_fake_session_uuid():
     from backend.api import demo
 

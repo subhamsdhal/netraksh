@@ -648,12 +648,21 @@ async def post_video_scenario(
                     raise HTTPException(status_code=409, detail=str(exc)) from exc
                 target.update(active_session)
                 edge_status = await _wake_edge_service(camera_id)
+                logger.info(
+                    "[Dashboard] Camera control camera_id=%s source_mode=%s action=start scenario=%s wake=%s edge_status=%s",
+                    camera_id,
+                    requested_mode,
+                    active_session.get("scenario"),
+                    True,
+                    edge_status,
+                )
                 return {
                     "status": "success",
                     "state": _demo_state,
                     "edge_status": edge_status,
                     "analysis_state": active_session.get("analysis_state"),
                     "analysis_generation": active_session.get("analysis_generation"),
+                    "scenario": active_session.get("scenario"),
                     "replay_started": created_generation,
                     "control_repaired": active_session.get("control_repaired", False),
                 }
@@ -666,6 +675,7 @@ async def post_video_scenario(
                     "edge_status": "not_requested",
                     "analysis_state": updated_session.get("analysis_state"),
                     "analysis_generation": updated_session.get("analysis_generation"),
+                    "scenario": updated_session.get("scenario"),
                 }
     edge_status = "not_requested"
     # Browser playback reports its current time every two seconds.  Those

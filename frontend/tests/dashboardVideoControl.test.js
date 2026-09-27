@@ -101,4 +101,22 @@ describe('dashboard video control ownership', () => {
       scenario: 'normal', video_time: 0, wake_edge: true,
     });
   });
+
+  it('preserves the durable source while applying only the backend lifecycle response', () => {
+    const source = {
+      sourceMode: 'durable', sourceId: '6179dd0f-session', sourceName: 'cam 1.mp4',
+      analysisState: 'WAKING', scenario: 'paused', analysisGeneration: 2,
+    };
+    expect(applyReplayResult(source, {
+      analysis_state: 'WAKING', analysis_generation: 3, scenario: 'normal', edge_status: 'waking',
+    })).toMatchObject({
+      sourceId: '6179dd0f-session', sourceName: 'cam 1.mp4', analysisState: 'WAKING',
+      analysisGeneration: 3, scenario: 'normal',
+    });
+  });
+
+  it('does not create a durable control payload without its server session identity', () => {
+    const missing = scenarioAction('cam-border-01', { sourceMode: 'durable', sourceName: 'cam 1.mp4' }, 'normal', true);
+    expect(missing).toBeNull();
+  });
 });

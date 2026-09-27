@@ -123,6 +123,7 @@ export default function Dashboard() {
   const [now, setNow] = useState(Date.now());
   const [backendStatus, setBackendStatus] = useState('CHECKING');
   const [sourceRestoreReady, setSourceRestoreReady] = useState({});
+  const [controlRequests, setControlRequests] = useState({});
   const sourceRestoreReadyRef = useRef({});
   const fileInputRefs = useRef({});
   const autoStartedDemoCamerasRef = useRef(new Set());
@@ -137,18 +138,24 @@ export default function Dashboard() {
     setCameraMedia((current) => updateCameraMediaState(current, cameraId, patch));
   };
 
-  const requestScenario = async (cameraId, payload) => {
-    if (!payload) return null;
+  const requestScenario = async (cameraId, payload, onPhase = () => {}) => {
+    if (!payload) return { ok: false, status: null, error: 'CONTROL SOURCE SESSION MISSING — REFRESH SOURCE STATE' };
     const previousSourceState = cameraId ? slotSources[cameraId] : null;
     const previousMediaState = cameraId ? cameraMediaRef.current[cameraId] : null;
     try {
+      onPhase('CONTROL POST DISPATCHED');
       const response = await authFetch('/api/dashboard/video/scenario', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
       const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(`START FAILED — HTTP ${response.status}${result.detail ? ` · ${result.detail}` : ''}`);
+      onPhase(`CONTROL RESPONSE ${response.status}`);
+      if (!response.ok) {
+        const error = new Error(`START FAILED — HTTP ${response.status}${result.detail ? ` · ${result.detail}` : ''}`);
+        error.status = response.status;
+        throw error;
+      }
       if (cameraId && payload.scenario === 'normal') {
         // The POST is the transaction boundary.  Do not claim WAKING, change
         // a filename, or alter a session until the backend accepted this exact
@@ -168,8 +175,10 @@ export default function Dashboard() {
           updateCameraMedia(cameraId, { edgeStatus: 'TIMEOUT', uploadError: 'AI WORKER COLD START TIMED OUT — RETRY ANALYSIS' });
         }, 305_000);
       }
-      return result;
+      return { ok: true, status: response.status, result };
     } catch (error) {
+      const status = Number.isFinite(error?.status) ? error.status : null;
+      onPhase(status ? `CONTROL FAILED HTTP ${status}` : 'CONTROL NETWORK FAILED');
       if (cameraId) {
         // Failed controls are fully transactional: restore the exact prior
         // lifecycle and media state instead of leaving a fake WAKING card.
@@ -179,8 +188,38 @@ export default function Dashboard() {
           uploadError: error?.message || 'START FAILED — CONTROL REQUEST DID NOT COMPLETE',
         });
       }
-      return null;
+      return { ok: false, status, error: error?.message || 'START FAILED — CONTROL REQUEST DID NOT COMPLETE' };
     }
+  };
+
+  const handleStartAnalysis = async (cameraId, sourceState) => {
+    if (!cameraId || !sourceState) {
+      if (cameraId) updateCameraMedia(cameraId, { uploadError: 'CONTROL SOURCE SESSION MISSING — REFRESH SOURCE STATE', controlStatus: 'CONTROL PAYLOAD FAILED' });
+      return;
+    }
+    const payload = scenarioAction(cameraId, sourceState, 'normal', true);
+    if (!payload) {
+      updateCameraMedia(cameraId, { uploadError: 'CONTROL SOURCE SESSION MISSING — REFRESH SOURCE STATE', controlStatus: 'CONTROL PAYLOAD FAILED' });
+      return;
+    }
+    setControlRequests((current) => ({ ...current, [cameraId]: true }));
+    const safeDetails = {
+      camera_id: cameraId,
+      source_mode: payload.source_mode,
+      session_prefix: payload.video_session_id ? String(payload.video_session_id).slice(0, 8) : null,
+      scenario: payload.scenario,
+      wake_edge: payload.wake_edge === true,
+    };
+    console.info('[Dashboard] START CLICKED', safeDetails);
+    updateCameraMedia(cameraId, { uploadError: null, controlStatus: 'CONTROL PAYLOAD READY' });
+    const outcome = await requestScenario(cameraId, payload, (phase) => {
+      console.info('[Dashboard] start control', { ...safeDetails, phase });
+      updateCameraMedia(cameraId, { controlStatus: phase });
+    });
+    if (!outcome.ok) {
+      updateCameraMedia(cameraId, { uploadError: outcome.error, controlStatus: outcome.status ? `CONTROL FAILED HTTP ${outcome.status}` : 'CONTROL NETWORK FAILED' });
+    }
+    setControlRequests((current) => ({ ...current, [cameraId]: false }));
   };
 
   useEffect(() => {
@@ -913,14 +952,15 @@ export default function Dashboard() {
                   {sourceState?.restoring && <p className="dashboard-source-name">RESTORING CLOUD SOURCE...</p>}
                   {!sourceState?.restoring && sourceState?.sourceName && <p className="dashboard-source-name">SOURCE: {sourceState.sourceName}</p>}
                   {!sourceState?.restoring && sourceState?.sourceMode && <p className="dashboard-source-name">MODE: {sourceState.sourceMode === 'durable' ? 'USER UPLOAD' : 'BUNDLED DEMO'} · ANALYSIS: {displayRunState}</p>}
+                  {mediaState.controlStatus && <p className="dashboard-source-name" role="status">{mediaState.controlStatus}</p>}
                   <p className="dashboard-source-name">SUPPORTED: MP4 · AVI · MOV · MKV · WEBM · M4V</p>
                   {mediaState.edgeStatus === 'WAKING' && !telemetryAvailable && <p className="dashboard-source-name">WAKING AI WORKER...</p>}
                 </div>
                 <div className="dashboard-camera-card-controls">
                   <span className={`dashboard-camera-status status-${status.toLowerCase().replace(/\s+/g, '-')}`}>{statusLabel}</span>
                   {cameraId && canUpload && <div className="dashboard-slot-actions">
-                    <button className="btn btn-sm btn-outline" disabled={Boolean(sourceState?.restoring)} onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
-                    {sourceState?.sourceMode && lifecycleAction(sourceState) === 'START' && <button className="btn btn-sm btn-outline" onClick={() => requestScenario(cameraId, scenarioAction(cameraId, sourceState, 'normal', true))}>START / ANALYZE</button>}
+                    <button type="button" className="btn btn-sm btn-outline" disabled={Boolean(sourceState?.restoring)} onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
+                    {sourceState?.sourceMode && lifecycleAction(sourceState) === 'START' && <button type="button" className="btn btn-sm btn-outline" data-action="start-analysis" data-camera-id={cameraId} disabled={Boolean(controlRequests[cameraId])} onClick={() => handleStartAnalysis(cameraId, sourceState)}>{controlRequests[cameraId] ? 'STARTING...' : 'START / ANALYZE'}</button>}
                     {sourceState?.sourceMode && lifecycleAction(sourceState) === 'STOP' && <button className="btn btn-sm btn-outline" onClick={async () => {
                       const payload = scenarioAction(cameraId, sourceState, 'paused');
                       if (payload) {
@@ -948,7 +988,7 @@ export default function Dashboard() {
                       // its source metadata made local uploads impossible to
                       // restart after STOP.
                       setLatestEvent(null);
-                    }}>STOP ANALYSIS</button>}
+                    }} type="button" data-action="stop-analysis" data-camera-id={cameraId}>STOP ANALYSIS</button>}
                   </div>}
                   <select
                     aria-label={`Select camera slot ${slotIndex + 1}`}
