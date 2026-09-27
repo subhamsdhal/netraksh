@@ -241,8 +241,9 @@ export default function VideoFeed({
     left: 0, top: 0, width: 0, height: 0, cw: 0, ch: 0, vw: 0, vh: 0,
   });
 
-  // Debug HUD toggle (off by default — non-intrusive)
-  const [hudVisible, setHudVisible] = useState(false);
+  // Durable uploads default to the authoritative analyzed view once telemetry
+  // exists; the toggle switches back to the independently playing source.
+  const [hudVisible, setHudVisible] = useState(sourceMode === 'durable');
   const [videoError, setVideoError] = useState(false);
   const [analyzedFrameUrl, setAnalyzedFrameUrl] = useState(null);
   const isDurableSource = sourceMode === 'durable';
@@ -251,6 +252,10 @@ export default function VideoFeed({
     && hudVisible
     && ['LIVE', 'STALE'].includes(telemetryStatus)
   );
+
+  useEffect(() => {
+    setHudVisible(sourceMode === 'durable');
+  }, [sourceMode]);
 
   // Lightweight render-tick to re-evaluate live tracks freshness
   const [tick, setTick] = useState(0);
@@ -266,10 +271,10 @@ export default function VideoFeed({
     // endpoint, however, is keyed by analysis_session_id + frame_index.
     // Keeping those identities separate prevents an old demo frame from
     // being displayed for a newly selected upload.
-    const sourceSessionId = liveTracksData?.stream_id || null;
+    const sourceSessionId = liveTracksData?.stream_id || liveTracksData?.analysis_session_id || null;
     const analysisSessionId = liveTracksData?.analysis_session_id || sourceSessionId;
     const frameIndex = liveTracksData?.frame_index;
-    if (!hudVisible) return undefined;
+    if (!isDurableSource && !hudVisible) return undefined;
     if (expectedSessionId && sourceSessionId !== expectedSessionId) return undefined;
     if (!cameraId || !analysisSessionId || !Number.isFinite(frameIndex) || !liveTracksData?.preview_available) return undefined;
     let cancelled = false;
@@ -277,8 +282,8 @@ export default function VideoFeed({
     const params = new URLSearchParams({
       analysis_session_id: analysisSessionId,
       frame_index: String(frameIndex),
-      hud: 'true',
-      cache_bust: `${analysisSessionId}:${frameIndex}:1`,
+      hud: isDurableSource || hudVisible ? 'true' : 'false',
+      cache_bust: `${analysisSessionId}:${frameIndex}:${isDurableSource || hudVisible ? 1 : 0}`,
     });
     authFetch(`/system/telemetry/frame/${encodeURIComponent(cameraId)}?${params.toString()}`)
       .then((response) => response.ok && frameResponseMatchesTelemetry(liveTracksData, response.headers) ? response.blob() : null)
@@ -292,7 +297,7 @@ export default function VideoFeed({
       })
       .catch(() => {});
     return () => { cancelled = true; if (nextUrl) URL.revokeObjectURL(nextUrl); };
-  }, [cameraId, liveTracksData, hudVisible, expectedSessionId]);
+  }, [cameraId, liveTracksData, hudVisible, isDurableSource, expectedSessionId]);
 
   useEffect(() => {
     if (!['OFFLINE', 'DISCONNECTED'].includes(telemetryStatus)) return;
@@ -622,7 +627,7 @@ export default function VideoFeed({
       <svg
         ref={svgRef}
         style={{
-          display: 'none',
+          display: showAnalyzedFrame ? 'block' : 'none',
           position: 'absolute', inset: 0,
           width: '100%', height: '100%',
           zIndex: 10, pointerEvents: 'none',
@@ -783,7 +788,9 @@ export default function VideoFeed({
           fontFamily: 'ui-monospace, monospace', fontSize: '0.55rem', letterSpacing: '0.07em',
           pointerEvents: 'none',
         }}>
-          SOURCE PREVIEW · NORMALIZED USER UPLOAD · WAITING FOR ANALYZED FRAME
+          {analyzedFrameUrl
+            ? `SOURCE PREVIEW · AI SAMPLE AVAILABLE · FRAME ${liveTracksData?.frame_index ?? '—'} · SOURCE TIME ${Number.isFinite(liveTracksData?.video_time) ? `${liveTracksData.video_time.toFixed(2)}s` : '—'} · PROCESSED ${processedAgeSeconds == null ? 'RECENTLY' : `${processedAgeSeconds.toFixed(1)}s AGO`}`
+            : 'SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME'}
         </div>
       )}
 
@@ -807,7 +814,7 @@ export default function VideoFeed({
           display: 'flex', alignItems: 'center', gap: '0.25rem',
         }}
       >
-        <Activity size={8} /> HUD
+        <Activity size={8} /> {hudVisible ? 'ANALYZED' : 'SOURCE'}
       </button>
 
       {/* ── Toggleable debug HUD (replaces removed [SUPER DEBUG OVERLAY]) ── */}

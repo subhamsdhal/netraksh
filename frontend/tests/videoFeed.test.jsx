@@ -19,7 +19,7 @@ describe('per-camera authoritative analyzed frame', () => {
     authFetch.mockResolvedValue({ ok: true, headers, blob: async () => new Blob(['jpeg']) });
   });
 
-  it('shows source preview until HUD is enabled, then uses the authoritative annotated frame', async () => {
+  it('defaults durable uploads to the authoritative analyzed frame and can switch to source preview', async () => {
     render(<VideoFeed
       cameraId="cam-border-01"
       mediaUrl="blob:video"
@@ -33,14 +33,13 @@ describe('per-camera authoritative analyzed frame', () => {
       }}
     />);
 
-    expect(authFetch).not.toHaveBeenCalled();
-    expect(screen.getByText(/SOURCE PREVIEW · NORMALIZED USER UPLOAD/)).toBeInTheDocument();
-    screen.getByTitle('Toggle debug HUD').click();
     await waitFor(() => expect(authFetch).toHaveBeenCalled());
     expect(authFetch.mock.calls[0][0]).toContain('hud=true');
     expect(screen.getByTitle('Toggle debug HUD')).toHaveAttribute('aria-pressed', 'true');
     await waitFor(() => expect(screen.getByAltText('Annotated analyzed frame for cam-border-01')).toBeInTheDocument());
     expect(screen.getByText(/LATEST ANALYZED FRAME · FRAME 42/)).toBeInTheDocument();
+    screen.getByTitle('Toggle debug HUD').click();
+    await waitFor(() => expect(screen.getByText(/SOURCE PREVIEW · AI SAMPLE AVAILABLE · FRAME 42/)).toBeInTheDocument());
     expect(authFetch.mock.calls.every(([url]) => !url.includes('demo-telemetry'))).toBe(true);
   });
 
@@ -54,6 +53,6 @@ describe('per-camera authoritative analyzed frame', () => {
       liveTracksData={{ analysis_session_id: 'old-session', frame_index: 42, preview_available: true }}
     />);
     expect(authFetch).not.toHaveBeenCalled();
-    expect(screen.getByText(/SOURCE PREVIEW · NORMALIZED USER UPLOAD/)).toBeInTheDocument();
+    expect(screen.getByText(/SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME/)).toBeInTheDocument();
   });
 });

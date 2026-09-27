@@ -834,7 +834,7 @@ export default function Dashboard() {
       <div className="dashboard-live-strip">
         <div><span>CAMERA</span><strong title={activeCamera?.displayId}>{activeCamera?.friendlyName || 'Not configured'}</strong></div>
         <div><span>CAMERA HEALTH</span><strong>{health[activeCameraId]?.health_state || 'UNKNOWN'}{health[activeCameraId]?.health_reason && health[activeCameraId]?.health_state !== 'OK' ? ` · ${String(health[activeCameraId].health_reason).replace(/_/g, ' ')}` : ''}</strong></div>
-        <div><span>FPS</span><strong>{metricsFresh && Number.isFinite(activeMetrics?.fps)
+        <div><span>AI FPS</span><strong>{metricsFresh && Number.isFinite(activeMetrics?.fps)
           ? activeMetrics.fps.toFixed(2)
           : Number.isFinite(health[activeCameraId]?.fps_actual)
             ? Number(health[activeCameraId].fps_actual).toFixed(2)
@@ -972,7 +972,8 @@ export default function Dashboard() {
                 <span><b>SCORE</b>{latestFaceEvent?.recognition_score == null ? 'N/A' : Number(latestFaceEvent.recognition_score).toFixed(1)}</span>
               </div>
               <div className="dashboard-camera-telemetry">
-                <span><b>FPS</b>{cardFps == null ? 'N/A' : cardFps.toFixed(2)}</span>
+                <span><b>AI FPS</b>{cardFps == null ? 'N/A' : cardFps.toFixed(2)}</span>
+                <span><b>SOURCE FPS</b>{telemetry?.fps_declared == null ? (health[cameraId]?.fps_declared == null ? 'N/A' : Number(health[cameraId].fps_declared).toFixed(0)) : Number(telemetry.fps_declared).toFixed(0)}</span>
                 <span><b>PERSONS</b>{telemetryAvailable ? telemetry.person_count : 'N/A'}</span>
                 <span><b>VEHICLES</b>{telemetryAvailable ? telemetry.vehicle_count : 'N/A'}</span>
                 <span><b>TRACKS</b>{telemetryAvailable ? telemetry.track_count : 'N/A'}</span>
