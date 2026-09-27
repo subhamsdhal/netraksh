@@ -5,6 +5,7 @@ import Logo from './Logo';
 import { authFetch, logout, BACKEND_URL, WS_URL } from '../services/auth';
 import useAuth from '../hooks/useAuth';
 import useWebSocket from '../hooks/useWebSocket';
+import { deriveGlobalEdgeStatus } from '../utils/liveMetrics';
 
 // Freshness thresholds for edge telemetry
 const EDGE_STALE_MS  = 30_000;   // >30s without telemetry → STALE
@@ -174,15 +175,11 @@ export default function Header() {
   // Fresh telemetry is stronger evidence than an outstanding wake timer.
   // Until Dashboard publishes intent, retain the legacy telemetry-only
   // fallback used by other protected pages.
-  const edgeStatus = analysisStates.length === 0
-    ? (edgeAgeMs < EDGE_STALE_MS ? 'ONLINE' : edgeWaking ? 'WAKING' : edgeAgeMs < EDGE_OFFLINE_MS ? 'STALE' : 'OFFLINE')
-    : anyWaking
-      ? 'WAKING'
-      : !anyActive
-        ? 'IDLE'
-        : activeTelemetryAgeMs < EDGE_STALE_MS
-          ? 'ONLINE'
-          : activeTelemetryAgeMs < EDGE_OFFLINE_MS ? 'STALE' : 'OFFLINE';
+  const edgeStatus = deriveGlobalEdgeStatus({
+    analysisStates,
+    lastTelemetryAt: lastEdgeTelemetryMs,
+    edgeWakeUntil,
+  });
   const edgeColor =
     edgeStatus === 'ONLINE'  ? 'var(--color-ok)'     :
     edgeStatus === 'STALE' || edgeStatus === 'WAKING' ? 'var(--color-warning)' :

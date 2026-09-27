@@ -270,6 +270,8 @@ class LiveTelemetryPayload(BaseModel):
     source_timestamp: Optional[float] = None
     processed_timestamp: Optional[float] = None
     processing_fps: Optional[float] = None
+    source_fps: Optional[float] = None
+    fps_declared: Optional[float] = None
     expected_interval_ms: Optional[float] = None
     raw_detection_count: int = 0
     tracker_output_count: int = 0

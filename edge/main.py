@@ -873,6 +873,10 @@ class EdgePipeline:
                 "source_timestamp": float(meta.timestamp),
                 "processed_timestamp": processed_timestamp,
                 "processing_fps": processing_fps,
+                # Source cadence is media metadata measured by CameraAdapter,
+                # never a processing-rate estimate or dashboard default.
+                "source_fps": float(meta.fps_declared) if getattr(meta, "fps_declared", 0) > 0 else None,
+                "fps_declared": float(meta.fps_declared) if getattr(meta, "fps_declared", 0) > 0 else None,
                 "expected_interval_ms": expected_interval_ms,
                 "frame_width": frame_w,
                 "frame_height": frame_h,
