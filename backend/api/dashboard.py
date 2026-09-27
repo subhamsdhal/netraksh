@@ -233,9 +233,12 @@ def _selected_bundled_control(camera_id: str | None) -> dict | None:
 
 
 _edge_wake_tasks: dict[str, asyncio.Task] = {}
-# Free Render instances can take several minutes to cold-start.  Keep this
-# bounded and only schedule it after an explicit START / ANALYZE request; the
-# dashboard's ordinary polling never calls this path.
+_edge_prewarm_status: dict[str, dict] = {}
+_PREWARM_CAMERA_IDS = ("cam-border-01", "cam-checkpoint-01")
+_PREWARM_READY_TTL_SECONDS = 10 * 60
+# Free Render instances can take several minutes to cold-start. Keep retries
+# bounded. They are shared by explicit START and one dashboard prewarm, never
+# by dashboard status polling.
 _EDGE_WAKE_RETRY_DELAYS = (2, 3, 5, 8) + (10,) * 28  # ~298 seconds
 
 
@@ -245,6 +248,55 @@ def _edge_wake_url(camera_id: str | None) -> str:
         "cam-checkpoint-01": "EDGE_WAKE_URL_CAM_CHECKPOINT_01",
     }.get(str(camera_id or ""))
     return os.environ.get(env_key, "").strip() if env_key else ""
+
+
+def _classify_edge_health(status_code: int, payload: object) -> str:
+    """Classify an edge response without treating a listener as an AI worker.
+
+    A Render listener can answer before its background worker reaches the
+    durable-control preflight. READY therefore requires the documented health
+    body, a true ``worker_alive`` flag, and no terminal error.
+    """
+    if not 200 <= status_code < 300:
+        return "warming"
+    if not isinstance(payload, dict):
+        return "warming"
+    if payload.get("worker_alive") is True and not payload.get("last_error"):
+        return "ready"
+    return "warming"
+
+
+def _cache_prewarm_status(camera_id: str, status: str, *, error: str | None = None) -> dict:
+    now = time.time()
+    previous = _edge_prewarm_status.get(camera_id, {})
+    record = {
+        "camera_id": camera_id,
+        "status": status,
+        "requested_at": previous.get("requested_at", now),
+        "ready_at": now if status == "ready" else previous.get("ready_at"),
+        "last_checked_at": now,
+        "error": error,
+    }
+    _edge_prewarm_status[camera_id] = record
+    return record
+
+
+def _cached_prewarm_status(camera_id: str, *, now: float | None = None) -> dict:
+    """Return cache only. This function must never contact an edge service."""
+    current = dict(_edge_prewarm_status.get(camera_id) or {
+        "camera_id": camera_id,
+        "status": "unknown",
+        "requested_at": None,
+        "ready_at": None,
+        "last_checked_at": None,
+        "error": None,
+    })
+    current_time = time.time() if now is None else now
+    ready_at = current.get("ready_at")
+    if current.get("status") == "ready" and (not ready_at or current_time - ready_at > _PREWARM_READY_TTL_SECONDS):
+        current["status"] = "unknown"
+        current["error"] = "readiness_expired"
+    return current
 
 
 async def _probe_edge_service(camera_id: str | None) -> str:
@@ -261,7 +313,12 @@ async def _probe_edge_service(camera_id: str | None) -> str:
         timeout = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             response = await client.get(f"{wake_url.rstrip('/')}/wake")
-            if response.is_success:
+            try:
+                payload = response.json()
+            except (ValueError, json.JSONDecodeError):
+                payload = None
+            probe_status = _classify_edge_health(response.status_code, payload)
+            if probe_status == "ready":
                 return "ready"
             logger.info(
                 "[Dashboard] Edge wake probe camera_id=%s status=%s; worker still warming",
@@ -279,7 +336,7 @@ async def _probe_edge_service(camera_id: str | None) -> str:
 
 
 async def _retry_edge_wake_until_ready(camera_id: str) -> None:
-    """Retry only an explicit START wake until the sleeping free worker answers.
+    """Retry a bounded wake until the sleeping free worker is actually ready.
 
     The loop is bounded and stops immediately on success.  Normal dashboard
     polling never calls this path, so this does not create a permanent keepalive
@@ -289,6 +346,8 @@ async def _retry_edge_wake_until_ready(camera_id: str) -> None:
         for attempt, delay in enumerate(_EDGE_WAKE_RETRY_DELAYS, start=1):
             await asyncio.sleep(delay)
             status = await _probe_edge_service(camera_id)
+            if camera_id in _edge_prewarm_status:
+                _cache_prewarm_status(camera_id, status)
             if status == "ready":
                 logger.info(
                     "[Dashboard] Edge worker ready camera_id=%s after wake retry=%s",
@@ -319,6 +378,59 @@ async def _wake_edge_service(camera_id: str | None) -> str:
                 _retry_edge_wake_until_ready(camera_key)
             )
     return status
+
+
+def _eligible_durable_source(camera_id: str) -> bool:
+    """Read durable control only; prewarm is forbidden from mutating it."""
+    if camera_id not in _PREWARM_CAMERA_IDS:
+        return False
+    current = get_valid_active_session(camera_id)
+    return bool(
+        current
+        and current.get("source_mode") == "durable"
+        and current.get("session_id")
+        and current.get("source_object_key")
+    )
+
+
+async def _prewarm_one(camera_id: str) -> dict:
+    _cache_prewarm_status(camera_id, "warming")
+    status = await _wake_edge_service(camera_id)
+    return _cache_prewarm_status(camera_id, status)
+
+
+def _prewarm_response() -> dict:
+    cameras = {camera_id: _cached_prewarm_status(camera_id) for camera_id in _PREWARM_CAMERA_IDS}
+    eligible = [camera_id for camera_id, item in cameras.items() if item["status"] != "not_configured"]
+    return {
+        "eligible": len(eligible),
+        "warming": sum(item["status"] == "warming" for item in cameras.values()),
+        "ready": sum(item["status"] == "ready" for item in cameras.values()),
+        "cameras": cameras,
+    }
+
+
+@router.post("/edge/prewarm")
+async def prewarm_edge_workers(_user=Depends(require_operator_or_admin)):
+    """Begin one bounded, deduplicated wake for configured durable sources.
+
+    This route deliberately does not invoke any video-control operation. It
+    reads durable records, then probes the two independent Render workers in
+    parallel. Paused, ready, and completed sources remain in those states.
+    """
+    eligible = [camera_id for camera_id in _PREWARM_CAMERA_IDS if _eligible_durable_source(camera_id)]
+    ineligible = set(_PREWARM_CAMERA_IDS) - set(eligible)
+    for camera_id in ineligible:
+        _cache_prewarm_status(camera_id, "not_configured")
+    if eligible:
+        await asyncio.gather(*(_prewarm_one(camera_id) for camera_id in eligible))
+    return _prewarm_response()
+
+
+@router.get("/edge/prewarm/status")
+async def get_edge_prewarm_status(_user=Depends(require_operator_or_admin)):
+    """Read the bounded in-process readiness cache; never wake an edge worker."""
+    return _prewarm_response()
 
 
 def _session_media_path(session_id: str) -> Path | None:

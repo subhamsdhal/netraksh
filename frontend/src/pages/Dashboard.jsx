@@ -129,6 +129,7 @@ export default function Dashboard() {
   const fileInputRefs = useRef({});
   const autoStartedDemoCamerasRef = useRef(new Set());
   const wakeTimeoutsRef = useRef({});
+  const prewarmRequestedRef = useRef(false);
 
   // Remove the retired source cache once.  It contains no authority and is
   // deliberately never read; slot assignment remains in demoCameraSlots.
@@ -232,6 +233,49 @@ export default function Dashboard() {
       if (state?.mediaUrl?.startsWith('blob:')) URL.revokeObjectURL(state.mediaUrl);
     });
   }, []);
+
+  // One authenticated dashboard mount may request a bounded prewarm. The
+  // server decides eligibility from durable control records; this browser
+  // never talks to edge URLs and never retries a control action itself.
+  useEffect(() => {
+    if (!canUpload || prewarmRequestedRef.current) return undefined;
+    prewarmRequestedRef.current = true;
+    let cancelled = false;
+    let pollTimer = null;
+    const deadline = Date.now() + 305_000;
+    const publish = (payload) => {
+      if (!cancelled && payload) window.dispatchEvent(new CustomEvent('netraksh:edge-prewarm', { detail: payload }));
+    };
+    const fetchStatus = async () => {
+      try {
+        const response = await authFetch('/api/dashboard/edge/prewarm/status');
+        if (!response.ok || cancelled) return null;
+        const payload = await response.json();
+        publish(payload);
+        return payload;
+      } catch (_) { return null; }
+    };
+    const pollWhileWarming = async () => {
+      const payload = await fetchStatus();
+      if (!payload || cancelled) return;
+      if (Number(payload.warming || 0) > 0 && Date.now() < deadline) {
+        pollTimer = window.setTimeout(pollWhileWarming, 2_000);
+      }
+    };
+    (async () => {
+      try {
+        const response = await authFetch('/api/dashboard/edge/prewarm', { method: 'POST' });
+        if (!response.ok || cancelled) return;
+        const payload = await response.json();
+        publish(payload);
+        if (Number(payload.warming || 0) > 0) pollTimer = window.setTimeout(pollWhileWarming, 2_000);
+      } catch (_) { /* dashboard stays usable when a free worker is asleep */ }
+    })();
+    return () => {
+      cancelled = true;
+      if (pollTimer) window.clearTimeout(pollTimer);
+    };
+  }, [canUpload]);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);

@@ -1,0 +1,99 @@
+import asyncio
+
+from backend.api import dashboard
+
+
+CAMERAS = ("cam-border-01", "cam-checkpoint-01")
+
+
+def _durable(camera_id):
+    return {
+        "camera_id": camera_id,
+        "source_mode": "durable",
+        "session_id": f"{camera_id}-stream",
+        "source_object_key": f"media/{camera_id}.mp4",
+        "scenario": "paused",
+        "analysis_generation": 7,
+        "latest_analysis_session_id": "existing-analysis",
+    }
+
+
+def _reset_cache():
+    dashboard._edge_prewarm_status.clear()
+    dashboard._edge_wake_tasks.clear()
+
+
+def test_prewarm_wakes_two_durable_sources_concurrently_without_control_mutation(monkeypatch):
+    _reset_cache()
+    records = {camera_id: _durable(camera_id) for camera_id in CAMERAS}
+    entered = set()
+    release = asyncio.Event()
+
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: records.get(camera_id))
+
+    async def wake(camera_id):
+        entered.add(camera_id)
+        if len(entered) == 2:
+            release.set()
+        await release.wait()
+        return "ready"
+
+    monkeypatch.setattr(dashboard, "_wake_edge_service", wake)
+    result = asyncio.run(dashboard.prewarm_edge_workers(_user={}))
+
+    assert entered == set(CAMERAS)
+    assert result["eligible"] == 2
+    assert result["ready"] == 2
+    assert records == {camera_id: _durable(camera_id) for camera_id in CAMERAS}
+
+
+def test_prewarm_skips_no_source_camera(monkeypatch):
+    _reset_cache()
+    calls = []
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: _durable(camera_id) if camera_id == CAMERAS[0] else None)
+
+    async def wake(camera_id):
+        calls.append(camera_id)
+        return "ready"
+
+    monkeypatch.setattr(dashboard, "_wake_edge_service", wake)
+    result = asyncio.run(dashboard.prewarm_edge_workers(_user={}))
+
+    assert calls == [CAMERAS[0]]
+    assert result["eligible"] == 1
+    assert result["cameras"][CAMERAS[1]]["status"] == "not_configured"
+
+
+def test_health_requires_worker_alive_and_no_error():
+    assert dashboard._classify_edge_health(502, {}) == "warming"
+    assert dashboard._classify_edge_health(200, {}) == "warming"
+    assert dashboard._classify_edge_health(200, {"worker_alive": False, "last_error": None}) == "warming"
+    assert dashboard._classify_edge_health(200, {"worker_alive": True, "last_error": "RuntimeError"}) == "warming"
+    assert dashboard._classify_edge_health(200, {"worker_alive": True, "last_error": None}) == "ready"
+
+
+def test_status_reads_cache_without_contacting_edge(monkeypatch):
+    _reset_cache()
+    dashboard._cache_prewarm_status(CAMERAS[0], "ready")
+    dashboard._cache_prewarm_status(CAMERAS[1], "warming")
+
+    async def forbidden_probe(_camera_id):
+        raise AssertionError("status endpoint must not contact an edge service")
+
+    monkeypatch.setattr(dashboard, "_probe_edge_service", forbidden_probe)
+    result = asyncio.run(dashboard.get_edge_prewarm_status(_user={}))
+    assert result["ready"] == 1
+    assert result["warming"] == 1
+
+
+def test_ready_status_expires_without_keepalive():
+    _reset_cache()
+    dashboard._edge_prewarm_status[CAMERAS[0]] = {
+        "camera_id": CAMERAS[0], "status": "ready", "requested_at": 1,
+        "ready_at": 1, "last_checked_at": 1, "error": None,
+    }
+    expired = dashboard._cached_prewarm_status(
+        CAMERAS[0], now=1 + dashboard._PREWARM_READY_TTL_SECONDS + 1,
+    )
+    assert expired["status"] == "unknown"
+    assert expired["error"] == "readiness_expired"

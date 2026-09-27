@@ -36,6 +36,7 @@ export default function Header() {
   const [edgeWakeUntil, setEdgeWakeUntil] = useState(0);
   const [edgeTelemetrySignalAt, setEdgeTelemetrySignalAt] = useState(0);
   const [analysisStates, setAnalysisStates] = useState([]);
+  const [edgePrewarm, setEdgePrewarm] = useState(null);
 
   // ── Real connectivity & edge freshness ────────────────────────────────────
   // Accept freshness from both this header's socket hook and the application
@@ -100,11 +101,17 @@ export default function Header() {
       setEdgeTelemetrySignalAt(observedAt);
       setEdgeWakeUntil(0);
     };
+    const onPrewarm = (event) => {
+      const detail = event?.detail;
+      if (detail && typeof detail === 'object') setEdgePrewarm(detail);
+    };
     window.addEventListener('netraksh:edge-wake', onWake);
     window.addEventListener('netraksh-edge-telemetry', onTelemetry);
+    window.addEventListener('netraksh:edge-prewarm', onPrewarm);
     return () => {
       window.removeEventListener('netraksh:edge-wake', onWake);
       window.removeEventListener('netraksh-edge-telemetry', onTelemetry);
+      window.removeEventListener('netraksh:edge-prewarm', onPrewarm);
     };
   }, []);
 
@@ -179,11 +186,18 @@ export default function Header() {
     analysisStates,
     lastTelemetryAt: lastEdgeTelemetryMs,
     edgeWakeUntil,
+    prewarm: edgePrewarm,
   });
   const edgeColor =
     edgeStatus === 'ONLINE'  ? 'var(--color-ok)'     :
-    edgeStatus === 'STALE' || edgeStatus === 'WAKING' ? 'var(--color-warning)' :
+    edgeStatus === 'READY' ? 'var(--color-ok)' :
+    edgeStatus === 'STALE' || edgeStatus === 'WAKING' || edgeStatus === 'WARMING' ? 'var(--color-warning)' :
                                'var(--text-dim)';
+  const edgeDisplay = edgeStatus === 'WARMING'
+    ? `WARMING · ${Number(edgePrewarm?.ready || 0)}/${Number(edgePrewarm?.eligible || 0)}`
+    : edgeStatus === 'READY'
+      ? `READY · ${Number(edgePrewarm?.ready || 0)}/${Number(edgePrewarm?.eligible || 0)}`
+      : edgeStatus;
 
   // SYNC: reflects WS link + queue state
   const syncBuffering = syncStatus.queued > 0;
@@ -232,7 +246,7 @@ export default function Header() {
         />
         <StatusItem
           label="Edge"
-          value={edgeStatus}
+          value={edgeDisplay}
           valueColor={edgeColor}
         />
         <StatusItem

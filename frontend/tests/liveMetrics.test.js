@@ -13,6 +13,23 @@ describe('live dashboard metrics', () => {
     expect(deriveGlobalEdgeStatus({ analysisStates: [{ intent: 'IDLE' }], lastTelemetryAt: now - 60_000, now })).toBe('IDLE');
   });
 
+  it('reports passive worker readiness without claiming active analysis', () => {
+    expect(deriveGlobalEdgeStatus({
+      analysisStates: [{ cameraId: 'cam-border-01', intent: 'IDLE' }],
+      prewarm: { eligible: 2, warming: 0, ready: 2 },
+      now,
+    })).toBe('READY');
+  });
+
+  it('prioritizes current-run telemetry over passive prewarm readiness', () => {
+    expect(deriveGlobalEdgeStatus({
+      analysisStates: [{ cameraId: 'cam-border-01', intent: 'ACTIVE', hasFreshCurrentTelemetry: true }],
+      lastTelemetryAt: now - 100,
+      prewarm: { eligible: 2, warming: 0, ready: 2 },
+      now,
+    })).toBe('ONLINE');
+  });
+
   it('uses processing throughput, not pipeline metric or source FPS, for AI FPS', () => {
     expect(processingFpsForTelemetry(live, now)).toBe(0.24);
     expect(processingFpsForTelemetry({ ...live, processing_fps: 0.24, source_fps: 24 }, now)).not.toBe(24);
