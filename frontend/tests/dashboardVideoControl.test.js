@@ -16,6 +16,7 @@ describe('dashboard video control ownership', () => {
       runState: 'PAUSED',
       analysisState: 'PAUSED',
       analysisGeneration: 0,
+      scenario: 'paused',
     });
   });
 
@@ -89,6 +90,8 @@ describe('dashboard video control ownership', () => {
     expect(lifecycleAction({ analysisState: 'READY' })).toBe('START');
     expect(lifecycleAction({ analysisState: 'WAKING' })).toBe('STOP');
     expect(lifecycleAction({ analysisState: 'ACTIVE' })).toBe('STOP');
+    expect(lifecycleAction({ analysisState: 'WAKING', scenario: 'paused' })).toBe('START');
+    expect(lifecycleAction({ analysisState: 'ACTIVE', scenario: 'paused' })).toBe('START');
   });
 
   it('builds a single durable START with the backend-restored session', () => {

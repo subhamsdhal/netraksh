@@ -5,6 +5,7 @@ export function sourceStateFromCurrentVideo(state) {
   const lifecycleFields = {
     analysisState: lifecycle || runState,
     analysisGeneration: Number.isFinite(Number(state.analysis_generation)) ? Number(state.analysis_generation) : 0,
+    scenario: String(state.scenario || 'paused').toLowerCase(),
   };
   if (state.source_mode === 'bundled') {
     return {
@@ -35,6 +36,9 @@ export function restoringSourceState() {
 
 export function lifecycleAction(sourceState) {
   const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
+  // A stale WAKING/paused record is repaired by START / ANALYZE. STOP would
+  // merely preserve the contradictory control pair and never wake the worker.
+  if (sourceState?.scenario && sourceState.scenario !== 'normal' && ['WAKING', 'ACTIVE'].includes(lifecycle)) return 'START';
   return ['WAKING', 'ACTIVE', 'LIVE'].includes(lifecycle) ? 'STOP' : 'START';
 }
 
@@ -47,6 +51,7 @@ export function applyReplayResult(sourceState, result) {
     restoring: false,
     runState: String(result?.analysis_state || 'WAKING').toUpperCase(),
     analysisState: String(result?.analysis_state || 'WAKING').toUpperCase(),
+    scenario: String(result?.scenario || 'normal').toLowerCase(),
     analysisGeneration: Number.isFinite(Number(result?.analysis_generation))
       ? Number(result.analysis_generation)
       : sourceState.analysisGeneration,
