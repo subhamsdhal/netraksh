@@ -302,23 +302,21 @@ export default function Dashboard() {
           const restoredSource = sourceStateFromCurrentVideo(state);
           if (restoredSource) {
             restored[cameraId] = restoredSource;
-            if (restoredSource.sourceMode === 'bundled') {
-              setCameraMedia((current) => {
-                const previous = current[cameraId]?.mediaUrl;
-                if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous);
-                return {
-                  ...current,
-                  [cameraId]: {
-                    ...current[cameraId],
-                    mediaUrl: null,
-                    sessionId: null,
-                    playbackEnded: false,
-                    uploadError: null,
-                    isUploading: false,
-                  },
-                };
-              });
-            }
+            setCameraMedia((current) => {
+              const previous = current[cameraId]?.mediaUrl;
+              if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous);
+              return {
+                ...current,
+                [cameraId]: {
+                  ...current[cameraId],
+                  mediaUrl: null,
+                  sessionId: restoredSource.sourceMode === 'durable' ? state.session_id : null,
+                  playbackEnded: false,
+                  uploadError: null,
+                  isUploading: false,
+                },
+              };
+            });
             if (state.preview_url) {
               const mediaResponse = await authFetch(state.preview_url);
               if (mediaResponse.ok) {
@@ -341,11 +339,19 @@ export default function Dashboard() {
                   };
                 });
               } else if (restoredSource.sourceMode === 'durable') {
-                // A durable record whose browser media can no longer be read
-                // is not allowed to keep replaying a stale session ID. Keep
-                // its historical objects untouched and return this demo slot
-                // to the worker-bundled source.
-                restored[cameraId] = bundledSourceState(state.scenario);
+                // Preview transport is independent of durable activation. Do
+                // not replace a valid cloud session with the bundled demo just
+                // because a redirect/blob fetch was temporarily unavailable.
+                setCameraMedia((current) => ({
+                  ...current,
+                  [cameraId]: {
+                    ...current[cameraId],
+                    mediaUrl: null,
+                    sessionId: state.session_id,
+                    uploadError: 'PREVIEW LOAD FAILED — VIDEO IS STILL STORED',
+                    isUploading: false,
+                  },
+                }));
               }
             }
           } else {
