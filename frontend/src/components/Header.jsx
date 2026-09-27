@@ -367,8 +367,10 @@ export default function Header() {
           {edgeStatus !== 'ONLINE' && (
             <div style={{ fontSize: '0.7rem', color: 'var(--text-dim)', fontFamily: 'var(--font-body)', lineHeight: 1.4, paddingTop: '0.25rem', borderTop: '1px solid var(--border-color)' }}>
               {edgeStatus === 'STALE'
-                ? 'No edge telemetry in the last 30s. Edge pipeline may be paused or processing slowly.'
-                : 'No edge telemetry received. Verify edge runner is active and processing the uploaded video.'}
+                ? 'No recent current-run edge telemetry.'
+                : edgeStatus === 'WAKING'
+                  ? 'Analysis start accepted. Waiting for fresh current-run edge telemetry.'
+                  : 'No analysis is currently running. Edge workers may sleep until START / ANALYZE.'}
             </div>
           )}
 

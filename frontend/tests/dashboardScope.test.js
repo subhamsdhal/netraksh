@@ -5,6 +5,7 @@ import {
   frameResponseMatchesTelemetry,
   isActiveTelemetry,
   telemetryForSource,
+  lifecycleStatus,
 } from '../src/utils/dashboardScope';
 
 describe('dynamic dashboard camera scope', () => {
@@ -59,6 +60,13 @@ describe('camera telemetry correctness', () => {
     const telemetry = { timestamp: 10_000, expected_interval_ms: 2_000 };
     expect(isActiveTelemetry(telemetry, 16_999)).toBe(true);
     expect(isActiveTelemetry(telemetry, 18_000)).toBe(false);
+  });
+
+  it('keeps configured paused/completed sources distinct from live telemetry', () => {
+    expect(lifecycleStatus({ sourceMode: 'durable', runState: 'PAUSED' }, null)).toBe('PAUSED');
+    expect(lifecycleStatus({ sourceMode: 'durable', runState: 'WAKING' }, null)).toBe('WAKING');
+    expect(lifecycleStatus({ sourceMode: 'durable', runState: 'COMPLETED' }, null)).toBe('COMPLETED');
+    expect(lifecycleStatus({ sourceMode: 'durable', runState: 'PAUSED' }, { timestamp: 1000 }, 1001)).toBe('ONLINE');
   });
 
   it('binds durable telemetry to source stream_id, not analyzed-frame session id', () => {

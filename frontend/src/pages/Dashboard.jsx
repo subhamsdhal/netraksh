@@ -7,7 +7,7 @@ import { WS_URL, BACKEND_URL, authFetch } from '../services/auth';
 import useAuth from '../hooks/useAuth';
 import { parseUtc } from '../utils/time';
 import { DEMO_CAMERA_LABELS, MAX_VISIBLE_CAMERAS, selectDemoCameraSlots } from '../utils/demoCameraSlots';
-import { deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource } from '../utils/dashboardScope';
+import { deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
 import { applyReplayResult, bundledSourceState, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
@@ -305,6 +305,7 @@ export default function Dashboard() {
   const activeCameraIds = useMemo(() => visibleCameraIds.filter((id) => {
     return isActiveTelemetry(scopedLiveTracks[id], now);
   }), [visibleCameraIds.join('|'), scopedLiveTracks, now]);
+  const configuredCameraIds = useMemo(() => visibleCameraIds.filter((id) => Boolean(slotSources[id]?.sourceMode)), [visibleCameraIds.join('|'), slotSources]);
   useEffect(() => {
     const cameraStates = visibleCameraIds.filter(Boolean).map((cameraId) => {
       const telemetry = scopedLiveTracks[cameraId];
@@ -372,8 +373,8 @@ export default function Dashboard() {
     });
   }, [activeCameraIds.join('|')]);
   const dashboardMode = deriveDashboardMode(activeCameraIds);
-  const reliabilityScopeCameraId = reliabilityCameraId && activeCameraIds.includes(reliabilityCameraId)
-    ? reliabilityCameraId : activeCameraIds[0] || null;
+  const reliabilityScopeCameraId = reliabilityCameraId && configuredCameraIds.includes(reliabilityCameraId)
+    ? reliabilityCameraId : configuredCameraIds[0] || null;
   useEffect(() => {
     if (!cameraIds.length) return;
     setDemoSlots((current) => {
@@ -513,8 +514,8 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (dashboardMode !== 'DUAL') setEventCameraFilter('ALL');
-    if (!activeCameraIds.includes(reliabilityCameraId)) setReliabilityCameraId(activeCameraIds[0] || null);
-  }, [dashboardMode, activeCameraIds.join('|')]);
+    if (!configuredCameraIds.includes(reliabilityCameraId)) setReliabilityCameraId(configuredCameraIds[0] || null);
+  }, [dashboardMode, configuredCameraIds.join('|')]);
   const selectedSessionId = selectedCameraId ? cameraMedia[selectedCameraId]?.sessionId : null;
   const reportingCameraId = selectedSessionId
     ? Object.entries(scopedLiveTracks).find(([, telemetry]) => telemetry?.stream_id === selectedSessionId)?.[0]
@@ -539,8 +540,9 @@ export default function Dashboard() {
   const activeTelemetryReceivedAt = activeCameraId ? scopedLiveTracks[activeCameraId]?.timestamp : null;
   const telemetryAgeMs = activeTelemetryReceivedAt == null ? null : now - activeTelemetryReceivedAt;
   const analysisState = activeCameraId ? scopedLiveTracks[activeCameraId]?.analysis_state : null;
+  const activeSourceState = activeCameraId ? slotSources[activeCameraId] : null;
   const telemetryStatus = !isConnected ? 'DISCONNECTED'
-    : telemetryAgeMs == null ? 'WAITING'
+    : telemetryAgeMs == null ? lifecycleStatus(activeSourceState, null, now)
     : telemetryStatusAt(scopedLiveTracks[activeCameraId], now);
   const activeProcessingFps = processingFpsForTelemetry(scopedLiveTracks[activeCameraId], now);
 
@@ -759,7 +761,7 @@ export default function Dashboard() {
   // Events for the selected camera and active uploaded-video context.
   const contextualEvents = [];
   const _seenIds = new Set();
-  const visibleCameraSet = new Set(activeCameraIds);
+  const visibleCameraSet = new Set(configuredCameraIds);
   events.forEach(e => {
     if (visibleCameraSet.size && !visibleCameraSet.has(e.camera_id)) return;
     if (!visibleCameraSet.size) return;
@@ -803,16 +805,14 @@ export default function Dashboard() {
   const displayEvents = filterLiveEvents(currentSessionEvents.filter(ev =>
     (ev.event_type && String(ev.event_type).toLowerCase() !== 'unknown') ||
     ev.decision_state === 'ABSTAIN' || ev.decision === 'ABSTAIN'
-  ), activeCameraIds, eventCameraFilter).slice(0, 10);
+  ), configuredCameraIds, eventCameraFilter).slice(0, 10);
   const recentPlateReads = contextualEvents
     .filter((ev) => ev.normalized_plate_text || ev.plate_text)
     .sort((a, b) => eventTimestampMs(b.timestamp) - eventTimestampMs(a.timestamp))
     .slice(0, 8);
 
   useEffect(() => {
-    if (displayEvents.length > 0) {
-      setLatestEvent(displayEvents[0]);
-    }
+    setLatestEvent(displayEvents[0] || null);
   }, [displayEvents.length, displayEvents[0]?.event_id, displayEvents[0]?.id]);
 
   // Reliability factors and Gate 1 must describe the same event snapshot.
@@ -820,7 +820,7 @@ export default function Dashboard() {
   const scopedLatestEvent = selectReliabilityEvent(
     displayEvents,
     reliabilityScopeCameraId,
-    activeCameraIds,
+    configuredCameraIds,
     scopedLiveTracks[reliabilityScopeCameraId]?.analysis_session_id || null,
   );
   const reliabilityEvent = scopedLatestEvent || (latestEvent?.camera_id === reliabilityScopeCameraId ? latestEvent : null);
@@ -921,11 +921,11 @@ export default function Dashboard() {
 
       <div className="dashboard-live-strip">
         <div><span>CAMERA</span><strong title={activeCamera?.displayId}>{activeCamera?.friendlyName || 'Not configured'}</strong></div>
-        <div><span>CAMERA HEALTH</span><strong>{health[activeCameraId]?.health_state || 'UNKNOWN'}{health[activeCameraId]?.health_reason && health[activeCameraId]?.health_state !== 'OK' ? ` · ${String(health[activeCameraId].health_reason).replace(/_/g, ' ')}` : ''}</strong></div>
+        <div><span>CAMERA HEALTH</span><strong>{telemetryStatus === 'PAUSED' || telemetryStatus === 'WAKING' ? `N/A · ANALYSIS ${telemetryStatus}` : (health[activeCameraId]?.health_state || 'UNKNOWN')}{telemetryStatus !== 'PAUSED' && telemetryStatus !== 'WAKING' && health[activeCameraId]?.health_reason && health[activeCameraId]?.health_state !== 'OK' ? ` · ${String(health[activeCameraId].health_reason).replace(/_/g, ' ')}` : ''}</strong></div>
         <div><span>AI FPS</span><strong>{activeProcessingFps == null ? 'N/A' : activeProcessingFps.toFixed(2)}</strong></div>
         <div><span>LIVE TRACKS</span><strong>{telemetryStatus === 'LIVE' ? (scopedLiveTracks[activeCameraId]?.track_count ?? 0) : 'N/A'}</strong></div>
         <div><span>FRAME</span><strong>{telemetryStatus === 'LIVE' && scopedLiveTracks[activeCameraId]?.frame_width ? `${scopedLiveTracks[activeCameraId].frame_width}×${scopedLiveTracks[activeCameraId].frame_height}` : 'N/A'}</strong></div>
-        <div><span>LAST TELEMETRY</span><strong>{telemetryAgeMs == null ? 'Never' : `${Math.max(0, telemetryAgeMs / 1000).toFixed(1)}s ago`}</strong></div>
+        <div><span>LAST TELEMETRY</span><strong>{telemetryAgeMs == null ? (telemetryStatus === 'PAUSED' ? 'N/A · PAUSED' : telemetryStatus === 'WAKING' ? 'WAITING FOR FIRST CURRENT-RUN TELEMETRY' : 'Never') : `${Math.max(0, telemetryAgeMs / 1000).toFixed(1)}s ago`}</strong></div>
       </div>
 
       <section className={`dashboard-camera-grid camera-mode-${dashboardMode.toLowerCase()}`} aria-label="SIH camera source slots">
@@ -939,21 +939,21 @@ export default function Dashboard() {
           const latestFaceEvent = cameraEvents.find(event => String(event.event_type || '').toUpperCase() === 'FACE_DETECTED' || event.face_match_status || event.recognition_state) || null;
           const faceStatus = latestFaceEvent?.face_match_status || (latestFaceEvent?.face_match_person_id ? 'KNOWN' : latestFaceEvent ? 'UNKNOWN' : null);
           const faceLabel = latestFaceEvent?.watchlist_label || latestFaceEvent?.face_match_person_name || null;
-          const lightingState = latestCameraEvent?.lighting_state || telemetry?.lighting_state || (String(latestCameraEvent?.scene_condition || '').includes('LOW_LIGHT') ? 'LOW_LIGHT' : cameraId ? 'DAYLIGHT' : 'UNKNOWN');
-          const analyticsMethod = latestCameraEvent?.detection_method || telemetry?.detection_method || (latestCameraEvent?.event_type === 'MOVEMENT_UNCLASSIFIED' ? 'MOTION_FALLBACK' : cameraId ? 'YOLO' : 'WAITING');
+          const lightingState = latestCameraEvent?.lighting_state || telemetry?.lighting_state || (String(latestCameraEvent?.scene_condition || '').includes('LOW_LIGHT') ? 'LOW_LIGHT' : 'N/A');
+          const analyticsMethod = latestCameraEvent?.detection_method || telemetry?.detection_method || (latestCameraEvent?.event_type === 'MOVEMENT_UNCLASSIFIED' ? 'MOTION_FALLBACK' : 'N/A');
           const locationLabel = DEMO_CAMERA_LABELS[cameraId]?.location || camera?.location || 'Unspecified location';
           const title = DEMO_CAMERA_LABELS[cameraId]?.name || camera?.friendlyName || `Camera slot ${slotIndex + 1}`;
-          const status = camera?.status || 'NOT CONNECTED';
+          const sourceState = cameraId ? slotSources[cameraId] : null;
+          const status = lifecycleStatus(sourceState, telemetry, now);
           const liveStatus = telemetryStatusAt(telemetry, now);
           const telemetryAvailable = Boolean(telemetry && liveStatus === 'LIVE');
-          const sourceState = cameraId ? slotSources[cameraId] : null;
           const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
           const displayRunState = sourceState?.restoring
             ? 'RESTORING'
             : lifecycle || (telemetryAvailable ? 'LIVE' : 'LOADED');
           const mediaState = cameraId ? (cameraMedia[cameraId] || {}) : {};
-          const isDemoReplay = Boolean(telemetry?.demo_replay || DEMO_CAMERA_LABELS[cameraId]);
-          const statusLabel = isDemoReplay && status === 'LIVE' ? 'ONLINE' : status;
+          const isDemoReplay = Boolean(telemetry?.demo_replay || sourceState?.sourceMode === 'bundled');
+          const statusLabel = status;
           const cardFps = processingFpsForTelemetry(telemetry, now);
           const sourceFps = sourceFpsForTelemetry(telemetry);
           const updateAge = telemetry?.timestamp ? Math.max(0, now - telemetry.timestamp) : null;
@@ -1055,8 +1055,8 @@ export default function Dashboard() {
               </div>
               <div className="dashboard-camera-ai-row" aria-label="AI capability status">
                 {isDemoReplay && <span className="ai-demo">DEMO REPLAY</span>}
-                <span className={telemetryAvailable ? 'ai-active' : 'ai-context'}>DETECTION {telemetryAvailable ? 'LIVE' : liveStatus === 'STALE' ? 'STALE · LAST KNOWN' : 'WAITING'}</span>
-                <span className={telemetryAvailable ? 'ai-active' : 'ai-context'}>TRACKING {telemetryAvailable ? 'LIVE' : liveStatus === 'STALE' ? 'STALE · LAST KNOWN' : 'WAITING'}</span>
+                <span className={telemetryAvailable ? 'ai-active' : 'ai-context'}>DETECTION {telemetryAvailable ? 'LIVE' : status === 'STALE' ? 'STALE · LAST KNOWN' : status}</span>
+                <span className={telemetryAvailable ? 'ai-active' : 'ai-context'}>TRACKING {telemetryAvailable ? 'LIVE' : status === 'STALE' ? 'STALE · LAST KNOWN' : status}</span>
                 <span className="ai-context">SCENE {lightingState.replace(/_/g, ' ')}</span>
                 <span className="ai-context">ANALYTICS {analyticsMethod.replace(/_/g, ' ')}</span>
                 <span className="ai-context">LINE / FENCE EVENT {cameraId ? 'BACKEND' : 'WAITING'}</span>
@@ -1089,16 +1089,16 @@ export default function Dashboard() {
 
       <section className="dashboard-events-card card" aria-label="Latest unified security events">
         <div className="card-header">
-          <div><span className="card-title">Latest Security Events</span><span className="dashboard-events-subtitle">{dashboardMode === 'EMPTY' ? 'WAITING FOR SOURCE' : dashboardMode === 'SINGLE' ? `Showing events for ${cameraModels.find((camera) => camera.cameraId === activeCameraIds[0])?.friendlyName || activeCameraIds[0]}` : 'Unified feed · live backend events'} · latest {Math.min(displayEvents.length, 10)}</span></div>
-          {dashboardMode === 'DUAL' && <div className="dashboard-event-filters" role="group" aria-label="Event camera filter">
+          <div><span className="card-title">Latest Security Events</span><span className="dashboard-events-subtitle">{configuredCameraIds.length === 0 ? 'WAITING FOR SOURCE' : configuredCameraIds.length === 1 ? `Showing events for ${cameraModels.find((camera) => camera.cameraId === configuredCameraIds[0])?.friendlyName || configuredCameraIds[0]}` : 'Unified feed · current source sessions'} · latest {Math.min(displayEvents.length, 10)}</span></div>
+          {configuredCameraIds.length > 1 && <div className="dashboard-event-filters" role="group" aria-label="Event camera filter">
             <button className={`btn btn-sm ${eventCameraFilter === 'ALL' ? 'btn-primary' : 'btn-outline'}`} onClick={() => setEventCameraFilter('ALL')}>ALL</button>
-            {activeCameraIds.map((cameraId) => <button key={cameraId} className={`btn btn-sm ${eventCameraFilter === cameraId ? 'btn-primary' : 'btn-outline'}`} onClick={() => setEventCameraFilter(cameraId)}>{cameraId === 'cam-border-01' ? 'CAM 1' : 'CAM 2'}</button>)}
+            {configuredCameraIds.map((cameraId) => <button key={cameraId} className={`btn btn-sm ${eventCameraFilter === cameraId ? 'btn-primary' : 'btn-outline'}`} onClick={() => setEventCameraFilter(cameraId)}>{cameraId === 'cam-border-01' ? 'CAM 1' : 'CAM 2'}</button>)}
           </div>}
           <button onClick={() => setShowWhy((value) => !value)} className="btn btn-sm btn-outline">WHY THIS ALERT?</button>
         </div>
         {showWhy && <div className="dashboard-events-explanation">{whyExplanation || 'No verified event is available yet. This explanation will use the backend decision factors when an event arrives.'}</div>}
         <div className="dashboard-events-table-wrap">
-          {dashboardMode === 'EMPTY' ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">WAITING FOR SOURCE — ADD A VIDEO TO BEGIN ANALYSIS.</div></div> : displayEvents.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">No verified security events recorded for the active camera scope yet.</div></div> : (
+          {configuredCameraIds.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">WAITING FOR SOURCE — ADD A VIDEO TO BEGIN ANALYSIS.</div></div> : displayEvents.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">{configuredCameraIds.some((id) => ['PAUSED', 'READY'].includes(String(slotSources[id]?.runState || slotSources[id]?.analysisState).toUpperCase())) ? 'SOURCE LOADED — ANALYSIS PAUSED. No current-run security event yet.' : configuredCameraIds.every((id) => telemetryStatusAt(scopedLiveTracks[id], now) === 'COMPLETED') ? 'ANALYSIS COMPLETED — NO VERIFIED SECURITY EVENT WAS GENERATED FOR THIS RUN.' : 'PROCESSING — NO VERIFIED SECURITY EVENT YET.'}</div></div> : (
             <table className="dashboard-events-table">
               <thead><tr>{['TIME', 'EVENT ID', 'CAMERA', 'EVENT', 'DECISION', 'SEVERITY', 'EVIDENCE'].map(label => <th key={label}>{label}</th>)}</tr></thead>
               <tbody>{displayEvents.map((event, index) => {
@@ -1271,11 +1271,13 @@ export default function Dashboard() {
               <span className="badge badge-neutral" style={{ fontSize: '0.45rem' }}>temporal/spatial only</span>
             </div>
             <div className="flex flex-col" style={{ padding: '0.75rem' }}>
-              {dashboardMode !== 'DUAL' ? (
+              {configuredCameraIds.length < 2 ? (
                 <div className="flex flex-col gap-1">
-                  <span className="text-warning text-sm font-display">REQUIRES TWO ACTIVE CAMERA SOURCES</span>
-                  <span className="text-xs text-muted">Add and start a second video to enable cross-camera event correlation.</span>
+                  <span className="text-warning text-sm font-display">{configuredCameraIds.length === 1 ? 'SECOND SOURCE REQUIRED' : 'ADD CAMERA SOURCES'}</span>
+                  <span className="text-xs text-muted">{configuredCameraIds.length === 1 ? 'Load a second source to enable cross-camera event correlation.' : 'Load camera sources to enable cross-camera event correlation.'}</span>
                 </div>
+              ) : activeCameraIds.length < 2 ? (
+                <div className="flex flex-col gap-1"><span className="text-warning text-sm font-display">TWO SOURCES LOADED — BOTH ANALYSES MUST BE LIVE</span><span className="text-xs text-muted">Start both analyses to enable temporal/spatial correlation.</span></div>
               ) : effectiveCorrelation?.status === 'CORROBORATED' ? (
                 <div className="flex flex-col gap-1">
                   <div className="flex items-center gap-2">
@@ -1323,10 +1325,12 @@ export default function Dashboard() {
               <span className="badge badge-neutral" style={{ fontSize: '0.45rem' }}>{activeCameraIds.length} Active / {fleetHealth.length} Registered</span>
             </div>
             <div className="overflow-y-auto custom-scrollbar flex flex-col gap-2" style={{ padding: '0.75rem' }}>
-              {activeCameraIds.length === 0 && <div className="state-empty-sub">WAITING FOR SOURCE</div>}
-              {fleetHealth.filter((node) => activeCameraIds.includes(node.camera_id)).map((node) => {
+              {configuredCameraIds.length === 0 && <div className="state-empty-sub">WAITING FOR SOURCE</div>}
+              {fleetHealth.filter((node) => configuredCameraIds.includes(node.camera_id)).map((node) => {
                 const nodeState = node.health_state || 'UNKNOWN';
-                return <div key={node.camera_id} className="flex justify-between items-center border rounded p-2" style={{ borderColor: 'var(--border-color)' }}><span className="font-display text-main" style={{ fontSize: '.7rem' }}>{node.name || node.camera_id}</span><span className={nodeState === 'OK' ? 'text-ok' : 'text-warning'} style={{ fontSize: '.6rem' }}>{nodeState}</span></div>;
+                const cameraSource = slotSources[node.camera_id];
+                const state = lifecycleStatus(cameraSource, scopedLiveTracks[node.camera_id], now);
+                return <div key={node.camera_id} className="flex justify-between items-center border rounded p-2" style={{ borderColor: 'var(--border-color)' }}><span className="font-display text-main" style={{ fontSize: '.7rem' }}>{node.name || node.camera_id}</span><span className={state === 'ONLINE' ? 'text-ok' : 'text-warning'} style={{ fontSize: '.6rem' }}>{state}</span></div>;
               })}
             </div>
           </div>
@@ -1337,8 +1341,8 @@ export default function Dashboard() {
         <div className="dashboard-right-column flex-col h-full" style={{ flex: 2, display: 'flex', gap: '0.75rem' }}>
           <div className="dashboard-reliability-card card">
             <div className="card-header">
-              <div><span className="card-title">Reliability Decision Pipeline</span><span className="dashboard-events-subtitle">{reliabilityScopeCameraId ? `Camera: ${cameraModels.find((camera) => camera.cameraId === reliabilityScopeCameraId)?.friendlyName || reliabilityScopeCameraId}` : 'WAITING FOR SOURCE'}</span></div>
-              {dashboardMode === 'DUAL' && <select aria-label="Reliability camera" value={reliabilityScopeCameraId || ''} onChange={(event) => setReliabilityCameraId(event.target.value)}>{activeCameraIds.map((cameraId) => <option key={cameraId} value={cameraId}>{cameraId === 'cam-border-01' ? 'Camera 1' : 'Camera 2'}</option>)}</select>}
+              <div><span className="card-title">Reliability Decision Pipeline</span><span className="dashboard-events-subtitle">{reliabilityScopeCameraId ? `Camera: ${cameraModels.find((camera) => camera.cameraId === reliabilityScopeCameraId)?.friendlyName || reliabilityScopeCameraId}${!activeCameraIds.includes(reliabilityScopeCameraId) ? ' · SOURCE LOADED · ANALYSIS PAUSED' : ''}` : 'WAITING FOR SOURCE'}</span></div>
+              {configuredCameraIds.length > 1 && <select aria-label="Reliability camera" value={reliabilityScopeCameraId || ''} onChange={(event) => setReliabilityCameraId(event.target.value)}>{configuredCameraIds.map((cameraId) => <option key={cameraId} value={cameraId}>{cameraId === 'cam-border-01' ? 'Camera 1' : 'Camera 2'}</option>)}</select>}
               <ShieldCheck size={14} className="text-muted" />
             </div>
 
@@ -1359,7 +1363,7 @@ export default function Dashboard() {
                       )}
                     </>
                   ) : (
-                    <span className="text-xs text-muted">{liveTelemetry ? 'N/A — no reliability event for current telemetry' : 'Waiting for a real event…'}</span>
+                    <span className="text-xs text-muted">{!reliabilityScopeCameraId ? 'Waiting for a real event…' : !activeCameraIds.includes(reliabilityScopeCameraId) ? 'No current-run reliability decision — analysis paused.' : liveTelemetry ? 'N/A — no reliability event for current telemetry' : 'Waiting for a real event…'}</span>
                   )
                 }
               />
@@ -1373,7 +1377,7 @@ export default function Dashboard() {
                       <span className="text-xs border px-1 rounded bg-elevated">{SCENE_CONDITION_LABELS[sceneCondition] || sceneCondition}</span>
                     </>
                   ) : (
-                    <span className="text-xs text-muted">{liveTelemetry ? 'N/A — no scene decision for current telemetry' : 'Waiting for a real event…'}</span>
+                    <span className="text-xs text-muted">{!reliabilityScopeCameraId ? 'Waiting for a real event…' : !activeCameraIds.includes(reliabilityScopeCameraId) ? 'No current-run scene decision — analysis paused.' : liveTelemetry ? 'N/A — no scene decision for current telemetry' : 'Waiting for a real event…'}</span>
                   )
                 }
               />
@@ -1410,7 +1414,7 @@ export default function Dashboard() {
                   ) : parsed?.kind === 'abstain' ? (
                     <span className="text-xs text-muted">Gate 1 override — R was never computed for this event</span>
                   ) : (
-                    <span className="text-xs text-muted">{liveTelemetry ? 'N/A — reliability is emitted only with a processed event' : 'Waiting for a real event…'}</span>
+                    <span className="text-xs text-muted">{!reliabilityScopeCameraId ? 'Waiting for a real event…' : !activeCameraIds.includes(reliabilityScopeCameraId) ? 'No current-run reliability decision — analysis paused.' : liveTelemetry ? 'N/A — reliability is emitted only with a processed event' : 'Waiting for a real event…'}</span>
                   )
                 }
               />
