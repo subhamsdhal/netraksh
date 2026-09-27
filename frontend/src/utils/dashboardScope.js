@@ -7,9 +7,10 @@ export function isActiveTelemetry(telemetry, now = Date.now()) {
   return telemetryStatusAt(telemetry, now) === 'LIVE';
 }
 
-export function telemetryForSource(telemetry, sourceState) {
+export function telemetryForSource(telemetry, sourceState, cameraId = null) {
   if (!telemetry) return null;
-  if (sourceState?.runState === 'UPLOADING') return null;
+  if (cameraId && telemetry.camera_id && telemetry.camera_id !== cameraId) return null;
+  if (['UPLOADING', 'SELECTING', 'VALIDATING', 'QUEUED_FOR_NORMALIZATION', 'NORMALIZING', 'ACTIVATING'].includes(sourceState?.runState)) return null;
   if (sourceState?.sourceMode !== 'durable') return telemetry;
   const telemetrySession = telemetry.analysis_session_id || telemetry.stream_id;
   return telemetrySession === sourceState.sourceId ? telemetry : null;

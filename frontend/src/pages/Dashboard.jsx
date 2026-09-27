@@ -201,7 +201,7 @@ export default function Dashboard() {
   const scopedLiveTracks = useMemo(() => Object.fromEntries(
     Object.entries(liveTracks).map(([cameraId, telemetry]) => [
       cameraId,
-      telemetryForSource(telemetry, slotSources[cameraId]),
+      telemetryForSource(telemetry, slotSources[cameraId], cameraId),
     ]),
   ), [liveTracks, slotSources]);
   const cameraModels = useMemo(() => cameraIds.map(cameraId => {
@@ -512,74 +512,88 @@ export default function Dashboard() {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('camera_id', cameraId);
+    let uploaded;
     try {
       const res = await authFetch('/api/dashboard/video/upload', { method: 'POST', body: formData });
       if (!res.ok) {
-        let detail = 'Video upload failed.';
+        let detail = 'VIDEO UPLOAD FAILED';
         try { detail = (await res.json()).detail || detail; } catch (_) { /* keep concise fallback */ }
         throw new Error(detail);
       }
-      const uploaded = await res.json();
+      uploaded = await res.json();
+    } catch (error) {
+      // The server may have accepted a request even when the browser loses the
+      // response. Keep the replacement context visible instead of resurrecting
+      // the old bundled source; the operator can retry after checking current
+      // sessions rather than silently creating a second upload.
+      console.error('Upload error:', error);
       setSlotSources((current) => ({
         ...current,
-        [cameraId]: {
-          sourceMode: 'durable',
-          sourceId: uploaded.session_id || null,
-          sourceName: uploaded.source_name || file.name,
-          runState: 'LOADED',
-        },
+        [cameraId]: { ...current[cameraId], sourceMode: 'durable', runState: 'ERROR' },
       }));
-      
-      if (uploaded.session_id && uploaded.source_name) {
-        try {
-          const analyzeRes = await authFetch('/api/dashboard/video/analyze', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              session_id: uploaded.session_id,
-              source_name: uploaded.source_name,
-              preview_name: null,
-              camera_id: cameraId,
-            })
-          });
-          if (!analyzeRes.ok) {
-             console.error('Failed to trigger analysis on edge', await analyzeRes.text());
-          }
-        } catch (err) {
-          console.error('Network error triggering analysis:', err);
-        }
-      }
-
-      if (uploaded.status === 'ok_no_preview') {
-        updateCameraMedia(cameraId, {
-          mediaUrl: null,
-          sessionId: uploaded.session_id || null,
-          uploadError: uploaded.message,
-        });
-        return;
-      }
-      if (uploaded.session_id) updateCameraMedia(cameraId, { sessionId: uploaded.session_id });
-      if (uploaded.preview_url) {
-        const mediaRes = await authFetch(uploaded.preview_url);
-        if (mediaRes.ok) {
-            const blob = await mediaRes.blob();
-            const blobUrl = URL.createObjectURL(blob);
-            updateCameraMedia(cameraId, { mediaUrl: blobUrl, uploadError: null });
-        } else {
-            throw new Error('Failed to load video media.');
-        }
-      } else if (file.type !== 'video/mp4') {
-        throw new Error('This video needs an H.264 MP4 preview, but the server could not create one.');
-      }
-    } catch (error) {
-      console.error('Upload error:', error);
-      setSlotSources((current) => ({ ...current, [cameraId]: null }));
       updateCameraMedia(cameraId, {
         mediaUrl: null,
-        uploadError: error.message || 'Video upload failed.',
+        isUploading: false,
+        uploadError: error instanceof TypeError && error.message === 'Failed to fetch'
+          ? 'UPLOAD CONNECTION INTERRUPTED'
+          : (error.message || 'VIDEO UPLOAD FAILED'),
       });
-    } finally {
-      updateCameraMedia(cameraId, { isUploading: false });
+      return;
+    }
+
+    // Phase 1 is durable as soon as upload returns 200. Persist this session
+    // before activation/preview so a later failure can never roll it back.
+    const sessionId = uploaded.session_id || null;
+    const sourceName = uploaded.source_name || file.name;
+    setSlotSources((current) => ({
+      ...current,
+      [cameraId]: {
+        sourceMode: 'durable',
+        sourceId: sessionId,
+        sourceName,
+        runState: sessionId ? 'ACTIVATING' : 'ERROR',
+      },
+    }));
+    updateCameraMedia(cameraId, {
+      mediaUrl: null,
+      sessionId,
+      isUploading: false,
+      uploadError: sessionId ? null : 'VIDEO STORED BUT NO SESSION ID WAS RETURNED',
+    });
+    if (!sessionId) return;
+
+    // Phase 2 — activate the exact uploaded session. Activation failure keeps
+    // the durable source selected and is independently retryable.
+    try {
+      const analyzeRes = await authFetch('/api/dashboard/video/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, source_name: sourceName, preview_name: null, camera_id: cameraId }),
+      });
+      if (!analyzeRes.ok) {
+        let detail = 'ANALYSIS ACTIVATION FAILED — RETRY';
+        try { detail = (await analyzeRes.json()).detail || detail; } catch (_) { /* concise fallback */ }
+        throw new Error(detail);
+      }
+      setSlotSources((current) => ({ ...current, [cameraId]: { ...current[cameraId], runState: 'READY_TO_START' } }));
+    } catch (error) {
+      console.error('Analysis activation error:', error);
+      setSlotSources((current) => ({ ...current, [cameraId]: { ...current[cameraId], runState: 'ERROR' } }));
+      updateCameraMedia(cameraId, { uploadError: error instanceof TypeError && error.message === 'Failed to fetch' ? 'ANALYSIS ACTIVATION FAILED — RETRY' : (error.message || 'ANALYSIS ACTIVATION FAILED — RETRY') });
+    }
+
+    // Phase 3 — preview is useful but never authoritative. A redirect/blob
+    // failure must not clear the stored session or its source identity.
+    if (uploaded.preview_url) {
+      try {
+        const mediaRes = await authFetch(uploaded.preview_url);
+        if (!mediaRes.ok) throw new Error('PREVIEW LOAD FAILED — VIDEO IS STILL STORED');
+        const blobUrl = URL.createObjectURL(await mediaRes.blob());
+        updateCameraMedia(cameraId, { mediaUrl: blobUrl, uploadError: null });
+      } catch (error) {
+        console.error('Preview load error:', error);
+        updateCameraMedia(cameraId, { mediaUrl: null, uploadError: 'PREVIEW LOAD FAILED — VIDEO IS STILL STORED' });
+      }
     }
   };
 

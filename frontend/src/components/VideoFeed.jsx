@@ -247,7 +247,7 @@ export default function VideoFeed({
   const isDurableSource = sourceMode === 'durable';
   const showAnalyzedFrame = Boolean(
     analyzedFrameUrl
-    && (isDurableSource || hudVisible)
+    && hudVisible
     && ['LIVE', 'STALE'].includes(telemetryStatus)
   );
 
@@ -263,6 +263,7 @@ export default function VideoFeed({
   useEffect(() => {
     const sessionId = liveTracksData?.analysis_session_id || liveTracksData?.stream_id;
     const frameIndex = liveTracksData?.frame_index;
+    if (!hudVisible) return undefined;
     if (expectedSessionId && sessionId !== expectedSessionId) return undefined;
     if (!cameraId || !sessionId || !Number.isFinite(frameIndex) || !liveTracksData?.preview_available) return undefined;
     let cancelled = false;
@@ -270,8 +271,8 @@ export default function VideoFeed({
     const params = new URLSearchParams({
       analysis_session_id: sessionId,
       frame_index: String(frameIndex),
-      hud: isDurableSource || hudVisible ? 'true' : 'false',
-      cache_bust: `${sessionId}:${frameIndex}:${isDurableSource || hudVisible ? 1 : 0}`,
+      hud: 'true',
+      cache_bust: `${sessionId}:${frameIndex}:1`,
     });
     authFetch(`/system/telemetry/frame/${encodeURIComponent(cameraId)}?${params.toString()}`)
       .then((response) => response.ok && frameResponseMatchesTelemetry(liveTracksData, response.headers) ? response.blob() : null)
@@ -285,7 +286,7 @@ export default function VideoFeed({
       })
       .catch(() => {});
     return () => { cancelled = true; if (nextUrl) URL.revokeObjectURL(nextUrl); };
-  }, [cameraId, liveTracksData, hudVisible, isDurableSource, expectedSessionId]);
+  }, [cameraId, liveTracksData, hudVisible, expectedSessionId]);
 
   useEffect(() => {
     if (!['OFFLINE', 'DISCONNECTED'].includes(telemetryStatus)) return;
@@ -300,7 +301,7 @@ export default function VideoFeed({
       if (previous) URL.revokeObjectURL(previous);
       return null;
     });
-  }, [expectedSessionId]);
+  }, [cameraId, sourceMode, expectedSessionId]);
 
   // ─── LOCAL DETERMINISTIC DEMO CACHE LOGIC ────────────────────────────────────
   const [demoCache, setDemoCache] = useState(null);

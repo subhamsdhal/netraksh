@@ -19,7 +19,7 @@ describe('per-camera authoritative analyzed frame', () => {
     authFetch.mockResolvedValue({ ok: true, headers, blob: async () => new Blob(['jpeg']) });
   });
 
-  it('shows the authoritative annotated frame for a durable source without relying on HUD', async () => {
+  it('shows source preview until HUD is enabled, then uses the authoritative annotated frame', async () => {
     render(<VideoFeed
       cameraId="cam-border-01"
       mediaUrl="blob:video"
@@ -33,9 +33,12 @@ describe('per-camera authoritative analyzed frame', () => {
       }}
     />);
 
+    expect(authFetch).not.toHaveBeenCalled();
+    expect(screen.getByText(/SOURCE PREVIEW · NORMALIZED USER UPLOAD/)).toBeInTheDocument();
+    screen.getByTitle('Toggle debug HUD').click();
     await waitFor(() => expect(authFetch).toHaveBeenCalled());
     expect(authFetch.mock.calls[0][0]).toContain('hud=true');
-    expect(screen.getByTitle('Toggle debug HUD')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTitle('Toggle debug HUD')).toHaveAttribute('aria-pressed', 'true');
     await waitFor(() => expect(screen.getByAltText('Annotated analyzed frame for cam-border-01')).toBeInTheDocument());
     expect(screen.getByText(/LATEST ANALYZED FRAME · FRAME 42/)).toBeInTheDocument();
     expect(authFetch.mock.calls.every(([url]) => !url.includes('demo-telemetry'))).toBe(true);

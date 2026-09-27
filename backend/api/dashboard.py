@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import asyncio
 import json
 import os
 import shutil
@@ -92,6 +93,12 @@ _MAX_DURABLE_VIDEO_BYTES = 49_000_000
 _VIDEOS_SUBDIR = Path("demo") / "videos"
 _BUNDLED_SOURCE = "demo/videos/uploaded_demo.mp4"
 _BUNDLED_CAMERA_IDS = frozenset({"cam-border-01", "cam-checkpoint-01"})
+
+# ffprobe/ffmpeg and the synchronous S3 client are deliberately serialized on
+# the free backend.  The semaphore bounds expensive normalization without
+# blocking FastAPI's event loop, so health/readiness/WebSocket traffic remains
+# responsive while a second upload waits its turn.
+_NORMALIZATION_SEMAPHORE = asyncio.Semaphore(1)
 
 
 def _videos_dir() -> Path:
@@ -773,21 +780,23 @@ async def upload_dashboard_video(
         if durable and (not ffmpeg or not ffprobe):
             raise HTTPException(status_code=503, detail="Cloud video normalization is temporarily unavailable")
 
-        if ffprobe:
-            _probe_video(incoming_path, ffprobe)
+        async with _NORMALIZATION_SEMAPHORE:
+            if ffprobe:
+                await asyncio.to_thread(_probe_video, incoming_path, ffprobe)
 
-        if ffmpeg:
-            _normalize_video(incoming_path, normalized_path, ffmpeg)
-        elif ext == ".mp4":
-            # Development-only compatibility. Production durable uploads must
-            # pass through ffmpeg so browser playback and inference cannot split.
-            shutil.copyfile(incoming_path, normalized_path)
-        else:
-            raise HTTPException(status_code=503, detail="ffmpeg is required to normalize this video format")
+            if ffmpeg:
+                await asyncio.to_thread(_normalize_video, incoming_path, normalized_path, ffmpeg)
+            elif ext == ".mp4":
+                # Development-only compatibility. Production durable uploads must
+                # pass through ffmpeg so browser playback and inference cannot split.
+                await asyncio.to_thread(shutil.copyfile, incoming_path, normalized_path)
+            else:
+                raise HTTPException(status_code=503, detail="ffmpeg is required to normalize this video format")
 
         normalized_size = normalized_path.stat().st_size
         if durable:
-            store_uploaded_session(
+            await asyncio.to_thread(
+                store_uploaded_session,
                 camera_id=camera_id,
                 session_id=new_session_id,
                 source_path=normalized_path,
