@@ -374,7 +374,7 @@ export default function Dashboard() {
               return next;
             });
           }
-        } catch (_) { /* a missing scoped source is an honest empty state */ }
+        } catch (_) { return; /* failed restore must not trigger bundled fallback */ }
         if (mounted) {
           sourceRestoreReadyRef.current[cameraId] = true;
           setSourceRestoreReady((current) => ({ ...current, [cameraId]: true }));
