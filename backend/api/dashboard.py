@@ -223,10 +223,11 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
                 "available": True,
                 "source_mode": "bundled",
                 "source_name": "BUNDLED CLOUD DEMO",
+                "preview_url": "/api/dashboard/video/current/media",
                 "session_id": None,
                 "camera_id": camera_id,
                 "scenario": selected_bundled.get("scenario", "paused"),
-                "processing_status": "idle",
+                "processing_status": "active" if selected_bundled.get("scenario") == "normal" else "idle",
             }
         durable = get_valid_active_session(camera_id)
         if durable:
@@ -257,10 +258,11 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
                 "available": True,
                 "source_mode": "bundled",
                 "source_name": "BUNDLED CLOUD DEMO",
+                "preview_url": "/api/dashboard/video/current/media",
                 "session_id": None,
                 "camera_id": camera_id,
                 "scenario": bundled.get("scenario", "paused"),
-                "processing_status": "idle",
+                "processing_status": "active" if bundled.get("scenario") == "normal" else "idle",
             }
     scoped = (_demo_state.get("camera_sessions") or {}).get(camera_id, {}) if camera_id else {}
     source: str | None = scoped.get("video_source") if camera_id else _demo_state.get("video_source")
