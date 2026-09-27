@@ -348,7 +348,7 @@ async def post_telemetry(
         if persisted_current is not None:
             current = {
                 "stream_id": persisted_current.stream_id,
-                "analysis_session_id": persisted_current.stream_id,
+                "analysis_session_id": persisted_current.analysis_session_id,
                 "timestamp": persisted_current.timestamp,
                 "processed_timestamp": persisted_current.timestamp,
                 "sequence": persisted_current.sequence,
@@ -384,6 +384,9 @@ async def post_telemetry(
     snapshot_values = {
         "camera_id": payload.camera_id,
         "stream_id": payload.stream_id,
+        "analysis_session_id": payload.analysis_session_id,
+        "analysis_generation": payload.analysis_generation,
+        "frame_index": payload.frame_index,
         "timestamp": payload.timestamp,
         "video_time": payload.video_time,
         "sequence": payload.sequence,
@@ -435,9 +438,10 @@ async def latest_telemetry(
             "frame_width": item.frame_width,
             "frame_height": item.frame_height,
             "stream_id": item.stream_id,
-            "analysis_session_id": item.stream_id,
+            "analysis_session_id": item.analysis_session_id,
             "analysis_state": item.analysis_state,
-            "frame_index": None,
+            "analysis_generation": item.analysis_generation,
+            "frame_index": item.frame_index,
             "source_timestamp": None,
             "processed_timestamp": item.timestamp,
             "processing_fps": None,

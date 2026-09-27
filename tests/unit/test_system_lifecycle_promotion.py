@@ -60,3 +60,44 @@ def test_only_first_current_generation_telemetry_can_promote_waking_session(monk
         "status": "ignored", "reason": "out_of_order"
     }
     assert len(promoted) == 1
+
+
+def test_telemetry_snapshot_persists_the_real_run_identity(monkeypatch):
+    system._latest_telemetry.clear()
+    db = _Db()
+    monkeypatch.setattr(system, "broadcast_telemetry", AsyncMock())
+    monkeypatch.setattr(system, "promote_active_session", lambda *args: None)
+
+    assert asyncio.run(system.post_telemetry(_payload(analysis_session_id="real-run"), db, None)) == {"status": "ok"}
+    assert db.added.stream_id == "durable-source-session"
+    assert db.added.analysis_session_id == "real-run"
+    assert db.added.analysis_session_id != db.added.stream_id
+
+
+def test_legacy_snapshot_never_substitutes_stream_as_run_identity(monkeypatch):
+    legacy = type("Snapshot", (), {
+        "camera_id": "cam-border-01", "stream_id": "durable-stream",
+        "analysis_session_id": None, "timestamp": 42.0, "sequence": 5,
+        "video_time": None, "frame_width": None, "frame_height": None,
+        "analysis_state": "COMPLETED", "analysis_generation": None,
+        "frame_index": None, "tracks_json": [],
+    })()
+
+    class _PersistedQuery(_Query):
+        def first(self):
+            return legacy
+
+        def all(self):
+            return [legacy]
+
+    class _PersistedDb(_Db):
+        def query(self, *args):
+            return _PersistedQuery()
+
+    system._latest_telemetry.clear()
+    # A legacy persisted snapshot restores null rather than inventing the
+    # durable source identity as a run identity.
+    system._latest_telemetry.clear()
+    restored = asyncio.run(system.latest_telemetry("cam-border-01", "durable-stream", _PersistedDb(), None))
+    assert restored[0]["analysis_session_id"] is None
+    assert restored[0]["stream_id"] == "durable-stream"

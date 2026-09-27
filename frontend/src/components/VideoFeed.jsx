@@ -525,12 +525,14 @@ export default function VideoFeed({
                 : sourceRunState === 'READY_TO_START'
                   ? 'VIDEO READY · STARTING AI WORKER'
                   : (sourceMode === 'durable' && expectedSessionId && !liveTracksData)
-                    ? 'WAITING FOR FIRST ANALYZED FRAME'
+                    ? sourceRunState === 'COMPLETED'
+                      ? 'SOURCE STORED · ANALYSIS COMPLETED'
+                      : 'WAITING FOR FIRST ANALYZED FRAME'
                     : liveTracksData
                       ? 'TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL'
                       : 'NO VIDEO SOURCE'}
           </span>
-          {canUpload && !isUploading ? <div className="dashboard-video-upload" style={{
+          {canUpload && !isUploading && !(sourceMode === 'durable' && expectedSessionId) ? <div className="dashboard-video-upload" style={{
             background: 'var(--color-ok)', color: '#000',
             fontFamily: 'var(--font-display)', fontWeight: 700,
             fontSize: '0.75rem', letterSpacing: '0.1em',
@@ -538,7 +540,7 @@ export default function VideoFeed({
             display: 'flex', alignItems: 'center', gap: '0.5rem',
           }}>
             <Play size={14} /> ADD VIDEO SOURCE
-          </div> : !isUploading && <span className="text-muted text-xs">Upload requires ADMIN or OPERATOR access</span>}
+          </div> : !isUploading && sourceMode === 'durable' && expectedSessionId ? <span className="text-muted text-xs">PREVIEW UNAVAILABLE FOR THIS RESTORED SESSION</span> : <span className="text-muted text-xs">Upload requires ADMIN or OPERATOR access</span>}
           <span className="text-muted text-xs">SUPPORTED: MP4 · AVI · MOV · MKV · WEBM · M4V</span>
           {uploadError && <span className="text-danger text-xs text-center" role="alert">{uploadError}</span>}
         </div>

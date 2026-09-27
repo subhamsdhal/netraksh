@@ -484,6 +484,12 @@ class AnalysisTelemetrySnapshot(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     camera_id: Mapped[str] = mapped_column(String(36), nullable=False)
     stream_id: Mapped[Optional[str]] = mapped_column(String(36))
+    # The durable upload identity and a concrete inference run are different
+    # values.  Keep this nullable for snapshots created before run-scoped
+    # telemetry existed; legacy data must never manufacture an identity.
+    analysis_session_id: Mapped[Optional[str]] = mapped_column(String(36))
+    analysis_generation: Mapped[Optional[int]] = mapped_column(Integer)
+    frame_index: Mapped[Optional[int]] = mapped_column(Integer)
     timestamp: Mapped[float] = mapped_column(Float, nullable=False)
     video_time: Mapped[Optional[float]] = mapped_column(Float)
     sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

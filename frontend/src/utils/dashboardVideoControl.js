@@ -21,6 +21,7 @@ export function sourceStateFromCurrentVideo(state) {
       sourceMode: 'durable',
       sourceId: state.session_id,
       sourceName: state.source_name || 'Configured video source',
+      latestAnalysisSessionId: state.latest_analysis_session_id || null,
       runState,
       ...lifecycleFields,
     };

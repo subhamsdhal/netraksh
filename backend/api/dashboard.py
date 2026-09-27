@@ -494,10 +494,20 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
             browser_key = preview_key or (source_key if durable.get("content_type") == "video/mp4" else None)
             if not browser_key:
                 return {
-                    "available": False,
+                    # A source is still authoritative even when a browser
+                    # preview cannot be made.  Returning false here made a
+                    # cold restore falsely advertise an empty camera slot.
+                    "available": True,
+                    "source_mode": "durable",
                     "camera_id": camera_id,
                     "error": "no_browser_preview",
                     "source_name": durable.get("source_name"),
+                    "session_id": durable.get("session_id"),
+                    "scenario": durable.get("scenario", "paused"),
+                    "analysis_state": durable.get("analysis_state", "READY"),
+                    "analysis_generation": durable.get("analysis_generation", 0),
+                    "latest_analysis_session_id": durable.get("latest_analysis_session_id"),
+                    "completion_time": durable.get("completion_time"),
                 }
             session_id = durable.get("session_id")
             return {
@@ -514,6 +524,7 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
                 "video_time": durable.get("video_time", 0.0),
                 "video_time_updated_at": durable.get("video_time_updated_at", 0.0),
                 "completion_time": durable.get("completion_time"),
+                "latest_analysis_session_id": durable.get("latest_analysis_session_id"),
             }
         if camera_id in _BUNDLED_CAMERA_IDS:
             bundled = _bundled_control(camera_id)

@@ -77,6 +77,18 @@ describe('dashboard video control ownership', () => {
     expect(restoringSourceState()).toEqual({ restoring: true, runState: 'RESTORING' });
   });
 
+  it('preserves the durable control record run identity during restoration', () => {
+    const source = sourceStateFromCurrentVideo({
+      available: true, source_mode: 'durable', session_id: 'durable-stream',
+      source_name: 'cam 1.mp4', analysis_state: 'COMPLETED',
+      latest_analysis_session_id: 'real-completed-run',
+    });
+    expect(source).toMatchObject({
+      sourceId: 'durable-stream', latestAnalysisSessionId: 'real-completed-run',
+    });
+    expect(source.latestAnalysisSessionId).not.toBe(source.sourceId);
+  });
+
   it('keeps durable source identity unchanged through replay and preview-only state', () => {
     const source = { sourceMode: 'durable', sourceId: '94efecfd', sourceName: 'cam 2.mp4', runState: 'COMPLETED', analysisState: 'COMPLETED', analysisGeneration: 4 };
     const replayed = applyReplayResult(source, { analysis_state: 'WAKING', analysis_generation: 5 });

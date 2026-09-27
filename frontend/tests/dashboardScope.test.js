@@ -5,10 +5,16 @@ import {
   frameResponseMatchesTelemetry,
   isActiveTelemetry,
   telemetryForSource,
+  analysisSessionIdForSource,
   lifecycleStatus,
 } from '../src/utils/dashboardScope';
 
 describe('dynamic dashboard camera scope', () => {
+  it('uses restored durable run identity but never substitutes stream identity', () => {
+    expect(analysisSessionIdForSource(null, { sourceId: 'stream-1', latestAnalysisSessionId: 'run-1' })).toBe('run-1');
+    expect(analysisSessionIdForSource(null, { sourceId: 'stream-1' })).toBeNull();
+    expect(analysisSessionIdForSource({ analysis_session_id: 'fresh-run' }, { latestAnalysisSessionId: 'old-run' })).toBe('fresh-run');
+  });
   const events = [
     { event_id: 'a', camera_id: 'cam-border-01', event_type: 'LINE_CROSSING' },
     { event_id: 'b', camera_id: 'cam-checkpoint-01', event_type: 'INTRUSION' },

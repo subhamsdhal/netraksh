@@ -35,6 +35,13 @@ export function telemetryForSource(telemetry, sourceState, cameraId = null) {
   return Boolean(sourceState.sourceId && sourceSession === sourceState.sourceId) ? telemetry : null;
 }
 
+// A completed durable source can outlive the process-local telemetry cache.
+// Its control record retains the last real run identity; source identity is
+// deliberately not a fallback for that value.
+export function analysisSessionIdForSource(telemetry, sourceState) {
+  return telemetry?.analysis_session_id || sourceState?.latestAnalysisSessionId || null;
+}
+
 export function filterLiveEvents(events = [], activeCameraIds = [], cameraFilter = 'ALL') {
   const active = new Set(activeCameraIds.filter(Boolean));
   return events.filter((event) => active.has(event.camera_id)

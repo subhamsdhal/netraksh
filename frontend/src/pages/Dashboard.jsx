@@ -7,7 +7,7 @@ import { WS_URL, BACKEND_URL, authFetch } from '../services/auth';
 import useAuth from '../hooks/useAuth';
 import { parseUtc } from '../utils/time';
 import { DEMO_CAMERA_LABELS, MAX_VISIBLE_CAMERAS, selectDemoCameraSlots } from '../utils/demoCameraSlots';
-import { deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus } from '../utils/dashboardScope';
+import { analysisSessionIdForSource, deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
 import { applyReplayResult, bundledSourceState, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
@@ -129,7 +129,9 @@ export default function Dashboard() {
   const fileInputRefs = useRef({});
   const autoStartedDemoCamerasRef = useRef(new Set());
   const wakeTimeoutsRef = useRef({});
-  const prewarmRequestedRef = useRef(false);
+  // This is a request lifecycle, not a mount latch.  A cold backend must not
+  // consume the only prewarm attempt before it can accept the POST.
+  const prewarmRequestStateRef = useRef('IDLE');
 
   // Remove the retired source cache once.  It contains no authority and is
   // deliberately never read; slot assignment remains in demoCameraSlots.
@@ -234,14 +236,17 @@ export default function Dashboard() {
     });
   }, []);
 
-  // One authenticated dashboard mount may request a bounded prewarm. The
+  // One authenticated, backend-ready dashboard mount may request a bounded prewarm. The
   // server decides eligibility from durable control records; this browser
   // never talks to edge URLs and never retries a control action itself.
   useEffect(() => {
-    if (!canUpload || prewarmRequestedRef.current) return undefined;
-    prewarmRequestedRef.current = true;
+    if (!canUpload || backendStatus !== 'HEALTHY' || prewarmRequestStateRef.current === 'ACCEPTED') return undefined;
+    if (prewarmRequestStateRef.current === 'IN_FLIGHT') return undefined;
+    prewarmRequestStateRef.current = 'IN_FLIGHT';
     let cancelled = false;
     let pollTimer = null;
+    let retryTimer = null;
+    let attempts = 0;
     const deadline = Date.now() + 305_000;
     const publish = (payload) => {
       if (!cancelled && payload) window.dispatchEvent(new CustomEvent('netraksh:edge-prewarm', { detail: payload }));
@@ -262,20 +267,32 @@ export default function Dashboard() {
         pollTimer = window.setTimeout(pollWhileWarming, 2_000);
       }
     };
-    (async () => {
+    const requestPrewarm = async () => {
+      attempts += 1;
       try {
         const response = await authFetch('/api/dashboard/edge/prewarm', { method: 'POST' });
-        if (!response.ok || cancelled) return;
+        if (!response.ok || cancelled) {
+          if (response.status !== 401 && response.status !== 403 && attempts < 3) {
+            retryTimer = window.setTimeout(requestPrewarm, attempts * 750);
+          } else if (!cancelled) prewarmRequestStateRef.current = 'IDLE';
+          return;
+        }
         const payload = await response.json();
+        prewarmRequestStateRef.current = 'ACCEPTED';
         publish(payload);
         if (Number(payload.warming || 0) > 0) pollTimer = window.setTimeout(pollWhileWarming, 2_000);
-      } catch (_) { /* dashboard stays usable when a free worker is asleep */ }
-    })();
+      } catch (_) {
+        if (!cancelled && attempts < 3) retryTimer = window.setTimeout(requestPrewarm, attempts * 750);
+        else if (!cancelled) prewarmRequestStateRef.current = 'IDLE';
+      }
+    };
+    requestPrewarm();
     return () => {
       cancelled = true;
       if (pollTimer) window.clearTimeout(pollTimer);
+      if (retryTimer) window.clearTimeout(retryTimer);
     };
-  }, [canUpload]);
+  }, [canUpload, backendStatus]);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
@@ -298,6 +315,10 @@ export default function Dashboard() {
   }, []);
 
   const cameraIds = Array.from(new Set([
+    // Saved slots are layout only.  Including them while a cold backend is
+    // restoring lets the card say RESTORING rather than falsely "not
+    // configured"; GET /video/current remains the source authority.
+    ...demoSlots,
     ...cameras.map(camera => camera.camera_id),
     ...Object.keys(liveTracks),
     ...Object.keys(metrics),
@@ -350,6 +371,8 @@ export default function Dashboard() {
     return isActiveTelemetry(scopedLiveTracks[id], now);
   }), [visibleCameraIds.join('|'), scopedLiveTracks, now]);
   const configuredCameraIds = useMemo(() => visibleCameraIds.filter((id) => Boolean(slotSources[id]?.sourceMode)), [visibleCameraIds.join('|'), slotSources]);
+  const cameraInventoryRestoring = backendStatus !== 'HEALTHY'
+    || visibleCameraIds.filter(Boolean).some((cameraId) => slotSources[cameraId]?.restoring);
   useEffect(() => {
     const cameraStates = visibleCameraIds.filter(Boolean).map((cameraId) => {
       const telemetry = scopedLiveTracks[cameraId];
@@ -458,10 +481,13 @@ export default function Dashboard() {
       return next;
     });
     const restoreScopedSources = async () => {
+      if (backendStatus !== 'HEALTHY') return;
       await Promise.all(visibleCameraIds.filter(Boolean).map(async (cameraId) => {
+        let authoritativeResponse = false;
         try {
           const response = await authFetch(`/api/dashboard/video/current?camera_id=${encodeURIComponent(cameraId)}`);
           if (!response.ok || !mounted) return;
+          authoritativeResponse = true;
           const state = await response.json();
           const restoredSource = sourceStateFromCurrentVideo(state);
           if (restoredSource) {
@@ -522,8 +548,8 @@ export default function Dashboard() {
           } else {
             setSlotSources((current) => ({ ...current, [cameraId]: { restoring: false, runState: 'UNAVAILABLE' } }));
           }
-        } catch (_) { return; /* failed restore keeps the card disabled */ }
-        if (mounted) {
+        } catch (_) { return; /* transport failure remains RESTORING */ }
+        if (mounted && authoritativeResponse) {
           sourceRestoreReadyRef.current[cameraId] = true;
           setSourceRestoreReady((current) => ({ ...current, [cameraId]: true }));
         }
@@ -531,7 +557,7 @@ export default function Dashboard() {
     };
     restoreScopedSources();
     return () => { mounted = false; };
-  }, [visibleCameraIds.join('|')]);
+  }, [visibleCameraIds.join('|'), backendStatus]);
   useEffect(() => {
     // Start the backend-authoritative source only after restoration completes.
     // This prevents the evaluator auto-start from racing a durable upload and
@@ -598,12 +624,12 @@ export default function Dashboard() {
 
   const visibleContextKey = visibleCameraIds
     .filter(Boolean)
-    .map((cameraId) => `${cameraId}:${cameraMedia[cameraId]?.sessionId || slotSources[cameraId]?.sourceId || ''}:${scopedLiveTracks[cameraId]?.analysis_session_id || ''}`)
+    .map((cameraId) => `${cameraId}:${cameraMedia[cameraId]?.sessionId || slotSources[cameraId]?.sourceId || ''}:${analysisSessionIdForSource(scopedLiveTracks[cameraId], slotSources[cameraId]) || ''}`)
     .join('|');
   useEffect(() => {
     visibleCameraIds.filter(Boolean).forEach((cameraId) => {
       const streamId = cameraMedia[cameraId]?.sessionId || slotSources[cameraId]?.sourceId || null;
-      const analysisSessionId = scopedLiveTracks[cameraId]?.analysis_session_id || null;
+      const analysisSessionId = analysisSessionIdForSource(scopedLiveTracks[cameraId], slotSources[cameraId]);
       refreshEventsForContext(cameraId, streamId, analysisSessionId);
       refreshTelemetryForContext(cameraId, streamId);
     });
@@ -817,7 +843,7 @@ export default function Dashboard() {
     const contextStreamId = sourceTelemetry?.stream_id
       || slotSources[e.camera_id]?.sourceId
       || null;
-    const contextAnalysisSessionId = sourceTelemetry?.analysis_session_id || null;
+    const contextAnalysisSessionId = analysisSessionIdForSource(sourceTelemetry, slotSources[e.camera_id]);
     const contextStartTime = cameraMedia[e.camera_id]?.sessionStartTime || null;
     if (contextStreamId && e.stream_id && e.stream_id !== contextStreamId) return;
     if (contextAnalysisSessionId && e.analysis_session_id !== contextAnalysisSessionId) return;
@@ -843,7 +869,7 @@ export default function Dashboard() {
 
   const currentSessionEvents = contextualEvents.filter((event) => {
     const telemetry = scopedLiveTracks[event.camera_id];
-    const sessionId = telemetry?.analysis_session_id || null;
+    const sessionId = analysisSessionIdForSource(telemetry, slotSources[event.camera_id]);
     return Boolean(sessionId && event.analysis_session_id === sessionId);
   });
   const displayEvents = filterLiveEvents(currentSessionEvents.filter(ev =>
@@ -865,7 +891,7 @@ export default function Dashboard() {
     displayEvents,
     reliabilityScopeCameraId,
     configuredCameraIds,
-    scopedLiveTracks[reliabilityScopeCameraId]?.analysis_session_id || null,
+    analysisSessionIdForSource(scopedLiveTracks[reliabilityScopeCameraId], slotSources[reliabilityScopeCameraId]),
   );
   const reliabilityEvent = scopedLatestEvent || (latestEvent?.camera_id === reliabilityScopeCameraId ? latestEvent : null);
   const parsed = reliabilityEvent ? parseDecisionReason(reliabilityEvent) : null;
@@ -977,7 +1003,8 @@ export default function Dashboard() {
           const cameraId = visibleCameraIds[slotIndex];
           const camera = cameraModels.find(item => item.cameraId === cameraId) || null;
           const telemetry = cameraId ? scopedLiveTracks[cameraId] : null;
-          const sessionId = telemetry?.analysis_session_id || null;
+          const sourceState = cameraId ? slotSources[cameraId] : null;
+          const sessionId = analysisSessionIdForSource(telemetry, sourceState);
           const cameraEvents = displayEvents.filter(event => event.camera_id === cameraId);
           const latestCameraEvent = latestEventForSession(cameraEvents, cameraId, sessionId);
           const latestFaceEvent = cameraEvents.find(event => String(event.event_type || '').toUpperCase() === 'FACE_DETECTED' || event.face_match_status || event.recognition_state) || null;
@@ -987,7 +1014,6 @@ export default function Dashboard() {
           const analyticsMethod = latestCameraEvent?.detection_method || telemetry?.detection_method || (latestCameraEvent?.event_type === 'MOVEMENT_UNCLASSIFIED' ? 'MOTION_FALLBACK' : 'N/A');
           const locationLabel = DEMO_CAMERA_LABELS[cameraId]?.location || camera?.location || 'Unspecified location';
           const title = DEMO_CAMERA_LABELS[cameraId]?.name || camera?.friendlyName || `Camera slot ${slotIndex + 1}`;
-          const sourceState = cameraId ? slotSources[cameraId] : null;
           const status = lifecycleStatus(sourceState, telemetry, now);
           const liveStatus = telemetryStatusAt(telemetry, now);
           const telemetryAvailable = Boolean(telemetry && liveStatus === 'LIVE');
@@ -1142,7 +1168,7 @@ export default function Dashboard() {
         </div>
         {showWhy && <div className="dashboard-events-explanation">{whyExplanation || 'No verified event is available yet. This explanation will use the backend decision factors when an event arrives.'}</div>}
         <div className="dashboard-events-table-wrap">
-          {configuredCameraIds.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">WAITING FOR SOURCE — ADD A VIDEO TO BEGIN ANALYSIS.</div></div> : displayEvents.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">{configuredCameraIds.some((id) => ['PAUSED', 'READY'].includes(String(slotSources[id]?.runState || slotSources[id]?.analysisState).toUpperCase())) ? 'SOURCE LOADED — ANALYSIS PAUSED. No current-run security event yet.' : configuredCameraIds.every((id) => telemetryStatusAt(scopedLiveTracks[id], now) === 'COMPLETED') ? 'ANALYSIS COMPLETED — NO VERIFIED SECURITY EVENT WAS GENERATED FOR THIS RUN.' : 'PROCESSING — NO VERIFIED SECURITY EVENT YET.'}</div></div> : (
+          {cameraInventoryRestoring ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">RESTORING CAMERA CONFIGURATION</div></div> : configuredCameraIds.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">WAITING FOR SOURCE — ADD A VIDEO TO BEGIN ANALYSIS.</div></div> : displayEvents.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">{configuredCameraIds.every((id) => lifecycleStatus(slotSources[id], scopedLiveTracks[id], now) === 'COMPLETED') ? 'ANALYSIS COMPLETED — NO VERIFIED SECURITY EVENT WAS GENERATED FOR THIS RUN.' : configuredCameraIds.some((id) => ['PAUSED', 'READY'].includes(String(slotSources[id]?.runState || slotSources[id]?.analysisState).toUpperCase())) ? 'SOURCE LOADED — ANALYSIS PAUSED. No current-run security event yet.' : 'PROCESSING — NO VERIFIED SECURITY EVENT YET.'}</div></div> : (
             <table className="dashboard-events-table">
               <thead><tr>{['TIME', 'EVENT ID', 'CAMERA', 'EVENT', 'DECISION', 'SEVERITY', 'EVIDENCE'].map(label => <th key={label}>{label}</th>)}</tr></thead>
               <tbody>{displayEvents.map((event, index) => {
@@ -1369,7 +1395,7 @@ export default function Dashboard() {
               <span className="badge badge-neutral" style={{ fontSize: '0.45rem' }}>{activeCameraIds.length} Active / {fleetHealth.length} Registered</span>
             </div>
             <div className="overflow-y-auto custom-scrollbar flex flex-col gap-2" style={{ padding: '0.75rem' }}>
-              {configuredCameraIds.length === 0 && <div className="state-empty-sub">WAITING FOR SOURCE</div>}
+              {cameraInventoryRestoring ? <div className="state-empty-sub">RESTORING CAMERA INVENTORY</div> : configuredCameraIds.length === 0 && <div className="state-empty-sub">WAITING FOR SOURCE</div>}
               {fleetHealth.filter((node) => configuredCameraIds.includes(node.camera_id)).map((node) => {
                 const nodeState = node.health_state || 'UNKNOWN';
                 const cameraSource = slotSources[node.camera_id];
@@ -1385,7 +1411,7 @@ export default function Dashboard() {
         <div className="dashboard-right-column flex-col h-full" style={{ flex: 2, display: 'flex', gap: '0.75rem' }}>
           <div className="dashboard-reliability-card card">
             <div className="card-header">
-              <div><span className="card-title">Reliability Decision Pipeline</span><span className="dashboard-events-subtitle">{reliabilityScopeCameraId ? `Camera: ${cameraModels.find((camera) => camera.cameraId === reliabilityScopeCameraId)?.friendlyName || reliabilityScopeCameraId}${!activeCameraIds.includes(reliabilityScopeCameraId) ? ' · SOURCE LOADED · ANALYSIS PAUSED' : ''}` : 'WAITING FOR SOURCE'}</span></div>
+              <div><span className="card-title">Reliability Decision Pipeline</span><span className="dashboard-events-subtitle">{reliabilityScopeCameraId ? `Camera: ${cameraModels.find((camera) => camera.cameraId === reliabilityScopeCameraId)?.friendlyName || reliabilityScopeCameraId}${!activeCameraIds.includes(reliabilityScopeCameraId) ? ` · SOURCE LOADED · ANALYSIS ${lifecycleStatus(slotSources[reliabilityScopeCameraId], scopedLiveTracks[reliabilityScopeCameraId], now) === 'COMPLETED' ? 'COMPLETED' : 'PAUSED'}` : ''}` : cameraInventoryRestoring ? 'RESTORING CAMERA CONFIGURATION' : 'WAITING FOR SOURCE'}</span></div>
               {configuredCameraIds.length > 1 && <select aria-label="Reliability camera" value={reliabilityScopeCameraId || ''} onChange={(event) => setReliabilityCameraId(event.target.value)}>{configuredCameraIds.map((cameraId) => <option key={cameraId} value={cameraId}>{cameraId === 'cam-border-01' ? 'Camera 1' : 'Camera 2'}</option>)}</select>}
               <ShieldCheck size={14} className="text-muted" />
             </div>
@@ -1407,7 +1433,7 @@ export default function Dashboard() {
                       )}
                     </>
                   ) : (
-                    <span className="text-xs text-muted">{!reliabilityScopeCameraId ? 'Waiting for a real event…' : !activeCameraIds.includes(reliabilityScopeCameraId) ? 'No current-run reliability decision — analysis paused.' : liveTelemetry ? 'N/A — no reliability event for current telemetry' : 'Waiting for a real event…'}</span>
+                    <span className="text-xs text-muted">{!reliabilityScopeCameraId ? 'Waiting for a real event…' : !activeCameraIds.includes(reliabilityScopeCameraId) ? lifecycleStatus(slotSources[reliabilityScopeCameraId], scopedLiveTracks[reliabilityScopeCameraId], now) === 'COMPLETED' ? 'No reliability decision was generated for the completed current run.' : 'No current-run reliability decision — analysis paused.' : liveTelemetry ? 'N/A — no reliability event for current telemetry' : 'Waiting for a real event…'}</span>
                   )
                 }
               />
@@ -1421,7 +1447,7 @@ export default function Dashboard() {
                       <span className="text-xs border px-1 rounded bg-elevated">{SCENE_CONDITION_LABELS[sceneCondition] || sceneCondition}</span>
                     </>
                   ) : (
-                    <span className="text-xs text-muted">{!reliabilityScopeCameraId ? 'Waiting for a real event…' : !activeCameraIds.includes(reliabilityScopeCameraId) ? 'No current-run scene decision — analysis paused.' : liveTelemetry ? 'N/A — no scene decision for current telemetry' : 'Waiting for a real event…'}</span>
+                    <span className="text-xs text-muted">{!reliabilityScopeCameraId ? 'Waiting for a real event…' : !activeCameraIds.includes(reliabilityScopeCameraId) ? lifecycleStatus(slotSources[reliabilityScopeCameraId], scopedLiveTracks[reliabilityScopeCameraId], now) === 'COMPLETED' ? 'No scene decision was generated for the completed current run.' : 'No current-run scene decision — analysis paused.' : liveTelemetry ? 'N/A — no scene decision for current telemetry' : 'Waiting for a real event…'}</span>
                   )
                 }
               />
@@ -1458,7 +1484,7 @@ export default function Dashboard() {
                   ) : parsed?.kind === 'abstain' ? (
                     <span className="text-xs text-muted">Gate 1 override — R was never computed for this event</span>
                   ) : (
-                    <span className="text-xs text-muted">{!reliabilityScopeCameraId ? 'Waiting for a real event…' : !activeCameraIds.includes(reliabilityScopeCameraId) ? 'No current-run reliability decision — analysis paused.' : liveTelemetry ? 'N/A — reliability is emitted only with a processed event' : 'Waiting for a real event…'}</span>
+                    <span className="text-xs text-muted">{!reliabilityScopeCameraId ? 'Waiting for a real event…' : !activeCameraIds.includes(reliabilityScopeCameraId) ? lifecycleStatus(slotSources[reliabilityScopeCameraId], scopedLiveTracks[reliabilityScopeCameraId], now) === 'COMPLETED' ? 'No reliability decision was generated for the completed current run.' : 'No current-run reliability decision — analysis paused.' : liveTelemetry ? 'N/A — reliability is emitted only with a processed event' : 'Waiting for a real event…'}</span>
                   )
                 }
               />
