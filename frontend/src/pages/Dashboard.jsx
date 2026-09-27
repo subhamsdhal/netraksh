@@ -921,19 +921,33 @@ export default function Dashboard() {
                   {cameraId && canUpload && <div className="dashboard-slot-actions">
                     <button className="btn btn-sm btn-outline" disabled={Boolean(sourceState?.restoring)} onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
                     {sourceState?.sourceMode && lifecycleAction(sourceState) === 'START' && <button className="btn btn-sm btn-outline" onClick={() => requestScenario(cameraId, scenarioAction(cameraId, sourceState, 'normal', true))}>START / ANALYZE</button>}
-                    {sourceState?.sourceMode && lifecycleAction(sourceState) === 'STOP' && <button className="btn btn-sm btn-outline" onClick={() => {
+                    {sourceState?.sourceMode && lifecycleAction(sourceState) === 'STOP' && <button className="btn btn-sm btn-outline" onClick={async () => {
                       const payload = scenarioAction(cameraId, sourceState, 'paused');
-                      if (payload) authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => {});
+                      if (payload) {
+                        try {
+                          const response = await authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                          const result = await response.json().catch(() => ({}));
+                          if (!response.ok) throw new Error(`STOP FAILED — HTTP ${response.status}`);
+                          setSlotSources((current) => ({
+                            ...current,
+                            [cameraId]: current[cameraId] ? {
+                              ...current[cameraId],
+                              runState: String(result.analysis_state || 'PAUSED').toUpperCase(),
+                              analysisState: String(result.analysis_state || 'PAUSED').toUpperCase(),
+                              ...(result.analysis_generation != null ? { analysisGeneration: result.analysis_generation } : {}),
+                            } : current[cameraId],
+                          }));
+                          updateCameraMedia(cameraId, { edgeStatus: 'WAITING', uploadError: null });
+                        } catch (error) {
+                          updateCameraMedia(cameraId, { uploadError: error.message || 'STOP FAILED' });
+                        }
+                      }
                       // Keep the selected source bound to this slot while it is
                       // paused so the operator can START / ANALYZE the same
                       // uploaded file again. Clearing the slot and deleting
                       // its source metadata made local uploads impossible to
                       // restart after STOP.
                       setLatestEvent(null);
-                      setSlotSources((current) => ({
-                        ...current,
-                        [cameraId]: current[cameraId] ? { ...current[cameraId], runState: 'PAUSED' } : current[cameraId],
-                      }));
                     }}>STOP ANALYSIS</button>}
                   </div>}
                   <select
