@@ -12,8 +12,15 @@ export function telemetryForSource(telemetry, sourceState, cameraId = null) {
   if (cameraId && telemetry.camera_id && telemetry.camera_id !== cameraId) return null;
   if (['UPLOADING', 'SELECTING', 'VALIDATING', 'QUEUED_FOR_NORMALIZATION', 'NORMALIZING', 'ACTIVATING'].includes(sourceState?.runState)) return null;
   if (sourceState?.sourceMode !== 'durable') return telemetry;
-  const telemetrySession = telemetry.analysis_session_id || telemetry.stream_id;
-  return telemetrySession === sourceState.sourceId ? telemetry : null;
+
+  // Durable media identity and analyzed-frame identity are deliberately
+  // different concepts. stream_id is the selected upload/source session and
+  // analysis_session_id identifies the concrete pipeline/frame generation.
+  // Comparing the selected upload against analysis_session_id can make a
+  // perfectly healthy new upload look offline and can let an older analyzed
+  // frame remain visible. Bind the card to the source session only.
+  const sourceSession = telemetry.stream_id || null;
+  return Boolean(sourceState.sourceId && sourceSession === sourceState.sourceId) ? telemetry : null;
 }
 
 export function filterLiveEvents(events = [], activeCameraIds = [], cameraFilter = 'ALL') {
