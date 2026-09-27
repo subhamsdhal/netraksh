@@ -397,7 +397,10 @@ async def latest_telemetry(
     """Return real last-seen telemetry snapshots matching the active context."""
     in_memory = [item for item in _latest_telemetry.values() if (
         (not camera_id or item.get("camera_id") == camera_id)
-        and (not stream_id or (item.get("analysis_session_id") or item.get("stream_id")) == stream_id)
+        # stream_id is the durable/source session used by dashboard scoping.
+        # analysis_session_id identifies the concrete analyzed-frame generation
+        # and must not be substituted here.
+        and (not stream_id or item.get("stream_id") == stream_id)
     )]
     if in_memory:
         return sorted(in_memory, key=lambda item: item.get("processed_timestamp") or item.get("timestamp") or 0, reverse=True)
