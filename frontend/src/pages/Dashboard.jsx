@@ -160,7 +160,7 @@ export default function Dashboard() {
         body: JSON.stringify(payload),
       });
       const result = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(result.detail || 'Camera control request failed');
+      if (!response.ok) throw new Error(`START FAILED — HTTP ${response.status}${result.detail ? ` · ${result.detail}` : ''}`);
       if (cameraId) updateCameraMedia(cameraId, {
         // A successful /wake response means the free worker's HTTP listener
         // answered; it does not prove inference has resumed.  Keep the honest
@@ -168,8 +168,10 @@ export default function Dashboard() {
         edgeStatus: ['ready', 'waking'].includes(result.edge_status) ? 'WAKING' : 'WAITING',
       });
       return result;
-    } catch (_) {
-      if (cameraId) updateCameraMedia(cameraId, { edgeStatus: 'WAITING' });
+    } catch (error) {
+      if (cameraId) {
+        updateCameraMedia(cameraId, { edgeStatus: 'WAITING', uploadError: error?.message || 'START FAILED — CONTROL REQUEST DID NOT COMPLETE' });
+      }
       return null;
     }
   };

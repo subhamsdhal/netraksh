@@ -80,6 +80,53 @@ def test_active_video_control_updates_without_changing_source(monkeypatch, tmp_p
     assert after["video_time"] == 12.5
 
 
+def test_explicit_replay_increments_generation_and_preserves_durable_stream(monkeypatch, tmp_path):
+    storage = MemoryStorage()
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)
+    session_id = str(uuid.uuid4())
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    video_storage.store_uploaded_session(
+        camera_id="cam-border-01", session_id=session_id, source_path=source,
+        preview_path=None, source_name="arbitrary-name.mp4", content_type="video/mp4",
+    )
+    video_storage.activate_session("cam-border-01", session_id)
+    first, created = video_storage.start_active_session("cam-border-01", session_id)
+    duplicate, created_duplicate = video_storage.start_active_session("cam-border-01", session_id)
+
+    assert created is True
+    assert created_duplicate is False
+    assert first["session_id"] == duplicate["session_id"] == session_id
+    assert first["analysis_generation"] == duplicate["analysis_generation"] == 1
+    assert first["analysis_state"] == "WAKING"
+
+
+def test_eof_completion_is_idempotent_and_stops_durable_run(monkeypatch, tmp_path):
+    storage = MemoryStorage()
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)
+    session_id = str(uuid.uuid4())
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    video_storage.store_uploaded_session(
+        camera_id="cam-border-01", session_id=session_id, source_path=source,
+        preview_path=None, source_name="any-supported-file.mp4", content_type="video/mp4",
+    )
+    video_storage.activate_session("cam-border-01", session_id)
+    running, _ = video_storage.start_active_session("cam-border-01", session_id)
+    completed = video_storage.complete_active_session(
+        "cam-border-01", session_id, running["analysis_generation"],
+        {"latest_analysis_session_id": "analysis-run-1", "final_frame_index": 12, "video_time": 4.5},
+    )
+    repeated = video_storage.complete_active_session(
+        "cam-border-01", session_id, running["analysis_generation"], {"video_time": 99},
+    )
+
+    assert completed["analysis_state"] == "COMPLETED"
+    assert completed["scenario"] == "paused"
+    assert repeated["final_frame_index"] == 12
+    assert repeated["video_time"] == 4.5
+
+
 def test_bundled_control_is_persisted_without_media_or_fake_session(monkeypatch):
     storage = MemoryStorage()
     monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)

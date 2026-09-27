@@ -155,6 +155,9 @@ class EdgePipeline:
         self.camera_name = config.get("camera_name", self.camera_id)
         # A new pipeline instance represents a new video stream/session.
         self.stream_id = config.get("stream_id") or str(uuid.uuid4())
+        # Durable source identity remains stable across explicit replay
+        # generations; stream_id above is the per-run analysis identity.
+        self.source_stream_id = config.get("source_stream_id") or self.stream_id
         self.zone_config_path = config.get("zones_config_path", "demo/scripts/zones_config.json")
         self._running = False
 
@@ -872,7 +875,7 @@ class EdgePipeline:
                 "expected_interval_ms": expected_interval_ms,
                 "frame_width": frame_w,
                 "frame_height": frame_h,
-                "stream_id": self.stream_id,
+                "stream_id": self.source_stream_id,
                 "analysis_session_id": self.stream_id,
                 "analysis_state": "PROCESSING",
                 "scene_condition": str(condition.condition),
@@ -1200,7 +1203,7 @@ class EdgePipeline:
                         "sequence": self._telemetry_sequence,
                         "frame_width": self._last_frame_width,
                         "frame_height": self._last_frame_height,
-                        "stream_id": self.stream_id,
+                        "stream_id": self.source_stream_id,
                         "analysis_session_id": self.stream_id,
                         "processed_timestamp": processed_timestamp,
                         "analysis_state": state,

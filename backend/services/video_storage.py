@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import time
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +106,12 @@ def activate_session(camera_id: str, session_id: str) -> dict[str, Any]:
         "scenario": "paused",
         "video_time": 0.0,
         "video_time_updated_at": 0.0,
+        "analysis_state": "READY",
+        "analysis_generation": 0,
+        "state_updated_at": time.time(),
+        "completion_time": None,
+        "latest_analysis_session_id": None,
+        "final_frame_index": None,
     }
     _put_json(control_key(camera_id), control)
     return control
@@ -167,6 +174,48 @@ def update_active_session(camera_id: str, changes: dict[str, Any]) -> dict[str, 
     if current is None:
         return None
     current.update(changes)
+    _put_json(control_key(camera_id), current)
+    return current
+
+
+def start_active_session(camera_id: str, session_id: str) -> tuple[dict[str, Any], bool]:
+    """Atomically begin one durable analysis generation, or return its in-flight run."""
+    current = get_valid_active_session(camera_id)
+    if current is None or current.get("session_id") != session_id:
+        raise FileNotFoundError("Video session is not the active durable source")
+    if current.get("analysis_state") in {"WAKING", "ACTIVE"}:
+        return current, False
+    current.update({
+        "scenario": "normal",
+        "analysis_state": "WAKING",
+        "analysis_generation": int(current.get("analysis_generation") or 0) + 1,
+        "video_time": 0.0,
+        "video_time_updated_at": time.time(),
+        "state_updated_at": time.time(),
+        "completion_time": None,
+        "latest_analysis_session_id": None,
+        "final_frame_index": None,
+    })
+    _put_json(control_key(camera_id), current)
+    return current, True
+
+
+def complete_active_session(camera_id: str, session_id: str, generation: int, changes: dict[str, Any]) -> dict[str, Any] | None:
+    """Persist a successful finite-run terminal state without rewriting history."""
+    current = get_valid_active_session(camera_id)
+    if current is None or current.get("session_id") != session_id:
+        return None
+    if int(current.get("analysis_generation") or 0) != int(generation):
+        return None
+    if current.get("analysis_state") == "COMPLETED":
+        return current
+    current.update({
+        "scenario": "paused",
+        "analysis_state": "COMPLETED",
+        "state_updated_at": time.time(),
+        "completion_time": time.time(),
+        **changes,
+    })
     _put_json(control_key(camera_id), current)
     return current
 

@@ -1,11 +1,13 @@
 export function sourceStateFromCurrentVideo(state) {
   if (!state?.available) return null;
+  const lifecycle = String(state.analysis_state || '').toUpperCase();
+  const runState = lifecycle || (state.scenario === 'normal' ? 'ACTIVE' : 'PAUSED');
   if (state.source_mode === 'bundled') {
     return {
       sourceMode: 'bundled',
       sourceId: null,
       sourceName: state.source_name || 'BUNDLED CLOUD DEMO',
-      runState: state.scenario === 'normal' ? 'ACTIVE' : 'PAUSED',
+      runState,
     };
   }
   if (state.source_mode === 'durable' && state.session_id) {
@@ -13,7 +15,7 @@ export function sourceStateFromCurrentVideo(state) {
       sourceMode: 'durable',
       sourceId: state.session_id,
       sourceName: state.source_name || 'Configured video source',
-      runState: state.scenario === 'normal' ? 'ACTIVE' : 'PAUSED',
+      runState,
     };
   }
   return null;

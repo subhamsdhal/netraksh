@@ -49,7 +49,9 @@ from backend.services.video_storage import (
     get_valid_active_session,
     get_uploaded_session,
     signed_media_url,
+    start_active_session,
     store_uploaded_session,
+    complete_active_session,
     update_active_session,
 )
 
@@ -386,7 +388,12 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
                 "session_id": session_id,
                 "camera_id": camera_id,
                 "scenario": durable.get("scenario", "paused"),
-                "processing_status": "active",
+                "processing_status": durable.get("analysis_state", "READY").lower(),
+                "analysis_state": durable.get("analysis_state", "READY"),
+                "analysis_generation": durable.get("analysis_generation", 0),
+                "video_time": durable.get("video_time", 0.0),
+                "video_time_updated_at": durable.get("video_time_updated_at", 0.0),
+                "completion_time": durable.get("completion_time"),
             }
         if camera_id in _BUNDLED_CAMERA_IDS:
             bundled = _bundled_control(camera_id)
@@ -505,8 +512,11 @@ async def get_internal_sync(request: Request, _edge=Depends(require_edge_auth)):
                 "video_session_id": durable.get("session_id"),
                 "source_name": durable.get("source_name"),
                 "scenario": durable.get("scenario", "paused"),
+                "analysis_state": durable.get("analysis_state", "READY"),
+                "analysis_generation": durable.get("analysis_generation", 0),
                 "video_time": durable.get("video_time", 0.0),
                 "video_time_updated_at": durable.get("video_time_updated_at", 0.0),
+                "completion_time": durable.get("completion_time"),
                 "camera_id": camera_id,
             }
         if camera_id in _BUNDLED_CAMERA_IDS:
@@ -631,6 +641,21 @@ async def post_video_scenario(
             if key in target
         }
         if active_session is not None and requested_mode != "bundled" and (is_authoritative_control or session_matches):
+            if is_explicit_start:
+                try:
+                    active_session, created_generation = start_active_session(camera_id, payload.get("video_session_id"))
+                except FileNotFoundError as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+                target.update(active_session)
+                edge_status = await _wake_edge_service(camera_id)
+                return {
+                    "status": "success",
+                    "state": _demo_state,
+                    "edge_status": edge_status,
+                    "analysis_state": active_session.get("analysis_state"),
+                    "analysis_generation": active_session.get("analysis_generation"),
+                    "replay_started": created_generation,
+                }
             update_active_session(camera_id, changes)
     edge_status = "not_requested"
     # Browser playback reports its current time every two seconds.  Those
@@ -650,6 +675,29 @@ async def post_video_scenario(
             edge_status,
         )
     return {"status": "success", "state": _demo_state, "edge_status": edge_status}
+
+
+@router.post("/video/internal-complete")
+async def complete_dashboard_video(payload: dict, _edge=Depends(require_edge_auth)):
+    """Edge-only, idempotent EOF callback for one durable analysis generation."""
+    camera_id = str(payload.get("camera_id") or "")
+    session_id = str(payload.get("video_session_id") or "")
+    try:
+        generation = int(payload.get("analysis_generation"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="analysis_generation is required")
+    if not camera_id or not session_id:
+        raise HTTPException(status_code=400, detail="camera_id and video_session_id are required")
+    changes = {
+        "latest_analysis_session_id": payload.get("analysis_session_id"),
+        "final_frame_index": payload.get("final_frame_index"),
+        "video_time": float(payload.get("final_video_time") or 0.0),
+        "video_time_updated_at": time.time(),
+    }
+    completed = complete_active_session(camera_id, session_id, generation, changes)
+    if completed is None:
+        raise HTTPException(status_code=409, detail="Completion does not match active durable generation")
+    return {"status": "completed", "analysis_state": "COMPLETED", "analysis_generation": completed.get("analysis_generation")}
 
 
 # ---------------------------------------------------------------------------

@@ -69,6 +69,8 @@ _scenario: dict = {
     "current": "normal",
     "video_source": None,
     "video_session_id": None,
+    "analysis_state": "READY",
+    "analysis_generation": 0,
     "should_restart": False,
     "initialized": False,
 }
@@ -281,6 +283,8 @@ def _apply_control_sync(data: dict) -> bool:
 
     _scenario.pop("rejected_source_session", None)
     new_scenario = data.get("scenario", "normal")
+    _scenario["analysis_state"] = str(data.get("analysis_state") or "READY").upper()
+    _scenario["analysis_generation"] = int(data.get("analysis_generation") or 0)
     new_video_time = data.get("video_time")
 
     if new_scenario != _scenario.get("current"):
@@ -682,11 +686,22 @@ def run_demo_pipeline(
         use_uploaded_source = bool(uploaded_source and uploaded_session and uploaded_source != video_source)
         current_source = uploaded_source if use_uploaded_source else video_source
         current_session = uploaded_session if use_uploaded_source else None
+        lifecycle = str(_scenario.get("analysis_state") or "READY").upper()
+        # A cloud worker must remain a cheap control-plane poller until an
+        # explicit START creates a WAKING/ACTIVE durable generation.
+        if current_session and lifecycle not in {"WAKING", "ACTIVE"}:
+            logger.info(
+                "[DemoRunner] Durable source %s state=%s generation=%s; waiting for operator START / ANALYZE",
+                str(current_session)[:8], lifecycle, _scenario.get("analysis_generation", 0),
+            )
+            time.sleep(0.5)
+            continue
         state_paths = _runtime_state_paths(camera_id, backend_url, current_session)
         config = {
             "camera_id": camera_id,
             "camera_name": camera_id,
-            "stream_id": current_session,
+            "source_stream_id": current_session,
+            "stream_id": str(__import__("uuid").uuid4()) if current_session else None,
             "video_source": current_source,
             # User-uploaded sessions are finite jobs. Only explicit demo mode
             # enables local finite-file replay; physical/network sources are
@@ -729,10 +744,33 @@ def run_demo_pipeline(
             # uploaded session can be picked up without restarting the OS
             # process. The polling thread sets should_restart on a new ID.
             if _scenario.get("video_session_id"):
+                if pipeline.adapter.eof_reached and pipeline.adapter.state.name != "FAILED":
+                    try:
+                        import httpx
+                        headers = {"Authorization": f"Bearer {os.environ.get('EDGE_AUTH_TOKEN', '')}"}
+                        response = httpx.post(
+                            f"{backend_url}/api/dashboard/video/internal-complete",
+                            headers=headers,
+                            json={
+                                "camera_id": camera_id,
+                                "video_session_id": current_session,
+                                "analysis_session_id": pipeline.stream_id,
+                                "analysis_generation": _scenario.get("analysis_generation", 0),
+                                "final_frame_index": getattr(pipeline.adapter, "frame_index", None),
+                                "final_video_time": getattr(pipeline, "_last_video_time", 0.0),
+                            },
+                            timeout=10.0,
+                        )
+                        response.raise_for_status()
+                        _scenario["analysis_state"] = "COMPLETED"
+                        _scenario["current"] = "paused"
+                        logger.info("[DemoRunner] Durable EOF persisted for generation %s", _scenario.get("analysis_generation", 0))
+                    except Exception as exc:
+                        logger.warning("[DemoRunner] Durable EOF callback failed: %s", type(exc).__name__)
                 logger.info("[DemoRunner] Uploaded video completed; waiting for the next session...")
                 while not _scenario.get("should_restart"):
                     # Only restart if scenario is normal AND video_time explicitly returns to 0 (replay)
-                    if _scenario.get("current") == "normal" and _scenario.get("video_time", -1) == 0:
+                    if _scenario.get("analysis_state") in {"WAKING", "ACTIVE"} and _scenario.get("current") == "normal" and _scenario.get("video_time", -1) == 0:
                         updated_at = _scenario.get("video_time_updated_at", 0)
                         if updated_at > pipeline_exit_time:
                             logger.info("[DemoRunner] Resume requested on a completed session. Restarting pipeline to replay...")
