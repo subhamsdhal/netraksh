@@ -492,6 +492,15 @@ export default function Dashboard() {
     updateCameraMedia(cameraId, { uploadError: null });
 
     setLatestEvent(null);
+    const previousSource = slotSources[cameraId];
+    const pausePayload = scenarioAction(cameraId, previousSource, 'paused');
+    if (pausePayload) {
+      authFetch('/api/dashboard/video/scenario', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pausePayload),
+      }).catch(() => {});
+    }
     const previousUrl = cameraMediaRef.current[cameraId]?.mediaUrl;
     if (previousUrl?.startsWith('blob:')) URL.revokeObjectURL(previousUrl);
     setSlotSources((current) => ({
@@ -581,7 +590,20 @@ export default function Dashboard() {
         try { detail = (await analyzeRes.json()).detail || detail; } catch (_) { /* concise fallback */ }
         throw new Error(detail);
       }
-      setSlotSources((current) => ({ ...current, [cameraId]: { ...current[cameraId], runState: 'READY_TO_START' } }));
+      const activatedSource = {
+        sourceMode: 'durable',
+        sourceId: sessionId,
+        sourceName,
+        runState: 'WAKING',
+      };
+      setSlotSources((current) => ({ ...current, [cameraId]: activatedSource }));
+      // A successful upload should flow directly into cloud analysis. This
+      // avoids leaving the old demo worker active while the UI waits for a
+      // second manual click and makes the public-link workflow deterministic.
+      requestScenario(
+        cameraId,
+        scenarioAction(cameraId, activatedSource, 'normal', true),
+      );
     } catch (error) {
       console.error('Analysis activation error:', error);
       setSlotSources((current) => ({ ...current, [cameraId]: { ...current[cameraId], runState: 'ERROR' } }));
@@ -636,8 +658,7 @@ export default function Dashboard() {
     // prior demo/history events out even when both fixed SIH camera IDs are in
     // view at the same time.
     const sourceTelemetry = scopedLiveTracks[e.camera_id];
-    const contextSessionId = sourceTelemetry?.analysis_session_id
-      || sourceTelemetry?.stream_id
+    const contextSessionId = sourceTelemetry?.stream_id
       || slotSources[e.camera_id]?.sourceId
       || null;
     const contextStartTime = cameraMedia[e.camera_id]?.sessionStartTime || null;
@@ -664,7 +685,7 @@ export default function Dashboard() {
 
   const currentSessionEvents = contextualEvents.filter((event) => {
     const telemetry = scopedLiveTracks[event.camera_id];
-    const sessionId = telemetry?.analysis_session_id || telemetry?.stream_id;
+    const sessionId = telemetry?.stream_id || null;
     return Boolean(sessionId && event.stream_id === sessionId);
   });
   const displayEvents = filterLiveEvents(currentSessionEvents.filter(ev =>
@@ -799,7 +820,7 @@ export default function Dashboard() {
           const cameraId = visibleCameraIds[slotIndex];
           const camera = cameraModels.find(item => item.cameraId === cameraId) || null;
           const telemetry = cameraId ? scopedLiveTracks[cameraId] : null;
-          const sessionId = telemetry?.analysis_session_id || telemetry?.stream_id;
+          const sessionId = telemetry?.stream_id || null;
           const cameraEvents = displayEvents.filter(event => event.camera_id === cameraId);
           const latestCameraEvent = latestEventForSession(cameraEvents, cameraId, sessionId);
           const latestFaceEvent = cameraEvents.find(event => String(event.event_type || '').toUpperCase() === 'FACE_DETECTED' || event.face_match_status || event.recognition_state) || null;
@@ -896,6 +917,7 @@ export default function Dashboard() {
                     uploadError={mediaState.uploadError || null}
                     sourceMode={sourceState?.sourceMode || null}
                     expectedSessionId={sourceState?.sourceId || null}
+                    sourceRunState={sourceState?.runState || null}
                     onVideoEnded={() => updateCameraMedia(cameraId, { playbackEnded: true })}
                   />
                 ) : (
@@ -1011,6 +1033,7 @@ export default function Dashboard() {
               uploadError={uploadError}
               sourceMode={slotSources[activeCameraId]?.sourceMode || null}
               expectedSessionId={slotSources[activeCameraId]?.sourceId || null}
+              sourceRunState={slotSources[activeCameraId]?.runState || null}
               onVideoEnded={() => updateCameraMedia(activeCameraId, { playbackEnded: true })}
             />
           </div>
