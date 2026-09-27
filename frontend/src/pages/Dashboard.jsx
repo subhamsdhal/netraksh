@@ -9,7 +9,7 @@ import { parseUtc } from '../utils/time';
 import { DEMO_CAMERA_LABELS, MAX_VISIBLE_CAMERAS, selectDemoCameraSlots } from '../utils/demoCameraSlots';
 import { deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
-import { bundledSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
+import { applyReplayResult, bundledSourceState, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 
 // Reads structured scores from the event instead of string-parsing the reason.
 function parseDecisionReason(ev) {
@@ -107,9 +107,10 @@ export default function Dashboard() {
   const [cameraMedia, setCameraMedia] = useState({});
   const cameraMediaRef = useRef(cameraMedia);
   const [selectedCameraId, setSelectedCameraId] = useState('');
-  const [slotSources, setSlotSources] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('netraksh.slotSources') || '{}'); } catch (_) { return {}; }
-  });
+  // Source/session identity is control-plane state.  Never seed it from a
+  // previous browser session: a stale localStorage value can otherwise render
+  // a different uploaded file before GET /video/current has answered.
+  const [slotSources, setSlotSources] = useState({});
   const [eventCameraFilter, setEventCameraFilter] = useState('ALL');
   const [reliabilityCameraId, setReliabilityCameraId] = useState(null);
   const [correlationState, setCorrelationState] = useState(null);
@@ -127,6 +128,10 @@ export default function Dashboard() {
   const autoStartedDemoCamerasRef = useRef(new Set());
   const wakeTimeoutsRef = useRef({});
 
+  // Remove the retired source cache once.  It contains no authority and is
+  // deliberately never read; slot assignment remains in demoCameraSlots.
+  useEffect(() => { localStorage.removeItem('netraksh.slotSources'); }, []);
+
   const updateCameraMedia = (cameraId, patch) => {
     if (!cameraId) return;
     setCameraMedia((current) => updateCameraMediaState(current, cameraId, patch));
@@ -134,25 +139,8 @@ export default function Dashboard() {
 
   const requestScenario = async (cameraId, payload) => {
     if (!payload) return null;
-    if (cameraId) {
-      updateCameraMedia(cameraId, { edgeStatus: 'WAKING' });
-      if (payload.scenario === 'normal' && payload.wake_edge) {
-        window.dispatchEvent(new CustomEvent('netraksh:edge-wake', { detail: { cameraId, status: 'WAKING' } }));
-        clearTimeout(wakeTimeoutsRef.current[cameraId]);
-        wakeTimeoutsRef.current[cameraId] = setTimeout(() => {
-          updateCameraMedia(cameraId, { edgeStatus: 'TIMEOUT', uploadError: 'AI WORKER COLD START TIMED OUT — RETRY ANALYSIS' });
-          setSlotSources((current) => current[cameraId]
-            ? { ...current, [cameraId]: { ...current[cameraId], runState: 'ERROR' } }
-            : current);
-        }, 305_000);
-      }
-      setSlotSources((current) => ({
-        ...current,
-        [cameraId]: current[cameraId]
-          ? { ...current[cameraId], runState: payload.scenario === 'paused' ? 'PAUSED' : 'WAKING' }
-          : current[cameraId],
-      }));
-    }
+    const previousSourceState = cameraId ? slotSources[cameraId] : null;
+    const previousMediaState = cameraId ? cameraMediaRef.current[cameraId] : null;
     try {
       const response = await authFetch('/api/dashboard/video/scenario', {
         method: 'POST',
@@ -161,16 +149,35 @@ export default function Dashboard() {
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(`START FAILED — HTTP ${response.status}${result.detail ? ` · ${result.detail}` : ''}`);
-      if (cameraId) updateCameraMedia(cameraId, {
-        // A successful /wake response means the free worker's HTTP listener
-        // answered; it does not prove inference has resumed.  Keep the honest
-        // WAKING state until fresh telemetry makes the camera LIVE.
-        edgeStatus: ['ready', 'waking'].includes(result.edge_status) ? 'WAKING' : 'WAITING',
-      });
+      if (cameraId && payload.scenario === 'normal') {
+        // The POST is the transaction boundary.  Do not claim WAKING, change
+        // a filename, or alter a session until the backend accepted this exact
+        // durable session and supplied its new lifecycle generation.
+        setSlotSources((current) => ({
+          ...current,
+          [cameraId]: applyReplayResult(current[cameraId] || previousSourceState, result),
+        }));
+        updateCameraMedia(cameraId, {
+          edgeStatus: ['ready', 'waking'].includes(String(result.edge_status || '').toLowerCase()) ? 'WAKING' : 'WAITING',
+          isUploading: false,
+          uploadError: null,
+        });
+        window.dispatchEvent(new CustomEvent('netraksh:edge-wake', { detail: { cameraId, status: 'WAKING' } }));
+        clearTimeout(wakeTimeoutsRef.current[cameraId]);
+        wakeTimeoutsRef.current[cameraId] = setTimeout(() => {
+          updateCameraMedia(cameraId, { edgeStatus: 'TIMEOUT', uploadError: 'AI WORKER COLD START TIMED OUT — RETRY ANALYSIS' });
+        }, 305_000);
+      }
       return result;
     } catch (error) {
       if (cameraId) {
-        updateCameraMedia(cameraId, { edgeStatus: 'WAITING', uploadError: error?.message || 'START FAILED — CONTROL REQUEST DID NOT COMPLETE' });
+        // Failed controls are fully transactional: restore the exact prior
+        // lifecycle and media state instead of leaving a fake WAKING card.
+        setSlotSources((current) => ({ ...current, [cameraId]: previousSourceState }));
+        updateCameraMedia(cameraId, {
+          ...(previousMediaState || {}),
+          uploadError: error?.message || 'START FAILED — CONTROL REQUEST DID NOT COMPLETE',
+        });
       }
       return null;
     }
@@ -288,8 +295,11 @@ export default function Dashboard() {
       let changed = false;
       const next = { ...current };
       activeCameraIds.forEach((cameraId) => {
-        if (next[cameraId] && next[cameraId].runState !== 'LIVE') {
-          next[cameraId] = { ...next[cameraId], runState: 'LIVE' };
+        const lifecycle = String(next[cameraId]?.analysisState || next[cameraId]?.runState || '').toUpperCase();
+        // Historical packets are not a lifecycle command.  In particular,
+        // they must never turn a COMPLETED source into STOP/LIVE.
+        if (next[cameraId] && ['WAKING', 'ACTIVE', 'LIVE'].includes(lifecycle) && next[cameraId].runState !== 'LIVE') {
+          next[cameraId] = { ...next[cameraId], runState: 'LIVE', analysisState: 'LIVE' };
           changed = true;
         }
       });
@@ -325,28 +335,28 @@ export default function Dashboard() {
     if (visibleCameraIds[0] && !visibleCameraIds.includes(selectedCameraId)) setSelectedCameraId(visibleCameraIds[0]);
   }, [demoSlots.join('|'), visibleCameraIds.join('|')]);
   useEffect(() => {
-    localStorage.setItem('netraksh.slotSources', JSON.stringify(slotSources));
-  }, [slotSources]);
-  useEffect(() => {
     let mounted = true;
-    visibleCameraIds.filter(Boolean).forEach((cameraId) => {
-      sourceRestoreReadyRef.current[cameraId] = false;
-    });
+    visibleCameraIds.filter(Boolean).forEach((cameraId) => { sourceRestoreReadyRef.current[cameraId] = false; });
     setSourceRestoreReady((current) => {
       const next = { ...current };
       visibleCameraIds.filter(Boolean).forEach((cameraId) => { next[cameraId] = false; });
       return next;
     });
+    setSlotSources((current) => {
+      const next = { ...current };
+      visibleCameraIds.filter(Boolean).forEach((cameraId) => { next[cameraId] = restoringSourceState(); });
+      return next;
+    });
     const restoreScopedSources = async () => {
-      const restored = {};
       await Promise.all(visibleCameraIds.filter(Boolean).map(async (cameraId) => {
         try {
           const response = await authFetch(`/api/dashboard/video/current?camera_id=${encodeURIComponent(cameraId)}`);
-          if (!response.ok) return;
+          if (!response.ok || !mounted) return;
           const state = await response.json();
           const restoredSource = sourceStateFromCurrentVideo(state);
           if (restoredSource) {
-            restored[cameraId] = restoredSource;
+            // Commit backend authority before making the control available.
+            setSlotSources((current) => ({ ...current, [cameraId]: restoredSource }));
             setCameraMedia((current) => {
               const previous = current[cameraId]?.mediaUrl;
               if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous);
@@ -400,29 +410,14 @@ export default function Dashboard() {
               }
             }
           } else {
-            // A prior browser-only upload cannot be resumed in the
-            // storage-backed deployment. Remove only that stale slot record;
-            // do not leave its obsolete session ID able to control the cloud
-            // worker on a subsequent start/stop action.
-            setSlotSources((current) => {
-              if (!current[cameraId]) return current;
-              const next = { ...current };
-              delete next[cameraId];
-              return next;
-            });
+            setSlotSources((current) => ({ ...current, [cameraId]: { restoring: false, runState: 'UNAVAILABLE' } }));
           }
-        } catch (_) { return; /* failed restore must not trigger bundled fallback */ }
+        } catch (_) { return; /* failed restore keeps the card disabled */ }
         if (mounted) {
           sourceRestoreReadyRef.current[cameraId] = true;
           setSourceRestoreReady((current) => ({ ...current, [cameraId]: true }));
         }
       }));
-      if (mounted && Object.keys(restored).length) {
-        // The authenticated backend is authoritative. This ordering replaces
-        // stale localStorage state without overwriting a valid durable upload
-        // with the bundled evaluator source.
-        setSlotSources((current) => ({ ...current, ...restored }));
-      }
     };
     restoreScopedSources();
     return () => { mounted = false; };
@@ -889,11 +884,10 @@ export default function Dashboard() {
           const liveStatus = telemetryStatusAt(telemetry, now);
           const telemetryAvailable = Boolean(telemetry && liveStatus === 'LIVE');
           const sourceState = cameraId ? slotSources[cameraId] : null;
-          const displayRunState = liveStatus === 'COMPLETED'
-            ? 'COMPLETED'
-            : telemetryAvailable
-              ? 'LIVE'
-              : sourceState?.runState || 'LOADED';
+          const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
+          const displayRunState = sourceState?.restoring
+            ? 'RESTORING'
+            : lifecycle || (telemetryAvailable ? 'LIVE' : 'LOADED');
           const mediaState = cameraId ? (cameraMedia[cameraId] || {}) : {};
           const isDemoReplay = Boolean(telemetry?.demo_replay || DEMO_CAMERA_LABELS[cameraId]);
           const statusLabel = isDemoReplay && status === 'LIVE' ? 'ONLINE' : status;
@@ -916,17 +910,18 @@ export default function Dashboard() {
                   <div className="dashboard-camera-kicker">CAMERA {String(slotIndex + 1).padStart(2, '0')} · SIH DEMO SLOT</div>
                   <h2>{title}</h2>
                   <p>{cameraId ? `${cameraId.toUpperCase()} · ${locationLabel}` : 'No source selected'}</p>
-                  {sourceState?.sourceName && <p className="dashboard-source-name">SOURCE: {sourceState.sourceName}</p>}
-                  {sourceState?.sourceMode && <p className="dashboard-source-name">MODE: {sourceState.sourceMode === 'durable' ? 'USER UPLOAD' : 'BUNDLED DEMO'} · ANALYSIS: {displayRunState}</p>}
+                  {sourceState?.restoring && <p className="dashboard-source-name">RESTORING CLOUD SOURCE...</p>}
+                  {!sourceState?.restoring && sourceState?.sourceName && <p className="dashboard-source-name">SOURCE: {sourceState.sourceName}</p>}
+                  {!sourceState?.restoring && sourceState?.sourceMode && <p className="dashboard-source-name">MODE: {sourceState.sourceMode === 'durable' ? 'USER UPLOAD' : 'BUNDLED DEMO'} · ANALYSIS: {displayRunState}</p>}
                   <p className="dashboard-source-name">SUPPORTED: MP4 · AVI · MOV · MKV · WEBM · M4V</p>
                   {mediaState.edgeStatus === 'WAKING' && !telemetryAvailable && <p className="dashboard-source-name">WAKING AI WORKER...</p>}
                 </div>
                 <div className="dashboard-camera-card-controls">
                   <span className={`dashboard-camera-status status-${status.toLowerCase().replace(/\s+/g, '-')}`}>{statusLabel}</span>
                   {cameraId && canUpload && <div className="dashboard-slot-actions">
-                    <button className="btn btn-sm btn-outline" onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
-                    {sourceState?.sourceMode && !activeCameraIds.includes(cameraId) && <button className="btn btn-sm btn-outline" onClick={() => requestScenario(cameraId, scenarioAction(cameraId, sourceState, 'normal', true))}>START / ANALYZE</button>}
-                    {activeCameraIds.includes(cameraId) && <button className="btn btn-sm btn-outline" onClick={() => {
+                    <button className="btn btn-sm btn-outline" disabled={Boolean(sourceState?.restoring)} onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
+                    {sourceState?.sourceMode && lifecycleAction(sourceState) === 'START' && <button className="btn btn-sm btn-outline" onClick={() => requestScenario(cameraId, scenarioAction(cameraId, sourceState, 'normal', true))}>START / ANALYZE</button>}
+                    {sourceState?.sourceMode && lifecycleAction(sourceState) === 'STOP' && <button className="btn btn-sm btn-outline" onClick={() => {
                       const payload = scenarioAction(cameraId, sourceState, 'paused');
                       if (payload) authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).catch(() => {});
                       // Keep the selected source bound to this slot while it is

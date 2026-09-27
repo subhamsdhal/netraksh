@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bundledSourceState, durableHeartbeat, scenarioAction, sourceStateFromCurrentVideo } from '../src/utils/dashboardVideoControl';
+import { applyReplayResult, bundledSourceState, durableHeartbeat, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../src/utils/dashboardVideoControl';
 
 describe('dashboard video control ownership', () => {
   it('replaces a stale browser session with the bundled source contract', () => {
@@ -14,6 +14,8 @@ describe('dashboard video control ownership', () => {
       sourceId: null,
       sourceName: 'BUNDLED CLOUD DEMO',
       runState: 'PAUSED',
+      analysisState: 'PAUSED',
+      analysisGeneration: 0,
     });
   });
 
@@ -61,5 +63,39 @@ describe('dashboard video control ownership', () => {
     });
     expect(payload).not.toHaveProperty('wake_edge');
     expect(payload).not.toHaveProperty('scenario');
+  });
+
+  it('uses backend current as the only durable source authority', () => {
+    const staleBrowserSource = { sourceMode: 'durable', sourceId: 'stale', sourceName: 'cam 1.mp4', runState: 'COMPLETED' };
+    const backendSource = sourceStateFromCurrentVideo({
+      available: true, source_mode: 'durable', session_id: '94efecfd', source_name: 'cam 2.mp4',
+      analysis_state: 'COMPLETED', analysis_generation: 4, scenario: 'paused',
+    });
+    expect(backendSource).toMatchObject({ sourceId: '94efecfd', sourceName: 'cam 2.mp4', analysisState: 'COMPLETED', analysisGeneration: 4 });
+    expect(backendSource).not.toEqual(staleBrowserSource);
+    expect(restoringSourceState()).toEqual({ restoring: true, runState: 'RESTORING' });
+  });
+
+  it('keeps durable source identity unchanged through replay and preview-only state', () => {
+    const source = { sourceMode: 'durable', sourceId: '94efecfd', sourceName: 'cam 2.mp4', runState: 'COMPLETED', analysisState: 'COMPLETED', analysisGeneration: 4 };
+    const replayed = applyReplayResult(source, { analysis_state: 'WAKING', analysis_generation: 5 });
+    expect(replayed).toMatchObject({ sourceId: '94efecfd', sourceName: 'cam 2.mp4', analysisState: 'WAKING', analysisGeneration: 5 });
+    expect({ ...replayed, previewUrl: '/media/signed' }).toMatchObject({ sourceId: '94efecfd', sourceName: 'cam 2.mp4' });
+  });
+
+  it('uses backend lifecycle, not stale telemetry, to derive START versus STOP', () => {
+    expect(lifecycleAction({ analysisState: 'COMPLETED', runState: 'LIVE' })).toBe('START');
+    expect(lifecycleAction({ analysisState: 'PAUSED' })).toBe('START');
+    expect(lifecycleAction({ analysisState: 'READY' })).toBe('START');
+    expect(lifecycleAction({ analysisState: 'WAKING' })).toBe('STOP');
+    expect(lifecycleAction({ analysisState: 'ACTIVE' })).toBe('STOP');
+  });
+
+  it('builds a single durable START with the backend-restored session', () => {
+    const payload = scenarioAction('cam-border-01', { sourceMode: 'durable', sourceId: '94efecfd' }, 'normal', true);
+    expect(payload).toEqual({
+      camera_id: 'cam-border-01', source_mode: 'durable', video_session_id: '94efecfd',
+      scenario: 'normal', video_time: 0, wake_edge: true,
+    });
   });
 });

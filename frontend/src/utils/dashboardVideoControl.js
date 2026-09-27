@@ -2,12 +2,17 @@ export function sourceStateFromCurrentVideo(state) {
   if (!state?.available) return null;
   const lifecycle = String(state.analysis_state || '').toUpperCase();
   const runState = lifecycle || (state.scenario === 'normal' ? 'ACTIVE' : 'PAUSED');
+  const lifecycleFields = {
+    analysisState: lifecycle || runState,
+    analysisGeneration: Number.isFinite(Number(state.analysis_generation)) ? Number(state.analysis_generation) : 0,
+  };
   if (state.source_mode === 'bundled') {
     return {
       sourceMode: 'bundled',
       sourceId: null,
       sourceName: state.source_name || 'BUNDLED CLOUD DEMO',
       runState,
+      ...lifecycleFields,
     };
   }
   if (state.source_mode === 'durable' && state.session_id) {
@@ -16,9 +21,36 @@ export function sourceStateFromCurrentVideo(state) {
       sourceId: state.session_id,
       sourceName: state.source_name || 'Configured video source',
       runState,
+      ...lifecycleFields,
     };
   }
   return null;
+}
+
+// Durable source identity comes only from GET /video/current.  Browser
+// storage may remember layout choices, but must never choose a cloud source.
+export function restoringSourceState() {
+  return { restoring: true, runState: 'RESTORING' };
+}
+
+export function lifecycleAction(sourceState) {
+  const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
+  return ['WAKING', 'ACTIVE', 'LIVE'].includes(lifecycle) ? 'STOP' : 'START';
+}
+
+// A successful replay changes lifecycle fields only.  Source identity is an
+// invariant across replay and preview hydration.
+export function applyReplayResult(sourceState, result) {
+  if (!sourceState) return sourceState;
+  return {
+    ...sourceState,
+    restoring: false,
+    runState: String(result?.analysis_state || 'WAKING').toUpperCase(),
+    analysisState: String(result?.analysis_state || 'WAKING').toUpperCase(),
+    analysisGeneration: Number.isFinite(Number(result?.analysis_generation))
+      ? Number(result.analysis_generation)
+      : sourceState.analysisGeneration,
+  };
 }
 
 export function bundledSourceState(scenario = 'paused') {
