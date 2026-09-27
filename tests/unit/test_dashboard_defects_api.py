@@ -337,6 +337,67 @@ def test_explicit_bundled_selection_overrides_an_old_valid_durable_control(monke
         dashboard._demo_state.update(previous)
 
 
+def test_bundled_fallback_cannot_replace_active_durable_session(monkeypatch):
+    active = {
+        "session_id": "real-session",
+        "source_object_key": "video-sessions/cam-border-01/real-session/source.mp4",
+        "scenario": "paused",
+    }
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: active)
+
+    with pytest.raises(dashboard.HTTPException) as exc:
+        asyncio.run(dashboard.post_video_scenario({
+            "camera_id": "cam-border-01",
+            "source_mode": "bundled",
+            "scenario": "normal",
+            "video_time": 0,
+            "wake_edge": True,
+        }, _user={}))
+
+    assert exc.value.status_code == 409
+    assert "durable upload is active" in exc.value.detail.lower()
+
+
+def test_explicit_bundled_replace_can_override_active_durable_session(monkeypatch):
+    calls = []
+    active = {
+        "session_id": "real-session",
+        "source_object_key": "video-sessions/cam-border-01/real-session/source.mp4",
+        "scenario": "paused",
+    }
+
+    async def fake_wake(camera_id):
+        calls.append(camera_id)
+        return "ready"
+
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: active)
+    monkeypatch.setattr(
+        dashboard,
+        "activate_bundled_source",
+        lambda camera_id, **control: {
+            "camera_id": camera_id,
+            "source_mode": "bundled",
+            "video_session_id": None,
+            **control,
+        },
+    )
+    monkeypatch.setattr(dashboard, "_wake_edge_service", fake_wake)
+
+    result = asyncio.run(dashboard.post_video_scenario({
+        "camera_id": "cam-border-01",
+        "source_mode": "bundled",
+        "scenario": "normal",
+        "video_time": 0,
+        "wake_edge": True,
+        "replace_source": True,
+    }, _user={}))
+
+    assert result["status"] == "success"
+    assert calls == ["cam-border-01"]
+
+
 def test_durable_mode_requires_the_exact_active_session(monkeypatch):
     active = {"session_id": "real-session"}
     monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
