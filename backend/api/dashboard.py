@@ -25,6 +25,7 @@ Security:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import json
 import os
@@ -214,23 +215,90 @@ def _selected_bundled_control(camera_id: str | None) -> dict | None:
     return target
 
 
-async def _wake_edge_service(camera_id: str | None) -> str:
-    """Best-effort wake request for a free Render edge web service."""
+_edge_wake_tasks: dict[str, asyncio.Task] = {}
+_EDGE_WAKE_RETRY_DELAYS = (2, 3, 5, 8, 10, 10, 10, 10, 10, 10)
+
+
+def _edge_wake_url(camera_id: str | None) -> str:
     env_key = {
         "cam-border-01": "EDGE_WAKE_URL_CAM_BORDER_01",
         "cam-checkpoint-01": "EDGE_WAKE_URL_CAM_CHECKPOINT_01",
     }.get(str(camera_id or ""))
-    wake_url = os.environ.get(env_key, "").strip() if env_key else ""
+    return os.environ.get(env_key, "").strip() if env_key else ""
+
+
+async def _probe_edge_service(camera_id: str | None) -> str:
+    """Probe/wake one free Render edge worker once.
+
+    A sleeping Render service can legitimately answer the first request with a
+    transient 502/503 while the container is being restored.  That response is
+    therefore "waking", not a terminal failure.
+    """
+    wake_url = _edge_wake_url(camera_id)
     if not wake_url:
         return "not_configured"
     try:
-        timeout = httpx.Timeout(connect=2.0, read=5.0, write=2.0, pool=2.0)
+        timeout = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             response = await client.get(f"{wake_url.rstrip('/')}/wake")
-            return "ready" if response.is_success else "waking"
+            if response.is_success:
+                return "ready"
+            logger.info(
+                "[Dashboard] Edge wake probe camera_id=%s status=%s; worker still warming",
+                camera_id,
+                response.status_code,
+            )
+            return "waking"
     except httpx.HTTPError as exc:
-        logger.info("[Dashboard] Edge wake request unavailable (%s)", type(exc).__name__)
+        logger.info(
+            "[Dashboard] Edge wake probe camera_id=%s unavailable (%s); retrying",
+            camera_id,
+            type(exc).__name__,
+        )
         return "waking"
+
+
+async def _retry_edge_wake_until_ready(camera_id: str) -> None:
+    """Retry only an explicit START wake until the sleeping free worker answers.
+
+    The loop is bounded and stops immediately on success.  Normal dashboard
+    polling never calls this path, so this does not create a permanent keepalive
+    that would defeat Render free-tier sleep.
+    """
+    try:
+        for attempt, delay in enumerate(_EDGE_WAKE_RETRY_DELAYS, start=1):
+            await asyncio.sleep(delay)
+            status = await _probe_edge_service(camera_id)
+            if status == "ready":
+                logger.info(
+                    "[Dashboard] Edge worker ready camera_id=%s after wake retry=%s",
+                    camera_id,
+                    attempt,
+                )
+                return
+            if status == "not_configured":
+                return
+        logger.warning(
+            "[Dashboard] Edge worker did not become ready within bounded wake window camera_id=%s",
+            camera_id,
+        )
+    finally:
+        current = asyncio.current_task()
+        if _edge_wake_tasks.get(camera_id) is current:
+            _edge_wake_tasks.pop(camera_id, None)
+
+
+async def _wake_edge_service(camera_id: str | None) -> str:
+    """Wake a free Render worker and keep retrying transient cold-start failures."""
+    status = await _probe_edge_service(camera_id)
+    camera_key = str(camera_id or "")
+    if status == "waking" and camera_key:
+        existing = _edge_wake_tasks.get(camera_key)
+        if existing is None or existing.done():
+            _edge_wake_tasks[camera_key] = asyncio.create_task(
+                _retry_edge_wake_until_ready(camera_key)
+            )
+    return status
 
 
 def _session_media_path(session_id: str) -> Path | None:
