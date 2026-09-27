@@ -561,6 +561,20 @@ async def post_video_scenario(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Bundled video source must not include a durable session ID",
             )
+        # The bundled clip is a fallback, not an implicit replacement for a
+        # stored user upload. A stale browser/restore race must never destroy
+        # the durable control pointer. An intentional operator reset must opt
+        # in explicitly with replace_source=true.
+        if (
+            is_authoritative_control
+            and requested_mode == "bundled"
+            and active_session is not None
+            and payload.get("replace_source") is not True
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A durable upload is active for this camera; bundled fallback cannot replace it implicitly",
+            )
         if is_authoritative_control and requested_mode == "durable" and (
             not requested_session_id
             or active_session is None
