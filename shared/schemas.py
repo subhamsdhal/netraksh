@@ -502,6 +502,7 @@ class EventResponse(BaseModel):
     event_id: str
     camera_id: str
     stream_id: Optional[str] = None
+    analysis_session_id: Optional[str] = None
     timestamp: datetime
     video_time: Optional[float] = None
     event_type: Optional[EventType]

@@ -27,6 +27,7 @@ describe('per-camera authoritative analyzed frame', () => {
       expectedSessionId="session-1"
       telemetryStatus="LIVE"
       liveTracksData={{
+        stream_id: 'session-1',
         analysis_session_id: 'session-1', frame_index: 42, preview_available: true,
         person_count: 1, vehicle_count: 1, track_count: 2, tracks: [],
         frame_width: 768, frame_height: 576,
@@ -50,7 +51,7 @@ describe('per-camera authoritative analyzed frame', () => {
       sourceMode="durable"
       expectedSessionId="new-session"
       telemetryStatus="LIVE"
-      liveTracksData={{ analysis_session_id: 'old-session', frame_index: 42, preview_available: true }}
+      liveTracksData={{ stream_id: 'old-session', analysis_session_id: 'old-session', frame_index: 42, preview_available: true }}
     />);
     expect(authFetch).not.toHaveBeenCalled();
     expect(screen.getByText(/SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME/)).toBeInTheDocument();

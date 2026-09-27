@@ -333,6 +333,28 @@ export default function Dashboard() {
     });
   }, [activeCameraIds.join('|')]);
   useEffect(() => {
+    // A fresh packet from the current source/generation is authoritative over
+    // an older browser control diagnostic.  Clear only diagnostics that this
+    // successful lifecycle actually supersedes; a newly occurring error is
+    // still rendered by requestScenario.
+    visibleCameraIds.filter(Boolean).forEach((cameraId) => {
+      const telemetry = scopedLiveTracks[cameraId];
+      const source = slotSources[cameraId];
+      if (!telemetry || !source) return;
+      const sameSource = source.sourceMode !== 'durable' || telemetry.stream_id === source.sourceId;
+      const sameGeneration = source.analysisGeneration == null
+        || Number(telemetry.analysis_generation) === Number(source.analysisGeneration);
+      if (!sameSource || !sameGeneration) return;
+      const status = telemetryStatusAt(telemetry, now);
+      if (!['LIVE', 'COMPLETED'].includes(status)) return;
+      const media = cameraMediaRef.current[cameraId] || {};
+      const staleDiagnostic = /CONTROL (PAYLOAD|NETWORK) FAILED|START FAILED|COLD START TIMED OUT/.test(
+        `${media.controlStatus || ''} ${media.uploadError || ''}`,
+      );
+      if (staleDiagnostic) updateCameraMedia(cameraId, { controlStatus: null, uploadError: null });
+    });
+  }, [visibleCameraIds.join('|'), slotSources, scopedLiveTracks, now]);
+  useEffect(() => {
     if (!activeCameraIds.length) return;
     setSlotSources((current) => {
       let changed = false;
@@ -530,15 +552,16 @@ export default function Dashboard() {
 
   const visibleContextKey = visibleCameraIds
     .filter(Boolean)
-    .map((cameraId) => `${cameraId}:${cameraMedia[cameraId]?.sessionId || slotSources[cameraId]?.sourceId || ''}`)
+    .map((cameraId) => `${cameraId}:${cameraMedia[cameraId]?.sessionId || slotSources[cameraId]?.sourceId || ''}:${scopedLiveTracks[cameraId]?.analysis_session_id || ''}`)
     .join('|');
   useEffect(() => {
     visibleCameraIds.filter(Boolean).forEach((cameraId) => {
-      const contextSessionId = cameraMedia[cameraId]?.sessionId || slotSources[cameraId]?.sourceId || null;
-      refreshEventsForContext(cameraId, contextSessionId);
-      refreshTelemetryForContext(cameraId, contextSessionId);
+      const streamId = cameraMedia[cameraId]?.sessionId || slotSources[cameraId]?.sourceId || null;
+      const analysisSessionId = scopedLiveTracks[cameraId]?.analysis_session_id || null;
+      refreshEventsForContext(cameraId, streamId, analysisSessionId);
+      refreshTelemetryForContext(cameraId, streamId);
     });
-  }, [visibleContextKey, refreshEventsForContext, refreshTelemetryForContext]);
+  }, [visibleContextKey, refreshEventsForContext, refreshTelemetryForContext, scopedLiveTracks]);
 
   useEffect(() => {
     if (activeCameraIds.length < 2) {
@@ -745,12 +768,14 @@ export default function Dashboard() {
     // prior demo/history events out even when both fixed SIH camera IDs are in
     // view at the same time.
     const sourceTelemetry = scopedLiveTracks[e.camera_id];
-    const contextSessionId = sourceTelemetry?.stream_id
+    const contextStreamId = sourceTelemetry?.stream_id
       || slotSources[e.camera_id]?.sourceId
       || null;
+    const contextAnalysisSessionId = sourceTelemetry?.analysis_session_id || null;
     const contextStartTime = cameraMedia[e.camera_id]?.sessionStartTime || null;
-    if (contextSessionId && e.stream_id && e.stream_id !== contextSessionId) return;
-    if (contextSessionId && !e.stream_id) {
+    if (contextStreamId && e.stream_id && e.stream_id !== contextStreamId) return;
+    if (contextAnalysisSessionId && e.analysis_session_id !== contextAnalysisSessionId) return;
+    if (contextStreamId && !e.stream_id) {
       const timestamp = eventTimestampMs(e.timestamp);
       if (!contextStartTime || !Number.isFinite(timestamp) || timestamp < contextStartTime) return;
     }
@@ -763,7 +788,7 @@ export default function Dashboard() {
     }
     
     // Legacy fallback applies only when no session contract is available.
-    if (!contextSessionId) {
+    if (!contextStreamId && !contextAnalysisSessionId) {
       const timestamp = eventTimestampMs(e.timestamp);
       if (!contextStartTime || !Number.isFinite(timestamp) || timestamp < contextStartTime) return;
     }
@@ -772,8 +797,8 @@ export default function Dashboard() {
 
   const currentSessionEvents = contextualEvents.filter((event) => {
     const telemetry = scopedLiveTracks[event.camera_id];
-    const sessionId = telemetry?.stream_id || null;
-    return Boolean(sessionId && event.stream_id === sessionId);
+    const sessionId = telemetry?.analysis_session_id || null;
+    return Boolean(sessionId && event.analysis_session_id === sessionId);
   });
   const displayEvents = filterLiveEvents(currentSessionEvents.filter(ev =>
     (ev.event_type && String(ev.event_type).toLowerCase() !== 'unknown') ||
@@ -792,7 +817,12 @@ export default function Dashboard() {
 
   // Reliability factors and Gate 1 must describe the same event snapshot.
   // Live camera health is only a fallback when no event health was recorded.
-  const scopedLatestEvent = selectReliabilityEvent(displayEvents, reliabilityScopeCameraId, activeCameraIds);
+  const scopedLatestEvent = selectReliabilityEvent(
+    displayEvents,
+    reliabilityScopeCameraId,
+    activeCameraIds,
+    scopedLiveTracks[reliabilityScopeCameraId]?.analysis_session_id || null,
+  );
   const reliabilityEvent = scopedLatestEvent || (latestEvent?.camera_id === reliabilityScopeCameraId ? latestEvent : null);
   const parsed = reliabilityEvent ? parseDecisionReason(reliabilityEvent) : null;
   // Only the REST result is scoped to the currently live cameras and their
@@ -903,7 +933,7 @@ export default function Dashboard() {
           const cameraId = visibleCameraIds[slotIndex];
           const camera = cameraModels.find(item => item.cameraId === cameraId) || null;
           const telemetry = cameraId ? scopedLiveTracks[cameraId] : null;
-          const sessionId = telemetry?.stream_id || null;
+          const sessionId = telemetry?.analysis_session_id || null;
           const cameraEvents = displayEvents.filter(event => event.camera_id === cameraId);
           const latestCameraEvent = latestEventForSession(cameraEvents, cameraId, sessionId);
           const latestFaceEvent = cameraEvents.find(event => String(event.event_type || '').toUpperCase() === 'FACE_DETECTED' || event.face_match_status || event.recognition_state) || null;

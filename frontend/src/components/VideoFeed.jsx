@@ -272,11 +272,11 @@ export default function VideoFeed({
     // endpoint, however, is keyed by analysis_session_id + frame_index.
     // Keeping those identities separate prevents an old demo frame from
     // being displayed for a newly selected upload.
-    const sourceSessionId = liveTracksData?.stream_id || liveTracksData?.analysis_session_id || null;
-    const analysisSessionId = liveTracksData?.analysis_session_id || sourceSessionId;
+    const sourceSessionId = liveTracksData?.stream_id || null;
+    const analysisSessionId = liveTracksData?.analysis_session_id || null;
     const frameIndex = liveTracksData?.frame_index;
     if (!isDurableSource && !hudVisible) return undefined;
-    if (expectedSessionId && sourceSessionId !== expectedSessionId) return undefined;
+    if (expectedSessionId && sourceSessionId && sourceSessionId !== expectedSessionId) return undefined;
     if (!cameraId || !analysisSessionId || !Number.isFinite(frameIndex) || !liveTracksData?.preview_available) return undefined;
     let cancelled = false;
     let nextUrl = null;

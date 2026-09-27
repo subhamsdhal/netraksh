@@ -81,13 +81,14 @@ describe('camera telemetry correctness', () => {
   it('selects and labels only the latest event from the current session', () => {
     const now = Date.parse('2026-09-24T10:00:08Z');
     const events = [
-      { camera_id: 'cam-border-01', stream_id: 'old', event_type: 'LOITERING', timestamp: '2026-09-24T09:59:59Z' },
-      { camera_id: 'cam-border-01', stream_id: 'current', event_type: 'LINE_CROSSING', timestamp: '2026-09-24T10:00:00Z' },
+      { camera_id: 'cam-border-01', stream_id: 'same-upload', analysis_session_id: 'old-run', event_type: 'LOITERING', timestamp: '2026-09-24T09:59:59Z' },
+      { camera_id: 'cam-border-01', stream_id: 'same-upload', analysis_session_id: 'current-run', event_type: 'LINE_CROSSING', timestamp: '2026-09-24T10:00:00Z' },
     ];
-    const event = latestEventForSession(events, 'cam-border-01', 'current');
+    const event = latestEventForSession(events, 'cam-border-01', 'current-run');
     expect(event.event_type).toBe('LINE_CROSSING');
     expect(formatLatestEvent(event, now)).toBe('LINE CROSSING · 8s ago');
     expect(latestEventForSession(events, 'cam-border-01', 'missing')).toBeNull();
+    expect(latestEventForSession(events, 'cam-border-01', 'same-upload')).toBeNull();
   });
 
   it('pairs an image only with matching session, frame, and counts', () => {

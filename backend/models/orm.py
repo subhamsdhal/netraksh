@@ -170,6 +170,9 @@ class Event(Base):
     rule: Mapped[Optional[str]] = mapped_column(String(64))
     rule_value: Mapped[Optional[float]] = mapped_column(Float)
     stream_id: Mapped[Optional[str]] = mapped_column(String(36))
+    # Concrete inference/replay identity.  Nullable for legacy events whose
+    # edge payload predates run-scoped telemetry.
+    analysis_session_id: Mapped[Optional[str]] = mapped_column(String(36), index=True)
     plate_text: Mapped[Optional[str]] = mapped_column(String(32))
     plate_confidence: Mapped[Optional[float]] = mapped_column(Float)
     raw_plate_text: Mapped[Optional[str]] = mapped_column(String(64))

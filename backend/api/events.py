@@ -43,6 +43,7 @@ router = APIRouter(prefix="/events", tags=["events"])
 async def list_events(
     camera_id: Optional[str] = Query(None),
     stream_id: Optional[str] = Query(None),
+    analysis_session_id: Optional[str] = Query(None),
     decision_state: Optional[str] = Query(None),
     event_type: Optional[str] = Query(None),
     severity: Optional[str] = Query(None),
@@ -60,6 +61,8 @@ async def list_events(
         q = q.filter(Event.camera_id == camera_id)
     if stream_id:
         q = q.filter(Event.stream_id == stream_id)
+    if analysis_session_id:
+        q = q.filter(Event.analysis_session_id == analysis_session_id)
     if decision_state:
         q = q.filter(Event.decision_state == decision_state)
     if event_type:
@@ -76,6 +79,7 @@ def _evidence_vault_query(
     search: Optional[str] = None,
     camera_id: Optional[str] = None,
     stream_id: Optional[str] = None,
+    analysis_session_id: Optional[str] = None,
     decision_state: Optional[str] = None,
     event_type: Optional[str] = None,
     chain_status: Optional[str] = None,
@@ -89,6 +93,8 @@ def _evidence_vault_query(
         q = q.filter(Event.camera_id == camera_id)
     if stream_id:
         q = q.filter(Event.stream_id == stream_id)
+    if analysis_session_id:
+        q = q.filter(Event.analysis_session_id == analysis_session_id)
     if decision_state:
         q = q.filter(Event.decision_state == decision_state)
     if event_type:
@@ -113,6 +119,7 @@ async def list_evidence_vault(
     search: Optional[str] = Query(None, max_length=128),
     camera_id: Optional[str] = Query(None),
     stream_id: Optional[str] = Query(None),
+    analysis_session_id: Optional[str] = Query(None),
     decision_state: Optional[str] = Query(None),
     event_type: Optional[str] = Query(None),
     chain_status: Optional[str] = Query(None),
@@ -123,7 +130,7 @@ async def list_evidence_vault(
 ):
     """Stable, paginated Evidence Vault listing backed by evidence packages."""
     q = _evidence_vault_query(
-        db, _user, search, camera_id, stream_id, decision_state, event_type, chain_status,
+        db, _user, search, camera_id, stream_id, analysis_session_id, decision_state, event_type, chain_status,
     )
     total = q.count()
     rows = q.order_by(desc(Event.timestamp), desc(Event.id)).offset(offset).limit(limit).all()
@@ -145,6 +152,7 @@ async def export_evidence_vault(
     search: Optional[str] = Query(None, max_length=128),
     camera_id: Optional[str] = Query(None),
     stream_id: Optional[str] = Query(None),
+    analysis_session_id: Optional[str] = Query(None),
     decision_state: Optional[str] = Query(None),
     event_type: Optional[str] = Query(None),
     chain_status: Optional[str] = Query(None),
@@ -153,7 +161,7 @@ async def export_evidence_vault(
 ):
     """Export the complete filtered vault ledger, not only the visible page."""
     q = _evidence_vault_query(
-        db, _user, search, camera_id, stream_id, decision_state, event_type, chain_status,
+        db, _user, search, camera_id, stream_id, analysis_session_id, decision_state, event_type, chain_status,
     )
     rows = q.order_by(desc(Event.timestamp), desc(Event.id)).all()
     output = io.StringIO(newline="")
@@ -166,7 +174,7 @@ async def export_evidence_vault(
     for event in rows:
         ep = event.evidence_package
         writer.writerow([_csv_safe(value) for value in (
-            event.id, event.timestamp.isoformat(), event.camera_id, event.stream_id,
+            event.id, event.timestamp.isoformat(), event.camera_id, event.analysis_session_id,
             event.event_type, event.decision_state, ep.sha256, ep.hash_valid,
             ep.signature_valid, ep.chain_status, event.storage_status,
         )])
@@ -474,6 +482,7 @@ async def ingest_event(
         id=ep.event_id,
         camera_id=ep.camera_id,
         stream_id=ep.stream_id,
+        analysis_session_id=ep.analysis_session_id,
         zone_id=ep.zone_id,
         timestamp=ep.timestamp,
         video_time=ep.video_time,
@@ -812,6 +821,7 @@ def _event_to_response(event: Event, db: Session) -> EventResponse:
         event_id=event.id,
         camera_id=event.camera_id,
         stream_id=event.stream_id if isinstance(event.stream_id, str) else None,
+        analysis_session_id=event.analysis_session_id if isinstance(event.analysis_session_id, str) else None,
         timestamp=event.timestamp,
         video_time=event.video_time,
         event_type=event.event_type,

@@ -90,13 +90,14 @@ export default function useWebSocket(url, { fetchInitial = true } = {}) {
     }
   }, []);
 
-  const refreshEventsForContext = useCallback(async (cameraId, streamId) => {
+  const refreshEventsForContext = useCallback(async (cameraId, streamId, analysisSessionId) => {
     const requestKey = cameraId || '*';
     const requestId = (eventsContextRequest.current[requestKey] || 0) + 1;
     eventsContextRequest.current[requestKey] = requestId;
     const params = new URLSearchParams({ limit: '100' });
     if (cameraId) params.set('camera_id', cameraId);
     if (streamId) params.set('stream_id', streamId);
+    if (analysisSessionId) params.set('analysis_session_id', analysisSessionId);
     try {
       const response = await authFetch(`/events?${params.toString()}`);
       if (!response.ok) return [];
@@ -366,7 +367,9 @@ function telemetryToState(tel, receivedAt = null) {
     timestamp: effectiveTimestamp,
     source_timestamp: tel.source_timestamp,
     processed_timestamp: tel.processed_timestamp ?? tel.timestamp,
-    analysis_session_id: tel.analysis_session_id || tel.stream_id,
+    // A run id is authoritative only when the edge provided it.  Never
+    // infer analysis_session_id from the durable source stream_id.
+    analysis_session_id: tel.analysis_session_id || null,
     analysis_state: tel.analysis_state || 'PROCESSING',
   };
 }

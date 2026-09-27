@@ -32,6 +32,7 @@ def test_alembic_upgrade_and_downgrade(tmp_path):
         assert "alembic_version" in tables
         assert "cameras" in tables
         assert "events" in tables
+        assert "analysis_session_id" in {column["name"] for column in inspector.get_columns("events")}
         
         # Verify we can downgrade back to base
         command.downgrade(alembic_cfg, "base")

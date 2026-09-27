@@ -29,9 +29,10 @@ export function filterLiveEvents(events = [], activeCameraIds = [], cameraFilter
     && (cameraFilter === 'ALL' || event.camera_id === cameraFilter));
 }
 
-export function selectReliabilityEvent(events = [], cameraId = null, activeCameraIds = []) {
+export function selectReliabilityEvent(events = [], cameraId = null, activeCameraIds = [], analysisSessionId = null) {
   if (activeCameraIds.length && !activeCameraIds.includes(cameraId)) return null;
-  return events.find((event) => event.camera_id === cameraId) || null;
+  return events.find((event) => event.camera_id === cameraId
+    && (!analysisSessionId || event.analysis_session_id === analysisSessionId)) || null;
 }
 
 export function shouldAcceptTelemetry(current, incoming) {
@@ -70,7 +71,8 @@ export function telemetryStatusAt(telemetry, now = Date.now()) {
 
 export function latestEventForSession(events = [], cameraId, analysisSessionId) {
   if (!cameraId || !analysisSessionId) return null;
-  return events.find((event) => event.camera_id === cameraId && event.stream_id === analysisSessionId) || null;
+  return events.find((event) => event.camera_id === cameraId
+    && event.analysis_session_id === analysisSessionId) || null;
 }
 
 export function formatLatestEvent(event, now = Date.now()) {
