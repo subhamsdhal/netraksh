@@ -45,4 +45,6 @@ ENV PYTHONPATH=/app \
     DETECTOR_RUNTIME=onnx_cpu \
     DETECTOR_MODEL_ONNX=/app/yolov8n.onnx
 
-CMD ["python", "-m", "edge.cloud_worker"]
+EXPOSE 10000
+
+CMD ["python", "-u", "-m", "edge.cloud_worker"]

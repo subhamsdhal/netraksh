@@ -120,18 +120,24 @@ class HealthHandler(BaseHTTPRequestHandler):
         logger.info("[HTTP] " + fmt, *args)
 
 
+class CloudHealthServer(ThreadingHTTPServer):
+    # Permit a clean Render restart to reclaim the service port immediately.
+    allow_reuse_address = True
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO"),
         format="%(asctime)s | %(levelname)-8s | [cloud-edge] %(name)s | %(message)s",
     )
     port = int(os.environ.get("PORT", "10000"))
-    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    server = CloudHealthServer(("0.0.0.0", port), HealthHandler)
     logger.info("[CloudWorker] Health listener bound on 0.0.0.0:%s", port)
-    from edge.runtime_diagnostics import log_runtime_checkpoint
-    log_runtime_checkpoint("cloud_worker_started")
     thread = threading.Thread(target=_run_edge, daemon=True, name="netraksh-edge")
     thread.start()
+    # No optional imports or inference setup are allowed between a successful
+    # bind and serve_forever: Render's scanner must keep seeing this listener
+    # even when the idle AI thread later fails or retries.
     try:
         server.serve_forever()
     finally:
