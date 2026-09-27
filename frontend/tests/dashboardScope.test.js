@@ -61,11 +61,21 @@ describe('camera telemetry correctness', () => {
     expect(isActiveTelemetry(telemetry, 18_000)).toBe(false);
   });
 
-  it('rejects telemetry from a previous durable upload session', () => {
-    const source = { sourceMode: 'durable', sourceId: 'new-session', runState: 'WAKING' };
-    expect(telemetryForSource({ analysis_session_id: 'old-session' }, source)).toBeNull();
-    expect(telemetryForSource({ analysis_session_id: 'new-session', frame_index: 1 }, source)?.frame_index).toBe(1);
-    expect(telemetryForSource({ analysis_session_id: 'new-session' }, { ...source, runState: 'UPLOADING' })).toBeNull();
+  it('binds durable telemetry to source stream_id, not analyzed-frame session id', () => {
+    const source = { sourceMode: 'durable', sourceId: 'new-upload', runState: 'WAKING' };
+    expect(telemetryForSource({
+      stream_id: 'old-upload',
+      analysis_session_id: 'frame-generation-newer',
+    }, source)).toBeNull();
+    expect(telemetryForSource({
+      stream_id: 'new-upload',
+      analysis_session_id: 'frame-generation-1',
+      frame_index: 1,
+    }, source)?.frame_index).toBe(1);
+    expect(telemetryForSource({
+      stream_id: 'new-upload',
+      analysis_session_id: 'frame-generation-2',
+    }, { ...source, runState: 'UPLOADING' })).toBeNull();
   });
 
   it('selects and labels only the latest event from the current session', () => {
