@@ -101,6 +101,23 @@ def test_explicit_replay_increments_generation_and_preserves_durable_stream(monk
     assert first["analysis_state"] == "WAKING"
 
 
+def test_explicit_stop_persists_paused_lifecycle(monkeypatch, tmp_path):
+    storage = MemoryStorage()
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)
+    session_id = str(uuid.uuid4())
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"video")
+    video_storage.store_uploaded_session(
+        camera_id="cam-border-01", session_id=session_id, source_path=source,
+        preview_path=None, source_name="stop-test.mp4", content_type="video/mp4",
+    )
+    video_storage.activate_session("cam-border-01", session_id)
+    video_storage.start_active_session("cam-border-01", session_id)
+    stopped = video_storage.update_active_session("cam-border-01", {"scenario": "paused", "video_time": 0.0})
+    assert stopped["scenario"] == "paused"
+    assert stopped["analysis_state"] == "PAUSED"
+
+
 def test_eof_completion_is_idempotent_and_stops_durable_run(monkeypatch, tmp_path):
     storage = MemoryStorage()
     monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)

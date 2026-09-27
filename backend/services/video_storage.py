@@ -174,6 +174,14 @@ def update_active_session(camera_id: str, changes: dict[str, Any]) -> dict[str, 
     if current is None:
         return None
     current.update(changes)
+    # An explicit operator STOP is a durable lifecycle transition, not just a
+    # browser playback heartbeat.  Persist it so restore cannot resurrect a
+    # stale WAKING state after a failed/cold worker run.
+    if changes.get("scenario") in {"paused", "stopped"}:
+        current.update({
+            "analysis_state": "PAUSED",
+            "state_updated_at": time.time(),
+        })
     _put_json(control_key(camera_id), current)
     return current
 
