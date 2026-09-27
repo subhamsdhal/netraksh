@@ -121,7 +121,8 @@ export default function Dashboard() {
   });
   const [now, setNow] = useState(Date.now());
   const [backendStatus, setBackendStatus] = useState('CHECKING');
-  const [sourceRestoreComplete, setSourceRestoreComplete] = useState(false);
+  const [sourceRestoreReady, setSourceRestoreReady] = useState({});
+  const sourceRestoreReadyRef = useRef({});
   const fileInputRefs = useRef({});
   const autoStartedDemoCamerasRef = useRef(new Set());
 
@@ -291,7 +292,14 @@ export default function Dashboard() {
   }, [slotSources]);
   useEffect(() => {
     let mounted = true;
-    setSourceRestoreComplete(false);
+    visibleCameraIds.filter(Boolean).forEach((cameraId) => {
+      sourceRestoreReadyRef.current[cameraId] = false;
+    });
+    setSourceRestoreReady((current) => {
+      const next = { ...current };
+      visibleCameraIds.filter(Boolean).forEach((cameraId) => { next[cameraId] = false; });
+      return next;
+    });
     const restoreScopedSources = async () => {
       const restored = {};
       await Promise.all(visibleCameraIds.filter(Boolean).map(async (cameraId) => {
@@ -367,6 +375,10 @@ export default function Dashboard() {
             });
           }
         } catch (_) { /* a missing scoped source is an honest empty state */ }
+        if (mounted) {
+          sourceRestoreReadyRef.current[cameraId] = true;
+          setSourceRestoreReady((current) => ({ ...current, [cameraId]: true }));
+        }
       }));
       if (mounted && Object.keys(restored).length) {
         // The authenticated backend is authoritative. This ordering replaces
@@ -374,7 +386,6 @@ export default function Dashboard() {
         // with the bundled evaluator source.
         setSlotSources((current) => ({ ...current, ...restored }));
       }
-      if (mounted) setSourceRestoreComplete(true);
     };
     restoreScopedSources();
     return () => { mounted = false; };
@@ -383,8 +394,8 @@ export default function Dashboard() {
     // Start the backend-authoritative source only after restoration completes.
     // This prevents the evaluator auto-start from racing a durable upload and
     // replacing it with the bundled demo on every page load.
-    if (!sourceRestoreComplete) return;
     visibleCameraIds.filter(Boolean).forEach((cameraId) => {
+      if (!sourceRestoreReady[cameraId] || !sourceRestoreReadyRef.current[cameraId]) return;
       if (!DEMO_CAMERA_LABELS[cameraId]) return;
       if (activeCameraIds.includes(cameraId)) return;
       if (autoStartedDemoCamerasRef.current.has(cameraId)) return;
@@ -397,7 +408,7 @@ export default function Dashboard() {
       }
       requestScenario(cameraId, scenarioAction(cameraId, source, 'normal', true));
     });
-  }, [sourceRestoreComplete, visibleCameraIds.join('|'), activeCameraIds.join('|'), slotSources]);
+  }, [sourceRestoreReady, visibleCameraIds.join('|'), activeCameraIds.join('|'), slotSources]);
 
   useEffect(() => {
     if (dashboardMode !== 'DUAL') setEventCameraFilter('ALL');
