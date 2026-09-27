@@ -100,6 +100,7 @@ def activate_session(camera_id: str, session_id: str) -> dict[str, Any]:
         raise FileNotFoundError("Video session was not found in durable storage")
     control = {
         **metadata,
+        "source_mode": "durable",
         "scenario": "paused",
         "video_time": 0.0,
         "video_time_updated_at": 0.0,
