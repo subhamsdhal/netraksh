@@ -438,6 +438,10 @@ export default function Dashboard() {
 
       const restoredSource = slotSources[cameraId];
       const source = restoredSource || bundledSourceState('paused');
+      // A durable upload is operator-controlled. If its finite run already
+      // reached EOF, page restore must preserve COMPLETED/IDLE rather than
+      // silently restarting the same cloud source on every refresh.
+      if (restoredSource?.sourceMode === 'durable') return;
       if (!restoredSource) {
         setSlotSources((current) => ({ ...current, [cameraId]: source }));
       }
