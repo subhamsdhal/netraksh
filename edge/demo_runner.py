@@ -145,9 +145,11 @@ def _materialize_remote_source(data: dict, camera_id: str) -> dict:
     except (ValueError, AttributeError):
         logger.warning("[DemoRunner] Ignoring remote source with invalid session ID")
         return data
+    safe_source_name = str(data.get("source_name") or "normalized upload").replace("\r", " ").replace("\n", " ")[:160]
 
+    logical_source = str(data.get("video_source") or "").removeprefix("object://")
     parsed = urlparse(download_url)
-    suffix = Path(parsed.path).suffix.lower()
+    suffix = Path(logical_source).suffix.lower() or Path(parsed.path).suffix.lower()
     if suffix not in {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}:
         suffix = ".video"
     cache_root = Path(
@@ -160,6 +162,12 @@ def _materialize_remote_source(data: dict, camera_id: str) -> dict:
     if destination.is_file() and destination.stat().st_size > 0:
         hydrated = dict(data)
         hydrated["video_source"] = str(destination)
+        logger.info(
+            "[DemoRunner] Durable source cache ready camera_id=%s session=%s source=%s",
+            camera_id,
+            session_id[:8],
+            safe_source_name,
+        )
         return hydrated
 
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -189,9 +197,19 @@ def _materialize_remote_source(data: dict, camera_id: str) -> dict:
             type(exc).__name__,
             f" (HTTP {status_code})" if status_code is not None else "",
         )
-        return data
+        unavailable = dict(data)
+        unavailable["source_unavailable"] = True
+        unavailable["video_source"] = None
+        unavailable.pop("download_url", None)
+        return unavailable
     hydrated = dict(data)
     hydrated["video_source"] = str(destination)
+    logger.info(
+        "[DemoRunner] Durable source downloaded camera_id=%s session=%s source=%s",
+        camera_id,
+        session_id[:8],
+        safe_source_name,
+    )
     return hydrated
 
 
@@ -234,11 +252,21 @@ def _apply_control_sync(data: dict) -> bool:
     new_session_id = None if source_mode == "bundled" else data.get("video_session_id")
     rejected_key = (str(new_source), str(new_session_id))
 
+    if source_mode == "durable" and data.get("source_unavailable"):
+        if _scenario.get("rejected_source_session") != rejected_key:
+            logger.warning(
+                "[DemoRunner] Durable source is unavailable; pausing instead of processing a fallback source"
+            )
+            _scenario["rejected_source_session"] = rejected_key
+        _scenario["current"] = "paused"
+        _scenario["video_session_id"] = new_session_id
+        return False
+
     if new_source and not _is_resolvable_edge_source(new_source):
         if _scenario.get("rejected_source_session") != rejected_key:
             logger.warning(
                 "[DemoRunner] Ignoring unavailable control-plane source/session; "
-                "retaining the configured edge source"
+                "no source change applied"
             )
             _scenario["rejected_source_session"] = rejected_key
         return False

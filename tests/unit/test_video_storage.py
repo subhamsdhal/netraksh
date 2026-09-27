@@ -48,9 +48,11 @@ def test_uploaded_video_state_uses_logical_object_keys(monkeypatch, tmp_path):
     )
 
     assert metadata["source_object_key"].startswith("video-sessions/cam-border-01/")
+    assert metadata["source_mode"] == "durable"
     assert "https://" not in json.dumps(metadata)
     active = video_storage.activate_session("cam-border-01", session_id)
     assert active["scenario"] == "paused"
+    assert active["source_mode"] == "durable"
     assert video_storage.get_active_session("cam-border-01")["session_id"] == session_id
 
 

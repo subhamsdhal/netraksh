@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import VideoFeed from '../src/components/VideoFeed';
@@ -7,7 +7,7 @@ import { authFetch } from '../src/services/auth';
 
 vi.mock('../src/services/auth', () => ({ authFetch: vi.fn() }));
 
-describe('per-camera analyzed-frame HUD', () => {
+describe('per-camera authoritative analyzed frame', () => {
   beforeEach(() => {
     global.ResizeObserver = class { observe() {} disconnect() {} };
     URL.createObjectURL = vi.fn(() => 'blob:analyzed-frame');
@@ -19,10 +19,12 @@ describe('per-camera analyzed-frame HUD', () => {
     authFetch.mockResolvedValue({ ok: true, headers, blob: async () => new Blob(['jpeg']) });
   });
 
-  it('shows the native preview with HUD off and the authoritative annotated frame with HUD on', async () => {
+  it('shows the authoritative annotated frame for a durable source without relying on HUD', async () => {
     render(<VideoFeed
       cameraId="cam-border-01"
       mediaUrl="blob:video"
+      sourceMode="durable"
+      expectedSessionId="session-1"
       telemetryStatus="LIVE"
       liveTracksData={{
         analysis_session_id: 'session-1', frame_index: 42, preview_available: true,
@@ -32,14 +34,23 @@ describe('per-camera analyzed-frame HUD', () => {
     />);
 
     await waitFor(() => expect(authFetch).toHaveBeenCalled());
-    expect(authFetch.mock.calls[0][0]).toContain('hud=false');
+    expect(authFetch.mock.calls[0][0]).toContain('hud=true');
     expect(screen.getByTitle('Toggle debug HUD')).toHaveAttribute('aria-pressed', 'false');
-    expect(document.querySelector('video')).toBeInTheDocument();
-    expect(screen.queryByAltText('Annotated analyzed frame for cam-border-01')).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByTitle('Toggle debug HUD'));
-    await waitFor(() => expect(authFetch.mock.calls.some(([url]) => url.includes('hud=true'))).toBe(true));
     await waitFor(() => expect(screen.getByAltText('Annotated analyzed frame for cam-border-01')).toBeInTheDocument());
-    expect(screen.getByTitle('Toggle debug HUD')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByText(/LATEST ANALYZED FRAME · FRAME 42/)).toBeInTheDocument();
+    expect(authFetch.mock.calls.every(([url]) => !url.includes('demo-telemetry'))).toBe(true);
+  });
+
+  it('does not fetch a frame for a stale session', async () => {
+    render(<VideoFeed
+      cameraId="cam-border-01"
+      mediaUrl="blob:video"
+      sourceMode="durable"
+      expectedSessionId="new-session"
+      telemetryStatus="LIVE"
+      liveTracksData={{ analysis_session_id: 'old-session', frame_index: 42, preview_available: true }}
+    />);
+    expect(authFetch).not.toHaveBeenCalled();
+    expect(screen.getByText(/SOURCE PREVIEW · NORMALIZED USER UPLOAD/)).toBeInTheDocument();
   });
 });

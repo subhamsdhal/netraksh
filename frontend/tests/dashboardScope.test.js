@@ -4,6 +4,7 @@ import {
   shouldAcceptTelemetry, telemetryStatusAt, latestEventForSession, formatLatestEvent,
   frameResponseMatchesTelemetry,
   isActiveTelemetry,
+  telemetryForSource,
 } from '../src/utils/dashboardScope';
 
 describe('dynamic dashboard camera scope', () => {
@@ -58,6 +59,13 @@ describe('camera telemetry correctness', () => {
     const telemetry = { timestamp: 10_000, expected_interval_ms: 2_000 };
     expect(isActiveTelemetry(telemetry, 16_999)).toBe(true);
     expect(isActiveTelemetry(telemetry, 18_000)).toBe(false);
+  });
+
+  it('rejects telemetry from a previous durable upload session', () => {
+    const source = { sourceMode: 'durable', sourceId: 'new-session', runState: 'WAKING' };
+    expect(telemetryForSource({ analysis_session_id: 'old-session' }, source)).toBeNull();
+    expect(telemetryForSource({ analysis_session_id: 'new-session', frame_index: 1 }, source)?.frame_index).toBe(1);
+    expect(telemetryForSource({ analysis_session_id: 'new-session' }, { ...source, runState: 'UPLOADING' })).toBeNull();
   });
 
   it('selects and labels only the latest event from the current session', () => {

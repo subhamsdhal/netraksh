@@ -7,6 +7,14 @@ export function isActiveTelemetry(telemetry, now = Date.now()) {
   return telemetryStatusAt(telemetry, now) === 'LIVE';
 }
 
+export function telemetryForSource(telemetry, sourceState) {
+  if (!telemetry) return null;
+  if (sourceState?.runState === 'UPLOADING') return null;
+  if (sourceState?.sourceMode !== 'durable') return telemetry;
+  const telemetrySession = telemetry.analysis_session_id || telemetry.stream_id;
+  return telemetrySession === sourceState.sourceId ? telemetry : null;
+}
+
 export function filterLiveEvents(events = [], activeCameraIds = [], cameraFilter = 'ALL') {
   const active = new Set(activeCameraIds.filter(Boolean));
   return events.filter((event) => active.has(event.camera_id)

@@ -148,6 +148,31 @@ def test_signed_source_is_cached_by_session_without_logging_url(monkeypatch, tmp
     assert "secret-signature" not in caplog.text
 
 
+def test_failed_durable_download_pauses_instead_of_running_bundled_fallback(monkeypatch, tmp_path):
+    session_id = str(uuid.uuid4())
+    monkeypatch.setenv("EDGE_SOURCE_CACHE_DIR", str(tmp_path))
+
+    class FailedStream:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def raise_for_status(self): raise httpx.HTTPError("unavailable")
+
+    monkeypatch.setattr(httpx, "stream", lambda *args, **kwargs: FailedStream())
+    _set_local_session("demo/videos/uploaded_demo.mp4")
+    hydrated = _materialize_remote_source({
+        "source_mode": "durable",
+        "video_source": "object://video-sessions/cam-border-01/source.mp4",
+        "download_url": "https://storage.example.test/source.mp4?secret-signature",
+        "video_session_id": session_id,
+        "scenario": "normal",
+    }, "cam-border-01")
+
+    assert _apply_control_sync(hydrated) is False
+    assert _scenario["current"] == "paused"
+    assert _scenario["video_session_id"] == session_id
+    assert _scenario["video_source"] == "demo/videos/uploaded_demo.mp4"
+
+
 def test_bundled_control_uses_the_worker_local_source_without_a_session(monkeypatch):
     monkeypatch.setattr(Path, "is_file", lambda self: str(self).replace("\\", "/") == "demo/videos/uploaded_demo.mp4")
     hydrated = _materialize_remote_source({

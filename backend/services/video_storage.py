@@ -81,6 +81,7 @@ def store_uploaded_session(
     metadata = {
         "session_id": _safe_session_id(session_id),
         "camera_id": _safe_camera_id(camera_id),
+        "source_mode": "durable",
         "source_name": source_name,
         "source_object_key": source_key,
         "preview_object_key": preview_key,

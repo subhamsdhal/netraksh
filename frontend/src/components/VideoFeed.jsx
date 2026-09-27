@@ -227,6 +227,8 @@ export default function VideoFeed({
   onVideoEnded,
   onStartAnalysis,
   onPauseAnalysis,
+  sourceMode,
+  expectedSessionId,
 }) {
   const containerRef = useRef(null);
   const videoRef = useRef(null);
@@ -242,9 +244,10 @@ export default function VideoFeed({
   const [hudVisible, setHudVisible] = useState(false);
   const [videoError, setVideoError] = useState(false);
   const [analyzedFrameUrl, setAnalyzedFrameUrl] = useState(null);
+  const isDurableSource = sourceMode === 'durable';
   const showAnalyzedFrame = Boolean(
-    hudVisible
-    && analyzedFrameUrl
+    analyzedFrameUrl
+    && (isDurableSource || hudVisible)
     && ['LIVE', 'STALE'].includes(telemetryStatus)
   );
 
@@ -260,14 +263,15 @@ export default function VideoFeed({
   useEffect(() => {
     const sessionId = liveTracksData?.analysis_session_id || liveTracksData?.stream_id;
     const frameIndex = liveTracksData?.frame_index;
+    if (expectedSessionId && sessionId !== expectedSessionId) return undefined;
     if (!cameraId || !sessionId || !Number.isFinite(frameIndex) || !liveTracksData?.preview_available) return undefined;
     let cancelled = false;
     let nextUrl = null;
     const params = new URLSearchParams({
       analysis_session_id: sessionId,
       frame_index: String(frameIndex),
-      hud: hudVisible ? 'true' : 'false',
-      cache_bust: `${sessionId}:${frameIndex}:${hudVisible ? 1 : 0}`,
+      hud: isDurableSource || hudVisible ? 'true' : 'false',
+      cache_bust: `${sessionId}:${frameIndex}:${isDurableSource || hudVisible ? 1 : 0}`,
     });
     authFetch(`/system/telemetry/frame/${encodeURIComponent(cameraId)}?${params.toString()}`)
       .then((response) => response.ok && frameResponseMatchesTelemetry(liveTracksData, response.headers) ? response.blob() : null)
@@ -281,7 +285,7 @@ export default function VideoFeed({
       })
       .catch(() => {});
     return () => { cancelled = true; if (nextUrl) URL.revokeObjectURL(nextUrl); };
-  }, [cameraId, liveTracksData, hudVisible]);
+  }, [cameraId, liveTracksData, hudVisible, isDurableSource, expectedSessionId]);
 
   useEffect(() => {
     if (!['OFFLINE', 'DISCONNECTED'].includes(telemetryStatus)) return;
@@ -291,11 +295,18 @@ export default function VideoFeed({
     });
   }, [telemetryStatus]);
 
+  useEffect(() => {
+    setAnalyzedFrameUrl((previous) => {
+      if (previous) URL.revokeObjectURL(previous);
+      return null;
+    });
+  }, [expectedSessionId]);
+
   // ─── LOCAL DETERMINISTIC DEMO CACHE LOGIC ────────────────────────────────────
   const [demoCache, setDemoCache] = useState(null);
 
   useEffect(() => {
-    if (mediaUrl && mediaUrl.includes('vtest.mp4')) {
+    if (sourceMode === 'legacy-demo' && mediaUrl && mediaUrl.includes('vtest.mp4')) {
       authFetch('/api/dashboard/video/demo-telemetry')
         .then(res => res.json())
         .then(data => {
@@ -306,7 +317,7 @@ export default function VideoFeed({
     } else {
       setDemoCache(null);
     }
-  }, [mediaUrl]);
+  }, [mediaUrl, sourceMode]);
 
   // Refresh freshness state four times per second for RTSP.
   // For local demo cache, we must render at frame rate to ensure perfect zero-latency visual sync.
@@ -424,24 +435,9 @@ export default function VideoFeed({
       return [];
     }
 
-    if (!liveTracksData?.tracks) return [];
-    
-    const trackVideoTime = liveTracksData.video_time ?? 0;
-
-    const delta = Math.abs(videoTime - trackVideoTime);
-
-    // STALE/TIME GUARD:
-    // Only render tracks if their stamped video_time is close to the 
-    // browser's authoritative video.currentTime.
-    // For deterministic demoCache, use tight 0.5s tolerance.
-    // For REAL asynchronous CPU Edge inference, processing speed is often slower 
-    // than real-time playback (e.g. 14 FPS vs 30 FPS), causing legitimate drift.
-    // We allow up to 120.0 seconds of bounded tolerance so tracks remain visible.
-    const tolerance = (demoCache && demoCache.length > 0) ? 0.5 : 120.0;
-    
-    if (delta > tolerance) return [];
-
-    return liveTracksData.tracks;
+    // Never project asynchronous telemetry over an independently advancing
+    // browser clock. Production boxes are burned into the exact analyzed JPEG.
+    return [];
   }, [liveTracksData, demoCache, tick, mediaUrl, showAnalyzedFrame]);
 
   /**
@@ -495,9 +491,9 @@ export default function VideoFeed({
             className="dashboard-video-title font-display font-bold text-main"
             style={{ fontSize: '1rem', letterSpacing: '0.1em' }}
           >
-            {liveTracksData ? 'TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL' : 'NO VIDEO SOURCE'}
+            {isUploading ? 'UPLOADING · VALIDATING · NORMALIZING VIDEO' : liveTracksData ? 'TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL' : 'NO VIDEO SOURCE'}
           </span>
-          {canUpload ? <div className="dashboard-video-upload" style={{
+          {canUpload && !isUploading ? <div className="dashboard-video-upload" style={{
             background: 'var(--color-ok)', color: '#000',
             fontFamily: 'var(--font-display)', fontWeight: 700,
             fontSize: '0.75rem', letterSpacing: '0.1em',
@@ -505,12 +501,21 @@ export default function VideoFeed({
             display: 'flex', alignItems: 'center', gap: '0.5rem',
           }}>
             <Play size={14} /> ADD VIDEO SOURCE
-          </div> : <span className="text-muted text-xs">Upload requires ADMIN or OPERATOR access</span>}
+          </div> : !isUploading && <span className="text-muted text-xs">Upload requires ADMIN or OPERATOR access</span>}
+          <span className="text-muted text-xs">SUPPORTED: MP4 · AVI · MOV · MKV · WEBM · M4V</span>
           {uploadError && <span className="text-danger text-xs text-center" role="alert">{uploadError}</span>}
         </div>
       </div>
     );
   }
+
+  const processedAtRaw = Number(liveTracksData?.processed_timestamp);
+  const processedAtMs = Number.isFinite(processedAtRaw)
+    ? (processedAtRaw > 1e12 ? processedAtRaw : processedAtRaw * 1000)
+    : null;
+  const processedAgeSeconds = processedAtMs == null
+    ? null
+    : Math.max(0, (Date.now() - processedAtMs) / 1000);
 
   // ── Video player + SVG overlay ──────────────────────────────────────────────
   return (
@@ -522,9 +527,9 @@ export default function VideoFeed({
         boxShadow: 'inset 0 0 50px rgba(0,0,0,0.8)',
       }}
     >
-      {/* HUD ON deliberately selects the authoritative annotated JPEG paired
-          with the current telemetry sample. HUD OFF returns to the clean
-          browser preview. */}
+      {/* Durable cloud sources always show the annotated JPEG paired with the
+          current telemetry sample. The video element is explicitly a source
+          preview while the worker is waking or no analyzed frame exists. */}
       {showAnalyzedFrame ? <img
         ref={previewRef}
         src={analyzedFrameUrl}
@@ -739,6 +744,29 @@ export default function VideoFeed({
           }}>
             LAST KNOWN FRAME · {telemetryStatus} TELEMETRY
           </span>
+        </div>
+      )}
+
+      {showAnalyzedFrame && (
+        <div style={{
+          position: 'absolute', left: '0.45rem', bottom: '0.45rem', zIndex: 20,
+          padding: '0.25rem 0.45rem', border: '1px solid rgba(74,222,128,0.55)',
+          background: 'rgba(2,6,23,0.86)', color: '#4ade80', borderRadius: '0.2rem',
+          fontFamily: 'ui-monospace, monospace', fontSize: '0.55rem', letterSpacing: '0.07em',
+          pointerEvents: 'none',
+        }}>
+          LATEST ANALYZED FRAME · FRAME {liveTracksData?.frame_index ?? '—'} · PROCESSED {processedAgeSeconds == null ? 'RECENTLY' : `${processedAgeSeconds.toFixed(1)}s AGO`} · EXACT TELEMETRY SAMPLE
+        </div>
+      )}
+      {!showAnalyzedFrame && mediaUrl && isDurableSource && (
+        <div style={{
+          position: 'absolute', left: '0.45rem', bottom: '0.45rem', zIndex: 20,
+          padding: '0.25rem 0.45rem', border: '1px solid rgba(56,189,248,0.55)',
+          background: 'rgba(2,6,23,0.86)', color: '#38bdf8', borderRadius: '0.2rem',
+          fontFamily: 'ui-monospace, monospace', fontSize: '0.55rem', letterSpacing: '0.07em',
+          pointerEvents: 'none',
+        }}>
+          SOURCE PREVIEW · NORMALIZED USER UPLOAD · WAITING FOR ANALYZED FRAME
         </div>
       )}
 

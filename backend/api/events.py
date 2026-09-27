@@ -203,6 +203,10 @@ async def current_correlation(
         return {"status": "WAITING_FOR_SECOND_CAMERA", "active_camera_ids": camera_ids}
     from backend.services.cross_camera import find_corroboration, DEMO_CORRELATION_WINDOW_SECONDS
     status, result = find_corroboration(latest, db)
+    if result and streams:
+        secondary_stream = db.query(Event.stream_id).filter(Event.id == result.other_event_id).scalar()
+        if secondary_stream not in streams:
+            status, result = "WAITING_FOR_SECOND_CAMERA", None
     payload = {
         "status": status,
         "active_camera_ids": camera_ids,

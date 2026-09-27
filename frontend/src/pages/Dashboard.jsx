@@ -7,7 +7,7 @@ import { WS_URL, BACKEND_URL, authFetch } from '../services/auth';
 import useAuth from '../hooks/useAuth';
 import { parseUtc } from '../utils/time';
 import { DEMO_CAMERA_LABELS, MAX_VISIBLE_CAMERAS, selectDemoCameraSlots } from '../utils/demoCameraSlots';
-import { deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry } from '../utils/dashboardScope';
+import { deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
 import { bundledSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 
@@ -131,7 +131,15 @@ export default function Dashboard() {
 
   const requestScenario = async (cameraId, payload) => {
     if (!payload) return null;
-    if (cameraId) updateCameraMedia(cameraId, { edgeStatus: 'WAKING' });
+    if (cameraId) {
+      updateCameraMedia(cameraId, { edgeStatus: 'WAKING' });
+      setSlotSources((current) => ({
+        ...current,
+        [cameraId]: current[cameraId]
+          ? { ...current[cameraId], runState: payload.scenario === 'paused' ? 'PAUSED' : 'WAKING' }
+          : current[cameraId],
+      }));
+    }
     try {
       const response = await authFetch('/api/dashboard/video/scenario', {
         method: 'POST',
@@ -189,6 +197,12 @@ export default function Dashboard() {
     ...Object.keys(metrics),
     ...events.map(event => event.camera_id).filter(Boolean),
   ]));
+  const scopedLiveTracks = useMemo(() => Object.fromEntries(
+    Object.entries(liveTracks).map(([cameraId, telemetry]) => [
+      cameraId,
+      telemetryForSource(telemetry, slotSources[cameraId]),
+    ]),
+  ), [liveTracks, slotSources]);
   const cameraModels = useMemo(() => cameraIds.map(cameraId => {
     const camera = cameras.find(item => item.camera_id === cameraId) || {};
     const rawName = String(camera.name || '').trim();
@@ -207,19 +221,19 @@ export default function Dashboard() {
     const friendlyName = rawName && !/^unknown[-_]/i.test(rawName)
       ? rawName
       : friendlyFromId || 'Camera';
-    const receivedAt = liveTracks[cameraId]?.timestamp;
-    const status = telemetryStatusAt(liveTracks[cameraId], now);
+    const receivedAt = scopedLiveTracks[cameraId]?.timestamp;
+    const status = telemetryStatusAt(scopedLiveTracks[cameraId], now);
     return {
       cameraId,
       friendlyName,
       location: camera.location || DEMO_CAMERA_LABELS[cameraId]?.location || 'Unspecified location',
       displayId: cameraId.toUpperCase(),
-      streamId: liveTracks[cameraId]?.stream_id || null,
+      streamId: scopedLiveTracks[cameraId]?.stream_id || null,
       sourceType: 'EDGE CAMERA',
       status,
       lastSeen: receivedAt || null,
     };
-  }), [cameraIds, cameras, liveTracks, now]);
+  }), [cameraIds, cameras, scopedLiveTracks, now]);
   const visibleCameraIds = useMemo(
     () => selectDemoCameraSlots(cameraIds, demoSlots),
     [cameraIds.join('|'), demoSlots.join('|')],
@@ -227,8 +241,22 @@ export default function Dashboard() {
   const dedicatedDemoView = visibleCameraIds.filter(Boolean).length > 0
     && visibleCameraIds.filter(Boolean).every((id) => Boolean(DEMO_CAMERA_LABELS[id]));
   const activeCameraIds = useMemo(() => visibleCameraIds.filter((id) => {
-    return isActiveTelemetry(liveTracks[id], now);
-  }), [visibleCameraIds.join('|'), liveTracks, now]);
+    return isActiveTelemetry(scopedLiveTracks[id], now);
+  }), [visibleCameraIds.join('|'), scopedLiveTracks, now]);
+  useEffect(() => {
+    if (!activeCameraIds.length) return;
+    setSlotSources((current) => {
+      let changed = false;
+      const next = { ...current };
+      activeCameraIds.forEach((cameraId) => {
+        if (next[cameraId] && next[cameraId].runState !== 'LIVE') {
+          next[cameraId] = { ...next[cameraId], runState: 'LIVE' };
+          changed = true;
+        }
+      });
+      return changed ? next : current;
+    });
+  }, [activeCameraIds.join('|')]);
   const dashboardMode = deriveDashboardMode(activeCameraIds);
   const reliabilityScopeCameraId = reliabilityCameraId && activeCameraIds.includes(reliabilityCameraId)
     ? reliabilityCameraId : activeCameraIds[0] || null;
@@ -364,13 +392,13 @@ export default function Dashboard() {
   }, [dashboardMode, activeCameraIds.join('|')]);
   const selectedSessionId = selectedCameraId ? cameraMedia[selectedCameraId]?.sessionId : null;
   const reportingCameraId = selectedSessionId
-    ? Object.entries(liveTracks).find(([, telemetry]) => telemetry?.stream_id === selectedSessionId)?.[0]
+    ? Object.entries(scopedLiveTracks).find(([, telemetry]) => telemetry?.stream_id === selectedSessionId)?.[0]
     : null;
   const selectedCameraHasActiveStream = selectedCameraId
-    && (!selectedSessionId || liveTracks[selectedCameraId]?.stream_id === selectedSessionId);
+    && (!selectedSessionId || scopedLiveTracks[selectedCameraId]?.stream_id === selectedSessionId);
   const activeCameraId = (selectedCameraHasActiveStream ? selectedCameraId : reportingCameraId)
     || selectedCameraId
-    || Object.keys(liveTracks)[0]
+    || Object.keys(scopedLiveTracks).find((cameraId) => scopedLiveTracks[cameraId])
     || cameras.find(camera => camera.health_state)?.camera_id
     || cameraIds[0]
     || null;
@@ -383,15 +411,16 @@ export default function Dashboard() {
   const videoSessionId = activeMediaState.sessionId || null;
   const uploadError = activeMediaState.uploadError || null;
   const playbackEnded = Boolean(activeMediaState.playbackEnded);
-  const activeTelemetryReceivedAt = activeCameraId ? liveTracks[activeCameraId]?.timestamp : null;
+  const activeTelemetryReceivedAt = activeCameraId ? scopedLiveTracks[activeCameraId]?.timestamp : null;
   const telemetryAgeMs = activeTelemetryReceivedAt == null ? null : now - activeTelemetryReceivedAt;
-  const analysisState = activeCameraId ? liveTracks[activeCameraId]?.analysis_state : null;
+  const analysisState = activeCameraId ? scopedLiveTracks[activeCameraId]?.analysis_state : null;
   const telemetryStatus = !isConnected ? 'DISCONNECTED'
     : telemetryAgeMs == null ? 'WAITING'
-    : telemetryStatusAt(liveTracks[activeCameraId], now);
+    : telemetryStatusAt(scopedLiveTracks[activeCameraId], now);
   const activeMetrics = activeCameraId ? metrics[activeCameraId] : null;
   const metricTimestampMs = activeMetrics?.timestamp ? Date.parse(activeMetrics.timestamp) : NaN;
-  const metricsFresh = Number.isFinite(metricTimestampMs) && now - metricTimestampMs < 30000;
+  const metricsFresh = Boolean(activeCameraId && scopedLiveTracks[activeCameraId])
+    && Number.isFinite(metricTimestampMs) && now - metricTimestampMs < 30000;
 
   const eventTimestampMs = (value) => {
     if (!value) return NaN;
@@ -420,7 +449,7 @@ export default function Dashboard() {
     const refreshCorrelation = async () => {
       try {
         const params = new URLSearchParams({ active_camera_ids: activeCameraIds.join(',') });
-        const streams = activeCameraIds.map((id) => liveTracks[id]?.stream_id).filter(Boolean);
+        const streams = activeCameraIds.map((id) => scopedLiveTracks[id]?.stream_id).filter(Boolean);
         if (streams.length) params.set('stream_ids', streams.join(','));
         const response = await authFetch(`/events/correlation/current?${params.toString()}`);
         if (mounted && response.ok) setCorrelationState(await response.json());
@@ -429,7 +458,7 @@ export default function Dashboard() {
     refreshCorrelation();
     const id = setInterval(refreshCorrelation, 5000);
     return () => { mounted = false; clearInterval(id); };
-  }, [activeCameraIds.join('|'), liveTracks]);
+  }, [activeCameraIds.join('|'), scopedLiveTracks]);
 
 
   const handleFileUpload = async (cameraId, e) => {
@@ -450,13 +479,21 @@ export default function Dashboard() {
     updateCameraMedia(cameraId, { uploadError: null });
 
     setLatestEvent(null);
-    const nextUrl = URL.createObjectURL(file);
     const previousUrl = cameraMediaRef.current[cameraId]?.mediaUrl;
     if (previousUrl?.startsWith('blob:')) URL.revokeObjectURL(previousUrl);
-    // Avoid presenting a known-incompatible AVI/DivX blob while the backend
-    // creates the browser preview. Native MP4 files can still render instantly.
+    setSlotSources((current) => ({
+      ...current,
+      [cameraId]: {
+        sourceMode: 'durable',
+        sourceId: null,
+        sourceName: file.name,
+        runState: 'UPLOADING',
+      },
+    }));
+    // Never preview the raw local blob. The first playable URL is the exact
+    // normalized MP4 that the cloud worker will analyze.
     updateCameraMedia(cameraId, {
-      mediaUrl: file.type === 'video/mp4' ? nextUrl : null,
+      mediaUrl: null,
       mediaType: 'video',
       isUploading: true,
       sessionId: null,
@@ -494,12 +531,7 @@ export default function Dashboard() {
             body: JSON.stringify({
               session_id: uploaded.session_id,
               source_name: uploaded.source_name,
-              // A direct MP4 preview uses the original upload when ffmpeg is
-              // unavailable; only tell the analyzer about a converted file
-              // that the server actually created.
-              preview_name: uploaded.preview_url && uploaded.ffmpeg_available
-                ? `uploaded_${uploaded.session_id}_preview.mp4`
-                : null,
+              preview_name: null,
               camera_id: cameraId,
             })
           });
@@ -512,7 +544,6 @@ export default function Dashboard() {
       }
 
       if (uploaded.status === 'ok_no_preview') {
-        URL.revokeObjectURL(nextUrl);
         updateCameraMedia(cameraId, {
           mediaUrl: null,
           sessionId: uploaded.session_id || null,
@@ -526,7 +557,6 @@ export default function Dashboard() {
         if (mediaRes.ok) {
             const blob = await mediaRes.blob();
             const blobUrl = URL.createObjectURL(blob);
-            URL.revokeObjectURL(nextUrl);
             updateCameraMedia(cameraId, { mediaUrl: blobUrl, uploadError: null });
         } else {
             throw new Error('Failed to load video media.');
@@ -536,7 +566,7 @@ export default function Dashboard() {
       }
     } catch (error) {
       console.error('Upload error:', error);
-      URL.revokeObjectURL(nextUrl);
+      setSlotSources((current) => ({ ...current, [cameraId]: null }));
       updateCameraMedia(cameraId, {
         mediaUrl: null,
         uploadError: error.message || 'Video upload failed.',
@@ -575,14 +605,19 @@ export default function Dashboard() {
     if (visibleCameraSet.size && !visibleCameraSet.has(e.camera_id)) return;
     if (!visibleCameraSet.size) return;
     if (eventCameraFilter !== 'ALL' && e.camera_id !== eventCameraFilter) return;
-    // Prefer the exact stream contract. A camera/time fallback is allowed
-    // only for genuinely legacy events that have no stream_id and only while
-    // this browser has a known upload start time.
-    const contextSessionId = dedicatedDemoView ? null : videoSessionId;
+    // Every camera is scoped to its own current analysis session. This keeps
+    // prior demo/history events out even when both fixed SIH camera IDs are in
+    // view at the same time.
+    const sourceTelemetry = scopedLiveTracks[e.camera_id];
+    const contextSessionId = sourceTelemetry?.analysis_session_id
+      || sourceTelemetry?.stream_id
+      || slotSources[e.camera_id]?.sourceId
+      || null;
+    const contextStartTime = cameraMedia[e.camera_id]?.sessionStartTime || null;
     if (contextSessionId && e.stream_id && e.stream_id !== contextSessionId) return;
     if (contextSessionId && !e.stream_id) {
       const timestamp = eventTimestampMs(e.timestamp);
-      if (!sessionStartTime || !Number.isFinite(timestamp) || timestamp < sessionStartTime) return;
+      if (!contextStartTime || !Number.isFinite(timestamp) || timestamp < contextStartTime) return;
     }
     
     // Deduplication
@@ -593,15 +628,15 @@ export default function Dashboard() {
     }
     
     // Legacy fallback applies only when no session contract is available.
-    if (!contextSessionId && !dedicatedDemoView) {
+    if (!contextSessionId) {
       const timestamp = eventTimestampMs(e.timestamp);
-      if (!Number.isFinite(timestamp) || timestamp < sessionStartTime) return;
+      if (!contextStartTime || !Number.isFinite(timestamp) || timestamp < contextStartTime) return;
     }
     contextualEvents.push(e);
   });
 
   const currentSessionEvents = contextualEvents.filter((event) => {
-    const telemetry = liveTracks[event.camera_id];
+    const telemetry = scopedLiveTracks[event.camera_id];
     const sessionId = telemetry?.analysis_session_id || telemetry?.stream_id;
     return Boolean(sessionId && event.stream_id === sessionId);
   });
@@ -634,7 +669,7 @@ export default function Dashboard() {
   const sceneCondition = reliabilityEvent?.scene_condition;
   const decisionMeta = DECISION_META[reliabilityEvent?.decision_state] || null;
   const whyExplanation = explainDecision(reliabilityEvent ? parseDecisionReason(reliabilityEvent) : null);
-  let liveTelemetry = !activeCameraId ? null : liveTracks[activeCameraId];
+  let liveTelemetry = !activeCameraId ? null : scopedLiveTracks[activeCameraId];
   if (!dedicatedDemoView && liveTelemetry && videoSessionId && liveTelemetry.stream_id && liveTelemetry.stream_id !== videoSessionId) {
     liveTelemetry = null;
   }
@@ -727,8 +762,8 @@ export default function Dashboard() {
           : Number.isFinite(health[activeCameraId]?.fps_actual)
             ? Number(health[activeCameraId].fps_actual).toFixed(2)
             : 'N/A'}</strong></div>
-        <div><span>LIVE TRACKS</span><strong>{telemetryStatus === 'LIVE' ? (liveTracks[activeCameraId]?.track_count ?? 0) : 'N/A'}</strong></div>
-        <div><span>FRAME</span><strong>{telemetryStatus === 'LIVE' && liveTracks[activeCameraId]?.frame_width ? `${liveTracks[activeCameraId].frame_width}×${liveTracks[activeCameraId].frame_height}` : 'N/A'}</strong></div>
+        <div><span>LIVE TRACKS</span><strong>{telemetryStatus === 'LIVE' ? (scopedLiveTracks[activeCameraId]?.track_count ?? 0) : 'N/A'}</strong></div>
+        <div><span>FRAME</span><strong>{telemetryStatus === 'LIVE' && scopedLiveTracks[activeCameraId]?.frame_width ? `${scopedLiveTracks[activeCameraId].frame_width}×${scopedLiveTracks[activeCameraId].frame_height}` : 'N/A'}</strong></div>
         <div><span>LAST TELEMETRY</span><strong>{telemetryAgeMs == null ? 'Never' : `${Math.max(0, telemetryAgeMs / 1000).toFixed(1)}s ago`}</strong></div>
       </div>
 
@@ -736,7 +771,7 @@ export default function Dashboard() {
         {Array.from({ length: MAX_VISIBLE_CAMERAS }, (_, slotIndex) => {
           const cameraId = visibleCameraIds[slotIndex];
           const camera = cameraModels.find(item => item.cameraId === cameraId) || null;
-          const telemetry = cameraId ? liveTracks[cameraId] : null;
+          const telemetry = cameraId ? scopedLiveTracks[cameraId] : null;
           const sessionId = telemetry?.analysis_session_id || telemetry?.stream_id;
           const cameraEvents = displayEvents.filter(event => event.camera_id === cameraId);
           const latestCameraEvent = latestEventForSession(cameraEvents, cameraId, sessionId);
@@ -777,6 +812,8 @@ export default function Dashboard() {
                   <h2>{title}</h2>
                   <p>{cameraId ? `${cameraId.toUpperCase()} · ${locationLabel}` : 'No source selected'}</p>
                   {sourceState?.sourceName && <p className="dashboard-source-name">SOURCE: {sourceState.sourceName}</p>}
+                  {sourceState?.sourceMode && <p className="dashboard-source-name">MODE: {sourceState.sourceMode === 'durable' ? 'USER UPLOAD' : 'BUNDLED DEMO'} · ANALYSIS: {sourceState.runState || 'LOADED'}</p>}
+                  <p className="dashboard-source-name">SUPPORTED: MP4 · AVI · MOV · MKV · WEBM · M4V</p>
                   {mediaState.edgeStatus === 'WAKING' && !telemetryAvailable && <p className="dashboard-source-name">WAKING AI WORKER...</p>}
                 </div>
                 <div className="dashboard-camera-card-controls">
@@ -830,6 +867,8 @@ export default function Dashboard() {
                     isUploading={Boolean(mediaState.isUploading)}
                     canUpload={canUpload}
                     uploadError={mediaState.uploadError || null}
+                    sourceMode={sourceState?.sourceMode || null}
+                    expectedSessionId={sourceState?.sourceId || null}
                     onVideoEnded={() => updateCameraMedia(cameraId, { playbackEnded: true })}
                   />
                 ) : (
@@ -943,6 +982,8 @@ export default function Dashboard() {
               isUploading={isUploading}
               canUpload={canUpload}
               uploadError={uploadError}
+              sourceMode={slotSources[activeCameraId]?.sourceMode || null}
+              expectedSessionId={slotSources[activeCameraId]?.sourceId || null}
               onVideoEnded={() => updateCameraMedia(activeCameraId, { playbackEnded: true })}
             />
           </div>

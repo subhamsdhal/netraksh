@@ -1,5 +1,6 @@
 import asyncio
 import io
+from pathlib import Path
 
 import pytest
 from datetime import datetime, timezone
@@ -64,24 +65,97 @@ def test_dashboard_uploads_use_session_isolated_files(tmp_path, monkeypatch):
     """A running worker must never hold the destination of the next upload."""
     monkeypatch.setattr(dashboard, "_videos_dir", lambda: tmp_path)
     monkeypatch.setattr(dashboard, "_ffmpeg_bin", lambda: None)
+    monkeypatch.setattr(dashboard, "_ffprobe_bin", lambda: None)
 
     first_payload = b"\x00\x00\x00\x18ftypmp42first"
     second_payload = b"\x00\x00\x00\x18ftypmp42second"
     first = asyncio.run(
         dashboard.upload_dashboard_video(_video_upload("first.mp4", first_payload), _user={})
     )
-    first_source = first["source_name"]
+    first_source = first["normalized_name"]
 
     second = asyncio.run(
         dashboard.upload_dashboard_video(_video_upload("second.mp4", second_payload), _user={})
     )
-    second_source = second["source_name"]
+    second_source = second["normalized_name"]
 
     assert first["session_id"] != second["session_id"]
     assert first_source != second_source
     assert (tmp_path / first_source).read_bytes() == first_payload
     assert (tmp_path / second_source).read_bytes() == second_payload
     assert dashboard._demo_state["video_preview"] is None
+
+
+def test_durable_upload_stores_only_the_normalized_mp4(tmp_path, monkeypatch):
+    stored = []
+    monkeypatch.setattr(dashboard, "_videos_dir", lambda: tmp_path)
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "_ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr(dashboard, "_ffprobe_bin", lambda: "ffprobe")
+    monkeypatch.setattr(dashboard, "_probe_video", lambda *_args: {"streams": [{"codec_type": "video"}]})
+    monkeypatch.setattr(dashboard, "_normalize_video", lambda _src, dst, _bin: dst.write_bytes(b"normalized-mp4"))
+    monkeypatch.setattr(
+        dashboard,
+        "store_uploaded_session",
+        lambda **kwargs: stored.append({**kwargs, "source_bytes": kwargs["source_path"].read_bytes()}),
+    )
+
+    result = asyncio.run(dashboard.upload_dashboard_video(
+        _video_upload("Evaluator Clip.MP4", b"\x00\x00\x00\x18ftypmp42source"),
+        camera_id="cam-border-01",
+        _user={},
+    ))
+
+    assert result["source_name"] == "Evaluator Clip.MP4"
+    assert result["normalized_name"].endswith(".mp4")
+    assert stored[0]["source_name"] == "Evaluator Clip.MP4"
+    assert stored[0]["content_type"] == "video/mp4"
+    assert stored[0]["preview_path"] is None
+    assert stored[0]["source_bytes"] == b"normalized-mp4"
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("name,payload", [
+    ("camera.avi", b"RIFF\x00\x00\x00\x00AVI source"),
+    ("camera.webm", b"\x1a\x45\xdf\xa3webm source"),
+    ("camera.mkv", b"\x1a\x45\xdf\xa3mkv source"),
+])
+def test_supported_containers_are_probed_and_normalized(name, payload, tmp_path, monkeypatch):
+    monkeypatch.setattr(dashboard, "_videos_dir", lambda: tmp_path)
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: False)
+    monkeypatch.setattr(dashboard, "_ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr(dashboard, "_ffprobe_bin", lambda: "ffprobe")
+    probes = []
+    monkeypatch.setattr(dashboard, "_probe_video", lambda path, _bin: probes.append(path.suffix))
+    monkeypatch.setattr(dashboard, "_normalize_video", lambda _src, dst, _bin: dst.write_bytes(b"mp4"))
+
+    result = asyncio.run(dashboard.upload_dashboard_video(_video_upload(name, payload), _user={}))
+
+    assert probes == [Path(name).suffix]
+    assert result["normalized_name"].endswith(".mp4")
+    assert (tmp_path / result["normalized_name"]).read_bytes() == b"mp4"
+
+
+def test_oversize_normalized_output_is_rejected_and_temporary_files_are_cleaned(tmp_path, monkeypatch):
+    monkeypatch.setattr(dashboard, "_videos_dir", lambda: tmp_path)
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "_ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr(dashboard, "_ffprobe_bin", lambda: "ffprobe")
+    monkeypatch.setattr(dashboard, "_probe_video", lambda *_args: {})
+
+    def reject_output(_src, destination, _bin):
+        destination.write_bytes(b"partial")
+        raise dashboard.HTTPException(status_code=413, detail="Video is too large for the free cloud demo after normalization. Please use a shorter clip.")
+
+    monkeypatch.setattr(dashboard, "_normalize_video", reject_output)
+    with pytest.raises(dashboard.HTTPException) as exc:
+        asyncio.run(dashboard.upload_dashboard_video(
+            _video_upload("large.mp4", b"\x00\x00\x00\x18ftypmp42source"),
+            camera_id="cam-border-01",
+            _user={},
+        ))
+    assert exc.value.status_code == 413
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_internal_sync_keeps_camera_sessions_separate(tmp_path, monkeypatch):
@@ -222,7 +296,7 @@ def test_bundled_current_video_and_internal_sync_never_sign_media(monkeypatch):
 
     assert current["source_mode"] == "bundled"
     assert current["session_id"] is None
-    assert "preview_url" not in current
+    assert current["preview_url"] == "/api/dashboard/video/current/media"
     assert sync["source_mode"] == "bundled"
     assert sync["video_source"] == dashboard._BUNDLED_SOURCE
     assert sync["video_session_id"] is None

@@ -26,6 +26,7 @@ Security:
 from __future__ import annotations
 
 import logging
+import json
 import os
 import shutil
 import subprocess
@@ -84,6 +85,7 @@ _ALLOWED_EXTENSIONS: frozenset[str] = frozenset({
 
 _ALLOWED_MIME_PREFIX = "video/"
 _MAX_VIDEO_UPLOAD_BYTES = 200 * 1024 * 1024
+_MAX_DURABLE_VIDEO_BYTES = 49_000_000
 
 # Relative to repo root (where uvicorn is launched)
 _VIDEOS_SUBDIR = Path("demo") / "videos"
@@ -117,6 +119,62 @@ def _confined_media_path(reference: str, *, name_only: bool = False) -> Path:
 def _ffmpeg_bin() -> str | None:
     """Return ffmpeg binary path if available on PATH, else None."""
     return shutil.which("ffmpeg")
+
+
+def _ffprobe_bin() -> str | None:
+    """Return ffprobe installed alongside the production ffmpeg package."""
+    return shutil.which("ffprobe")
+
+
+def _probe_video(path: Path, ffprobe: str) -> dict:
+    """Decode-probe a candidate and require at least one real video stream."""
+    result = subprocess.run(
+        [
+            ffprobe, "-v", "error", "-show_entries",
+            "format=format_name,duration:stream=codec_type,codec_name,width,height",
+            "-of", "json", str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise HTTPException(status_code=400, detail="The uploaded file is not a decodable supported video")
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Unable to inspect the uploaded video") from exc
+    if not any(stream.get("codec_type") == "video" for stream in payload.get("streams", [])):
+        raise HTTPException(status_code=400, detail="The uploaded file does not contain a video stream")
+    return payload
+
+
+def _normalize_video(source: Path, destination: Path, ffmpeg: str) -> None:
+    """Create the one browser/worker H.264 source used by the cloud pipeline."""
+    result = subprocess.run(
+        [
+            ffmpeg, "-y", "-v", "error", "-i", str(source),
+            "-map", "0:v:0",
+            "-vf", "scale=w='min(960,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+            "-threads", "1",
+            "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart",
+            str(destination),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    if result.returncode != 0 or not destination.is_file() or destination.stat().st_size == 0:
+        logger.warning("[Dashboard] ffmpeg normalization failed (exit=%s)", result.returncode)
+        raise HTTPException(status_code=422, detail="Video normalization failed. Please use a shorter MP4, AVI, MOV, MKV, WebM, or M4V clip.")
+    if destination.stat().st_size >= _MAX_DURABLE_VIDEO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Video is too large for the free cloud demo after normalization. Please use a shorter clip.",
+        )
 
 
 def _durable_video_enabled() -> bool:
@@ -367,6 +425,7 @@ async def get_internal_sync(request: Request, _edge=Depends(require_edge_auth)):
                 "source_mode": "durable",
                 "download_url": signed_media_url(source_key) if source_key else None,
                 "video_session_id": durable.get("session_id"),
+                "source_name": durable.get("source_name"),
                 "scenario": durable.get("scenario", "paused"),
                 "video_time": durable.get("video_time", 0.0),
                 "video_time_updated_at": durable.get("video_time_updated_at", 0.0),
@@ -583,39 +642,21 @@ async def upload_dashboard_video(
     camera_id: str | None = Form(None),
     _user=Depends(require_operator_or_admin),
 ):
-    """
-    Upload a presentation video for the dashboard and edge pipeline.
-    Requires OPERATOR or ADMIN role.
-
-    ffmpeg behaviour:
-      - If ffmpeg is installed: converts to H.264/AAC MP4 (yuv420p, faststart).
-      - If ffmpeg is absent AND file is MP4: serves it directly.
-      - If ffmpeg is absent AND file is non-MP4: saves for edge processing but
-        returns ok_no_preview with a clear actionable message; browser cannot play.
-
-    Returns:
-      {
-        "status": "ok" | "ok_no_preview",
-        "preview_url": "/demo/videos/..." | null,
-        "session_id": "<uuid>",
-        "source_name": "<filename>",
-        "ffmpeg_available": true | false,
-        "message": "<human-readable status>"
-      }
-    """
-    # --- Validate MIME type ---
+    """Validate and normalize one upload for both browser and edge analysis."""
     content_type = (file.content_type or "").lower()
-    if not content_type.startswith(_ALLOWED_MIME_PREFIX):
+    # Browsers on Windows sometimes omit the MIME type.  The extension, magic
+    # bytes and ffprobe are authoritative; a declared non-video type is not.
+    if content_type and not content_type.startswith(_ALLOWED_MIME_PREFIX):
         raise HTTPException(
             status_code=400,
             detail=f"Only video files are accepted (received Content-Type: {content_type or 'unknown'})",
         )
 
-    # --- Validate extension ---
-    original_name = file.filename or "upload"
+    original_name = "".join(
+        character for character in Path(file.filename or "upload").name
+        if character.isprintable()
+    ).strip()[:255] or "upload"
     ext = Path(original_name).suffix.lower()
-    if not ext:
-        ext = ".mp4"
     if ext not in _ALLOWED_EXTENSIONS:
         raise HTTPException(
             status_code=400,
@@ -624,21 +665,22 @@ async def upload_dashboard_video(
                 f"Allowed: {', '.join(sorted(_ALLOWED_EXTENSIONS))}"
             ),
         )
+    if _durable_video_enabled() and not camera_id:
+        raise HTTPException(status_code=400, detail="camera_id is required for durable video uploads")
 
-    # --- Ensure target directory ---
     vdir = _videos_dir()
     vdir.mkdir(parents=True, exist_ok=True)
-
-    # A worker can still have the previous source open while a new upload
-    # arrives.  Reusing one fixed filename is therefore a Windows sharing
-    # violation race.  Give every session its own server-controlled paths so
-    # the active reader and the next writer never contend for the same file.
     new_session_id = str(uuid.uuid4())
-    target_name = f"uploaded_{new_session_id}{ext}"
-    target_path = vdir / target_name
+    incoming_path = vdir / f"incoming_{new_session_id}{ext}"
+    normalized_name = f"uploaded_{new_session_id}.mp4"
+    normalized_path = vdir / normalized_name
+    durable = _durable_video_enabled()
+    ffmpeg = _ffmpeg_bin()
+    ffprobe = _ffprobe_bin()
+
     try:
         total = 0
-        with open(target_path, "wb") as buf:
+        with open(incoming_path, "wb") as buf:
             while True:
                 chunk = await file.read(1024 * 1024)
                 if not chunk:
@@ -649,116 +691,84 @@ async def upload_dashboard_video(
                 buf.write(chunk)
         if total == 0:
             raise HTTPException(status_code=400, detail="Video upload is empty")
-        with open(target_path, "rb") as probe:
+        with open(incoming_path, "rb") as probe:
             signature = probe.read(16)
-        valid_signature = (ext in {".mp4", ".m4v", ".mov"} and b"ftyp" in signature) or (ext == ".avi" and signature[:4] == b"RIFF") or (ext in {".webm", ".mkv"} and signature[:4] == b"\x1a\x45\xdf\xa3")
+        valid_signature = (
+            (ext in {".mp4", ".m4v", ".mov"} and b"ftyp" in signature)
+            or (ext == ".avi" and signature[:4] == b"RIFF")
+            or (ext in {".webm", ".mkv"} and signature[:4] == b"\x1a\x45\xdf\xa3")
+            or ext in {".flv", ".wmv", ".mpeg", ".mpg", ".3gp", ".ogv", ".ts", ".mts", ".m2ts"}
+        )
         if not valid_signature:
-            target_path.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail="Uploaded file does not match a supported video signature")
-    except OSError as exc:
-        logger.error(f"[Dashboard] Failed to save uploaded video: {exc}")
-        raise HTTPException(status_code=500, detail=f"Failed to save video file: {exc}")
 
-    logger.info(f"[Dashboard] Video saved: {target_path} ({target_path.stat().st_size} bytes)")
+        if durable and (not ffmpeg or not ffprobe):
+            raise HTTPException(status_code=503, detail="Cloud video normalization is temporarily unavailable")
 
-    # --- Attempt ffmpeg conversion to browser-compatible H.264 MP4 ---
-    ffmpeg = _ffmpeg_bin()
-    preview_name = f"uploaded_{new_session_id}_preview.mp4"
-    preview_path = vdir / preview_name
-    preview_url: str | None = None
+        if ffprobe:
+            _probe_video(incoming_path, ffprobe)
 
-    if ffmpeg:
-        try:
-            result = subprocess.run(
-                [
-                    ffmpeg, "-y",
-                    "-i", str(target_path),
-                    "-c:v", "libx264",
-                    "-preset", "ultrafast",
-                    "-pix_fmt", "yuv420p",
-                    "-c:a", "aac",
-                    "-movflags", "+faststart",
-                    str(preview_path),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=180,
-                check=False,
-            )
-            if result.returncode == 0 and preview_path.exists() and preview_path.stat().st_size > 0:
-                preview_url = f"/api/dashboard/video/media/{new_session_id}"
-                logger.info(f"[Dashboard] ffmpeg preview created: {preview_path}")
-            else:
-                logger.warning(
-                    f"[Dashboard] ffmpeg exited {result.returncode}. "
-                    f"stderr: {result.stderr[-400:]}"
-                )
-        except (OSError, subprocess.SubprocessError) as exc:
-            logger.warning(f"[Dashboard] ffmpeg conversion failed: {exc}")
-    # If no ffmpeg conversion but original is already MP4, serve directly
-    if not preview_url and ext == ".mp4":
-        preview_url = f"/api/dashboard/video/media/{new_session_id}"
-        logger.info("[Dashboard] Serving original MP4 directly (ffmpeg not installed)")
+        if ffmpeg:
+            _normalize_video(incoming_path, normalized_path, ffmpeg)
+        elif ext == ".mp4":
+            # Development-only compatibility. Production durable uploads must
+            # pass through ffmpeg so browser playback and inference cannot split.
+            shutil.copyfile(incoming_path, normalized_path)
+        else:
+            raise HTTPException(status_code=503, detail="ffmpeg is required to normalize this video format")
 
-    if _durable_video_enabled():
-        if not camera_id:
-            target_path.unlink(missing_ok=True)
-            preview_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail="camera_id is required for durable video uploads")
-        try:
+        normalized_size = normalized_path.stat().st_size
+        if durable:
             store_uploaded_session(
                 camera_id=camera_id,
                 session_id=new_session_id,
-                source_path=target_path,
-                preview_path=preview_path if preview_path.is_file() else None,
-                source_name=target_path.name,
-                content_type=content_type,
+                source_path=normalized_path,
+                preview_path=None,
+                source_name=original_name,
+                content_type="video/mp4",
             )
-        except Exception:
-            logger.exception("[Dashboard] Durable video upload failed")
-            raise HTTPException(status_code=502, detail="Durable video storage failed")
-        finally:
-            target_path.unlink(missing_ok=True)
-            preview_path.unlink(missing_ok=True)
-        if preview_url:
             preview_url = f"/api/dashboard/video/media/{new_session_id}?camera_id={camera_id}"
+        else:
+            preview_url = f"/api/dashboard/video/media/{new_session_id}"
 
-    # Do NOT update shared demo state here so edge runner does not start immediately.
-    # The frontend will call /analyze to trigger playback.
-    if camera_id:
-        _demo_state.setdefault("uploaded_sources", {}).setdefault(camera_id, {})[new_session_id] = {
-            "source_name": target_path.name,
-            "preview_name": preview_name if preview_path.is_file() else None,
-        }
-    
-    if preview_url:
+        if camera_id:
+            _demo_state.setdefault("uploaded_sources", {}).setdefault(camera_id, {})[new_session_id] = {
+                "source_name": normalized_name,
+                "original_name": original_name,
+                "preview_name": None,
+            }
+
+        logger.info(
+            "[Dashboard] Normalized upload accepted camera_id=%s session=%s bytes=%s",
+            camera_id,
+            new_session_id[:8],
+            normalized_size,
+        )
         return {
             "status": "ok",
             "preview_url": preview_url,
             "session_id": new_session_id,
-            "source_name": target_path.name,
+            "source_name": original_name,
+            "normalized_name": normalized_name,
             "camera_id": camera_id,
             "ffmpeg_available": bool(ffmpeg),
-            "message": (
-                "Video accepted. Edge processor will pick up the new source "
-                "within 5 seconds and begin generating telemetry."
-            ),
+            "normalized_size_bytes": normalized_size,
+            "message": "Video normalized and stored. Press START to wake analysis for this camera.",
         }
-
-    # Non-MP4 without ffmpeg — saved for edge, but no browser preview
-    return {
-        "status": "ok_no_preview",
-        "preview_url": None,
-        "session_id": new_session_id,
-        "source_name": target_path.name,
-        "camera_id": camera_id,
-        "ffmpeg_available": False,
-        "message": (
-            f"Video saved for edge processing, but cannot be previewed in the browser "
-            f"(ffmpeg is not installed and '{ext}' requires transcoding for Chromium). "
-            "Upload an MP4 file for in-browser video playback."
-        ),
-    }
+    except HTTPException:
+        raise
+    except OSError as exc:
+        logger.exception("[Dashboard] Failed to store uploaded video")
+        raise HTTPException(status_code=500, detail="Failed to store the uploaded video") from exc
+    except Exception as exc:
+        logger.exception("[Dashboard] Durable video upload failed")
+        raise HTTPException(status_code=502, detail="Durable video storage failed") from exc
+    finally:
+        # Durable uploads live only in object storage.  Never let Render's
+        # ephemeral disk become a second, divergent source of truth.
+        incoming_path.unlink(missing_ok=True)
+        if durable:
+            normalized_path.unlink(missing_ok=True)
 
 # ---------------------------------------------------------------------------
 # POST /api/dashboard/video/analyze
@@ -790,9 +800,20 @@ async def analyze_dashboard_video(
         if durable.get("source_name") != req.source_name:
             raise HTTPException(status_code=409, detail="Video session is not associated with this camera/source")
         activate_session(req.camera_id, req.session_id)
-        return {"status": "ok", "message": "Analysis started"}
+        return {"status": "ok", "message": "Video ready. Press START to wake analysis."}
 
-    target_path = _confined_media_path(req.source_name, name_only=True)
+    registered = None
+    if req.camera_id:
+        registered = (
+            _demo_state.get("uploaded_sources", {})
+            .get(req.camera_id, {})
+            .get(req.session_id)
+        )
+    registered_source = registered.get("source_name") if registered else req.source_name
+    if registered and registered.get("original_name") not in {None, req.source_name}:
+        raise HTTPException(status_code=409, detail="Video session is not associated with this camera/source")
+
+    target_path = _confined_media_path(registered_source, name_only=True)
     if target_path.suffix.lower() not in _ALLOWED_EXTENSIONS or not target_path.is_file():
         raise HTTPException(status_code=404, detail="Video file not found. Please upload again.")
 
@@ -802,15 +823,6 @@ async def analyze_dashboard_video(
         if candidate.suffix.lower() != ".mp4" or not candidate.is_file():
             raise HTTPException(status_code=404, detail="Video preview file not found")
         preview_path = candidate
-
-    if req.camera_id:
-        registered = (
-            _demo_state.get("uploaded_sources", {})
-            .get(req.camera_id, {})
-            .get(req.session_id)
-        )
-        if registered and registered.get("source_name") != req.source_name:
-            raise HTTPException(status_code=409, detail="Video session is not associated with this camera/source")
 
     _demo_state["video_source"] = str(Path("demo") / "videos" / target_path.name)
     _demo_state["video_preview"] = (
