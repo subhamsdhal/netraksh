@@ -140,9 +140,13 @@ export default function Header() {
   // EDGE: reflects actual telemetry freshness — NOT just WS connectivity
   const edgeAgeMs = lastEdgeTelemetryMs ? (Date.now() - lastEdgeTelemetryMs) : Infinity;
   const edgeWaking = edgeWakeUntil > Date.now();
+  // Fresh telemetry is stronger evidence than an outstanding wake timer.
+  // A worker may start publishing before the local START/ANALYZE wake window
+  // expires; in that case the header must immediately report ONLINE instead
+  // of remaining stuck on WAKING for up to five minutes.
   const edgeStatus =
-    edgeWaking                  ? 'WAKING'  :
-    edgeAgeMs < EDGE_STALE_MS   ? 'ONLINE'  :
+    edgeAgeMs < EDGE_STALE_MS    ? 'ONLINE'  :
+    edgeWaking                   ? 'WAKING'  :
     edgeAgeMs < EDGE_OFFLINE_MS  ? 'STALE'   :
                                    'OFFLINE';
   const edgeColor =
