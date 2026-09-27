@@ -121,6 +121,7 @@ export default function Dashboard() {
   });
   const [now, setNow] = useState(Date.now());
   const [backendStatus, setBackendStatus] = useState('CHECKING');
+  const [sourceRestoreComplete, setSourceRestoreComplete] = useState(false);
   const fileInputRefs = useRef({});
   const autoStartedDemoCamerasRef = useRef(new Set());
 
@@ -290,6 +291,7 @@ export default function Dashboard() {
   }, [slotSources]);
   useEffect(() => {
     let mounted = true;
+    setSourceRestoreComplete(false);
     const restoreScopedSources = async () => {
       const restored = {};
       await Promise.all(visibleCameraIds.filter(Boolean).map(async (cameraId) => {
@@ -362,29 +364,34 @@ export default function Dashboard() {
       }));
       if (mounted && Object.keys(restored).length) {
         // The authenticated backend is authoritative. This ordering replaces
-        // a stale localStorage upload session with bundled mode when its S3
-        // objects no longer exist.
+        // stale localStorage state without overwriting a valid durable upload
+        // with the bundled evaluator source.
         setSlotSources((current) => ({ ...current, ...restored }));
       }
+      if (mounted) setSourceRestoreComplete(true);
     };
     restoreScopedSources();
     return () => { mounted = false; };
   }, [visibleCameraIds.join('|')]);
   useEffect(() => {
-    // Submission/evaluator mode: the two named SIH demo cameras are fully cloud-hosted.
-    // A page visit is the user action that starts them; no terminal/local worker is
-    // required. Each camera is started at most once per mounted dashboard so normal
-    // React re-renders cannot create a wake loop.
+    // Start the backend-authoritative source only after restoration completes.
+    // This prevents the evaluator auto-start from racing a durable upload and
+    // replacing it with the bundled demo on every page load.
+    if (!sourceRestoreComplete) return;
     visibleCameraIds.filter(Boolean).forEach((cameraId) => {
       if (!DEMO_CAMERA_LABELS[cameraId]) return;
       if (activeCameraIds.includes(cameraId)) return;
       if (autoStartedDemoCamerasRef.current.has(cameraId)) return;
       autoStartedDemoCamerasRef.current.add(cameraId);
-      const bundled = bundledSourceState('paused');
-      setSlotSources((current) => ({ ...current, [cameraId]: bundled }));
-      requestScenario(cameraId, scenarioAction(cameraId, bundled, 'normal', true));
+
+      const restoredSource = slotSources[cameraId];
+      const source = restoredSource || bundledSourceState('paused');
+      if (!restoredSource) {
+        setSlotSources((current) => ({ ...current, [cameraId]: source }));
+      }
+      requestScenario(cameraId, scenarioAction(cameraId, source, 'normal', true));
     });
-  }, [visibleCameraIds.join('|'), activeCameraIds.join('|')]);
+  }, [sourceRestoreComplete, visibleCameraIds.join('|'), activeCameraIds.join('|'), slotSources]);
 
   useEffect(() => {
     if (dashboardMode !== 'DUAL') setEventCameraFilter('ALL');
