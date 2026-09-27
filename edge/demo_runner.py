@@ -103,7 +103,7 @@ def _is_resolvable_edge_source(source: object) -> bool:
 def _runtime_state_paths(
     camera_id: str,
     backend_url: str,
-    session_id: Optional[str] = None,
+    analysis_session_id: Optional[str] = None,
 ) -> dict[str, str]:
     """Build backend-scoped durable state paths for one edge camera.
 
@@ -115,10 +115,13 @@ def _runtime_state_paths(
     parsed = urlparse(backend_url.strip())
     origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path.rstrip('/')}"
     scope = hashlib.sha256(origin.encode("utf-8")).hexdigest()[:12]
-    session_suffix = f"_{session_id}" if session_id else ""
+    # A replay has a new signed analysis session even when it reuses the same
+    # durable upload.  Its chain and outbox must not inherit sequence state
+    # from the earlier run.
+    session_suffix = f"_{analysis_session_id}" if analysis_session_id else ""
     runtime_root = Path(os.environ.get("EDGE_RUNTIME_DIR", "edge/data"))
     return {
-        "chain_db_path": str(runtime_root / f"chain_{camera_id}_{scope}.db"),
+        "chain_db_path": str(runtime_root / f"chain_{camera_id}_{scope}{session_suffix}.db"),
         "sync_db_path": str(runtime_root / f"sync_{camera_id}_{scope}{session_suffix}.db"),
         "clip_dir": str(runtime_root / "clips" / f"{camera_id}_{scope}"),
         "metrics_json_path": str(runtime_root / f"metrics_{camera_id}_{scope}.json"),
@@ -720,13 +723,14 @@ def run_demo_pipeline(
                 )
             time.sleep(0.5)
             continue
-        state_paths = _runtime_state_paths(camera_id, backend_url, current_session)
+        analysis_session_id = str(__import__("uuid").uuid4()) if current_session else None
+        state_paths = _runtime_state_paths(camera_id, backend_url, analysis_session_id)
         config = {
             "camera_id": camera_id,
             "camera_name": camera_id,
             "source_stream_id": current_session,
             "analysis_generation": _scenario.get("analysis_generation", 0) if current_session else None,
-            "stream_id": str(__import__("uuid").uuid4()) if current_session else None,
+            "stream_id": analysis_session_id,
             "video_source": current_source,
             # User-uploaded sessions are finite jobs. Only explicit demo mode
             # enables local finite-file replay; physical/network sources are

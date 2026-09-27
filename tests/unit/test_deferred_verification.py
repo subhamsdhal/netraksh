@@ -24,8 +24,11 @@ def mock_verify_hash(ep):
 def mock_verify_signature(ep, db):
     return True, "Valid", "ACTIVE"
 
-def create_mock_evidence(event_id, camera_id, seq_num, prev_hash, curr_hash, hash_v=True, sig_v=True):
-    return EvidencePackage(
+def create_mock_evidence(
+    event_id, camera_id, seq_num, prev_hash, curr_hash, hash_v=True, sig_v=True,
+    analysis_session_id=None,
+):
+    values = dict(
         event_id=event_id,
         camera_id=camera_id,
         stream_id="s1",
@@ -42,6 +45,13 @@ def create_mock_evidence(event_id, camera_id, seq_num, prev_hash, curr_hash, has
         previous_hash=prev_hash,
         signature="mock_sig"
     )
+    if analysis_session_id:
+        values.update(
+            analysis_session_id=analysis_session_id,
+            schema_version="2.0",
+            crypto_version="crypto-v2",
+        )
+    return EvidencePackage(**values)
 
 def test_normal_order(db_session, monkeypatch):
     monkeypatch.setattr("backend.services.verification.verify_hash", mock_verify_hash)
@@ -292,6 +302,87 @@ def test_cycle_and_self_reference_are_rejected(db_session, monkeypatch):
     second = create_mock_evidence("second", "cam-b", 2, "a", "b")
     assert verify_event_integrity(first, db_session, "cam-b", 1).chain_status == "PENDING"
     assert verify_event_integrity(second, db_session, "cam-b", 2).chain_status == "INVALID"
+
+
+def test_signed_replay_scopes_allow_independent_roots_but_not_same_run_roots(db_session, monkeypatch):
+    """A second explicit replay is a new signed chain, not a device fork."""
+    monkeypatch.setattr("backend.services.verification.verify_hash", mock_verify_hash)
+    monkeypatch.setattr("backend.services.verification.verify_signature", mock_verify_signature)
+
+    first_run = create_mock_evidence("run-a-root", "cam-a", 0, None, "a0", analysis_session_id="run-a")
+    first_child = create_mock_evidence("run-a-child", "cam-a", 1, "a0", "a1", analysis_session_id="run-a")
+    second_run = create_mock_evidence("run-b-root", "cam-a", 0, None, "b0", analysis_session_id="run-b")
+    duplicate_root = create_mock_evidence("run-b-second-root", "cam-a", 1, None, "b1", analysis_session_id="run-b")
+
+    assert verify_event_integrity(first_run, db_session, "cam-a", 0).chain_status == "VALID"
+    assert verify_event_integrity(first_child, db_session, "cam-a", 1).chain_status == "VALID"
+    assert verify_event_integrity(second_run, db_session, "cam-a", 0).chain_status == "VALID"
+    assert verify_event_integrity(duplicate_root, db_session, "cam-a", 1).chain_status == "INVALID"
+    assert db_session.query(EvidenceChain).filter_by(event_id="run-a-root").one().chain_status == "VALID"
+    assert db_session.query(EvidenceChain).filter_by(event_id="run-b-root").one().chain_status == "VALID"
+
+
+def test_replay_scope_preserves_within_run_predecessor_and_fork_protection(db_session, monkeypatch):
+    monkeypatch.setattr("backend.services.verification.verify_hash", mock_verify_hash)
+    monkeypatch.setattr("backend.services.verification.verify_signature", mock_verify_signature)
+
+    root = create_mock_evidence("root", "cam-a", 0, None, "root", analysis_session_id="run-a")
+    child = create_mock_evidence("child", "cam-a", 1, "root", "child", analysis_session_id="run-a")
+    fork = create_mock_evidence("fork", "cam-a", 2, "root", "fork", analysis_session_id="run-a")
+    wrong_predecessor = create_mock_evidence("wrong", "cam-a", 3, "missing", "wrong", analysis_session_id="run-a")
+
+    assert verify_event_integrity(root, db_session, "cam-a", 0).chain_status == "VALID"
+    assert verify_event_integrity(child, db_session, "cam-a", 1).chain_status == "VALID"
+    assert verify_event_integrity(fork, db_session, "cam-a", 2).chain_status == "INVALID"
+    assert verify_event_integrity(wrong_predecessor, db_session, "cam-a", 3).chain_status == "INVALID"
+    assert db_session.query(EvidenceChain).filter_by(event_id="child").one().chain_status == "VALID"
+
+
+def test_pending_healing_is_limited_to_its_signed_replay_scope(db_session, monkeypatch):
+    monkeypatch.setattr("backend.services.verification.verify_hash", mock_verify_hash)
+    monkeypatch.setattr("backend.services.verification.verify_signature", mock_verify_signature)
+
+    run_b_child = create_mock_evidence("run-b-child", "cam-a", 1, "b0", "b1", analysis_session_id="run-b")
+    assert verify_event_integrity(run_b_child, db_session, "cam-a", 1).chain_status == "PENDING"
+    db_session.add(EvidencePackageModel(
+        event_id="run-b-child", sha256="b1", digital_signature="s", current_hash="b1",
+        previous_hash="b0", chain_status="PENDING", chain_valid=False,
+        hash_valid=True, signature_valid=True, verified_ok=False,
+    ))
+    db_session.commit()
+
+    run_a_root = create_mock_evidence("run-a-root", "cam-a", 0, None, "a0", analysis_session_id="run-a")
+    assert verify_event_integrity(run_a_root, db_session, "cam-a", 0).chain_status == "VALID"
+    resolve_pending_chains(db_session, "cam-a", 0, "a0", "run-a")
+    assert db_session.query(EvidenceChain).filter_by(event_id="run-b-child").one().chain_status == "PENDING"
+
+    run_b_root = create_mock_evidence("run-b-root", "cam-a", 0, None, "b0", analysis_session_id="run-b")
+    assert verify_event_integrity(run_b_root, db_session, "cam-a", 0).chain_status == "VALID"
+    db_session.add(EvidencePackageModel(
+        event_id="run-b-root", sha256="b0", digital_signature="s", current_hash="b0",
+        chain_status="VALID", chain_valid=True, hash_valid=True,
+        signature_valid=True, verified_ok=True,
+    ))
+    db_session.commit()
+    resolve_pending_chains(db_session, "cam-a", 0, "b0", "run-b")
+    assert db_session.query(EvidenceChain).filter_by(event_id="run-b-child").one().chain_status == "VALID"
+
+
+def test_legacy_invalid_history_is_not_rewritten_by_a_new_scoped_root(db_session, monkeypatch):
+    monkeypatch.setattr("backend.services.verification.verify_hash", mock_verify_hash)
+    monkeypatch.setattr("backend.services.verification.verify_signature", mock_verify_signature)
+    db_session.add(EvidenceChain(
+        id="legacy-invalid", edge_device_id="cam-a", sequence_number=0,
+        event_id="old", previous_hash=None, current_hash="old-hash", signature="sig",
+        chain_valid=False, chain_status="INVALID",
+    ))
+    db_session.commit()
+
+    fresh = create_mock_evidence("fresh", "cam-a", 0, None, "fresh-hash", analysis_session_id="run-new")
+    assert verify_event_integrity(fresh, db_session, "cam-a", 0).chain_status == "VALID"
+    historical = db_session.query(EvidenceChain).filter_by(id="legacy-invalid").one()
+    assert historical.chain_status == "INVALID"
+    assert historical.chain_valid is False
 
 def test_priority_ordering_preservation():
     """Test 7: Priority order preservation. The priority sorting logic on the edge must be unchanged."""

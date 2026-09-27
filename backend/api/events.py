@@ -27,7 +27,7 @@ from backend.models.orm import Camera, EvidencePackage, Event, User
 from backend.security.auth import audit, require_any_role, require_edge_auth, get_command_filter, enforce_command_access
 from backend.security.evidence_key_wrap import unwrap_key
 from backend.services.evidence_storage import get_evidence_storage, EvidenceNotFoundError, PathTraversalError, validate_object_key_segment
-from backend.services.verification import verify_event_integrity
+from backend.services.verification import authenticated_chain_scope, verify_event_integrity
 from shared.crypto import aes_gcm_decrypt
 from shared.schemas import (
     EventCreateRequest,
@@ -584,7 +584,8 @@ async def ingest_event(
         from backend.services.verification import resolve_pending_chains
         try:
             resolve_pending_chains(
-                db, payload.edge_device_id, payload.sequence_number, evidence.current_hash
+                db, payload.edge_device_id, payload.sequence_number, evidence.current_hash,
+                authenticated_chain_scope(ep),
             )
             db.commit()
         except Exception as exc:

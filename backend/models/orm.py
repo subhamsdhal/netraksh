@@ -311,10 +311,14 @@ class EvidenceChain(Base):
     __tablename__ = "evidence_chain"
     __table_args__ = (
         Index("ix_evidence_chain_edge_seq", "edge_device_id", "sequence_number"),
+        Index("ix_evidence_chain_edge_analysis_seq", "edge_device_id", "analysis_session_id", "sequence_number"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     edge_device_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Null is reserved for immutable legacy evidence profiles.  New crypto-v2
+    # evidence stores the signed, per-replay analysis identity here.
+    analysis_session_id: Mapped[Optional[str]] = mapped_column(String(36))
     sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
     event_id: Mapped[str] = mapped_column(String(36), nullable=False)
     previous_hash: Mapped[Optional[str]] = mapped_column(String(64))

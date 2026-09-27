@@ -362,13 +362,18 @@ class EvidencePackager:
         clip_storage_dir: str = "edge/data/clips",
         encryptor: Optional[EvidenceEncryptor] = None,
         stream_id: Optional[str] = None,
+        analysis_session_id: Optional[str] = None,
     ):
         import re
         if not camera_id or not re.match(r"^[A-Za-z0-9_-]+$", camera_id):
             raise ValueError(f"Invalid camera_id '{camera_id}': must contain only alphanumeric characters, dashes, and underscores.")
 
         self.camera_id = camera_id
-        self.stream_id = stream_id
+        # EdgePipeline supplies this for every run.  Keep standalone packager
+        # callers equally safe by allocating a concrete run identity instead
+        # of emitting crypto-v2 evidence with an unsigned/empty scope.
+        self.stream_id = stream_id or str(uuid.uuid4())
+        self.analysis_session_id = analysis_session_id or self.stream_id
         self.key_manager = key_manager
         self.chain_store = chain_store
         self.clip_dir = clip_storage_dir
@@ -416,6 +421,7 @@ class EvidencePackager:
             event_id=str(uuid.uuid4()),
             camera_id=self.camera_id,
             stream_id=self.stream_id,
+            analysis_session_id=self.analysis_session_id,
             video_time=overrides.get("video_time"),
             timestamp=datetime.utcnow(),
             zone_id=zone_id,
@@ -506,13 +512,13 @@ class EvidencePackager:
         ep.previous_hash = previous_hash
 
         # PHASE 8.4: Add cryptographic version fields for V1 Generation
-        ep.schema_version = "1.0"
-        ep.crypto_version = "crypto-v1"
+        ep.schema_version = "2.0"
+        ep.crypto_version = "crypto-v2"
 
         # Compute hash using V1 canonicalization
-        from shared.versioning import canonicalize, CRYPTO_VERSION_V1
+        from shared.versioning import canonicalize, CRYPTO_VERSION_V2
         ep_dict = ep.model_dump() if hasattr(ep, "model_dump") else ep.dict()
-        canonical_bytes = canonicalize(ep_dict, CRYPTO_VERSION_V1)
+        canonical_bytes = canonicalize(ep_dict, CRYPTO_VERSION_V2)
         ep.hash = hashlib.sha256(canonical_bytes).hexdigest()
 
         # Sign with edge private key

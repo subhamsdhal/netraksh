@@ -327,6 +327,9 @@ class EvidencePackage(BaseModel):
     kid: Optional[str] = None           # Key ID for signature versioning
     previous_hash: Optional[str] = None  # hash of previous record in chain
     stream_id: Optional[str] = None      # Explicit session linkage
+    # Concrete analysis-run identity.  Unlike source_stream_id, this rotates
+    # for every explicit replay and is cryptographically bound by crypto-v2.
+    analysis_session_id: Optional[str] = None
     # Position in the source video for finite uploads. Wall-clock sources may
     # legitimately omit this value.
     video_time: Optional[float] = None
@@ -337,6 +340,8 @@ class EvidencePackage(BaseModel):
         crypto = self.crypto_version
         if (schema is None) != (crypto is None):
             raise ValueError("Partial version metadata: schema_version and crypto_version must be both present or both null.")
+        if crypto == "crypto-v2" and not self.analysis_session_id:
+            raise ValueError("crypto-v2 evidence requires analysis_session_id.")
         return self
 
     # --- Optional contextual fields (appended per architecture §15) ---

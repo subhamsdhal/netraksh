@@ -126,6 +126,14 @@ def test_cloud_runtime_paths_use_the_persistent_mount(monkeypatch, tmp_path):
     assert all(str(value).startswith(str(tmp_path)) for value in paths.values())
 
 
+def test_replayed_durable_source_receives_an_independent_chain_and_outbox(tmp_path, monkeypatch):
+    monkeypatch.setenv("EDGE_RUNTIME_DIR", str(tmp_path))
+    first = _runtime_state_paths("cam-border-01", "https://api.example.test", "analysis-run-a")
+    replay = _runtime_state_paths("cam-border-01", "https://api.example.test", "analysis-run-b")
+    assert first["chain_db_path"] != replay["chain_db_path"]
+    assert first["sync_db_path"] != replay["sync_db_path"]
+
+
 def test_signed_source_is_cached_by_session_without_logging_url(monkeypatch, tmp_path, caplog):
     session_id = str(uuid.uuid4())
     monkeypatch.setenv("EDGE_SOURCE_CACHE_DIR", str(tmp_path))

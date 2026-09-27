@@ -267,6 +267,7 @@ class EdgePipeline:
         self.packager = EvidencePackager(
             camera_id=self.camera_id,
             stream_id=self.stream_id,
+            analysis_session_id=self.stream_id,
             key_manager=self.key_manager,
             chain_store=self.chain_store,
             clip_storage_dir=config.get("clip_dir", "edge/data/clips"),
@@ -584,6 +585,7 @@ class EdgePipeline:
         self.stream_id = str(uuid.uuid4())
         if hasattr(self, "packager"):
             self.packager.stream_id = self.stream_id
+            self.packager.analysis_session_id = self.stream_id
         self._telemetry_sequence = 0
         self._last_telemetry_time = 0.0
         telemetry_queue = getattr(self, "telemetry_queue", None)

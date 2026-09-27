@@ -32,7 +32,13 @@ from shared.versioning import (
 logger = logging.getLogger(__name__)
 
 
-def _would_create_cycle(db: Session, edge_device_id: str, current_hash: str, predecessor: EvidenceChain) -> bool:
+def _would_create_cycle(
+    db: Session,
+    edge_device_id: str,
+    analysis_session_id: Optional[str],
+    current_hash: str,
+    predecessor: EvidenceChain,
+) -> bool:
     """Follow known signed links backwards and reject a cyclic predecessor graph."""
     # A current demo chain can contain thousands of records.  Load only this
     # source's hash-link columns once; issuing one SQL query per predecessor
@@ -41,6 +47,8 @@ def _would_create_cycle(db: Session, edge_device_id: str, current_hash: str, pre
         row.current_hash: row.previous_hash
         for row in db.query(EvidenceChain.current_hash, EvidenceChain.previous_hash).filter(
             EvidenceChain.edge_device_id == edge_device_id,
+            EvidenceChain.analysis_session_id == analysis_session_id
+            if analysis_session_id else EvidenceChain.analysis_session_id.is_(None),
         ).all()
     }
     seen_hashes = {current_hash}
@@ -228,6 +236,25 @@ def verify_signature(evidence_package: EvidencePackage, db: Session) -> tuple[bo
         return False, "AMBIGUOUS_LEGACY_RESOLUTION", None
 
 
+def authenticated_chain_scope(evidence_package: EvidencePackage) -> Optional[str]:
+    """Return a replay scope only when it is covered by the signature.
+
+    Legacy and crypto-v1 profiles did not sign ``stream_id``.  Keeping them
+    in the null scope preserves their historical interpretation rather than
+    letting an unsigned field create a new trusted chain.
+    """
+    envelope = (
+        evidence_package.model_dump(mode="json")
+        if hasattr(evidence_package, "model_dump")
+        else evidence_package.dict()
+    )
+    try:
+        profile = detect_profile(envelope)
+    except PartialVersionMetadataError:
+        return None
+    return evidence_package.analysis_session_id if profile == "crypto-v2" else None
+
+
 def verify_chain_continuity(
     db: Session,
     edge_device_id: str,
@@ -235,6 +262,7 @@ def verify_chain_continuity(
     current_hash: str,
     previous_hash: Optional[str],
     event_id: Optional[str] = None,
+    analysis_session_id: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
     Verify signed predecessor linkage within one authenticated edge source.
@@ -249,6 +277,8 @@ def verify_chain_continuity(
     """
     same_source = db.query(EvidenceChain).filter(
         EvidenceChain.edge_device_id == edge_device_id,
+        EvidenceChain.analysis_session_id == analysis_session_id
+        if analysis_session_id else EvidenceChain.analysis_session_id.is_(None),
     )
 
     # A root is only legitimate when this source has no other root.  This
@@ -295,7 +325,7 @@ def verify_chain_continuity(
 
     prev_chain = predecessors[0]
 
-    if _would_create_cycle(db, edge_device_id, current_hash, prev_chain):
+    if _would_create_cycle(db, edge_device_id, analysis_session_id, current_hash, prev_chain):
         logger.warning("Cyclic evidence chain detected for device %s", edge_device_id)
         return False, "INVALID"
 
@@ -334,11 +364,13 @@ def verify_event_integrity(
     """
     hash_valid, hash_msg, calculated_hash = verify_hash(evidence_package)
     sig_valid, sig_msg, key_status = verify_signature(evidence_package, db)
+    analysis_session_id = authenticated_chain_scope(evidence_package)
     chain_valid, chain_status = verify_chain_continuity(
         db, edge_device_id, sequence_number,
         evidence_package.hash or "",
         evidence_package.previous_hash,
         evidence_package.event_id,
+        analysis_session_id,
     )
 
     # Record in server-side chain table
@@ -353,6 +385,7 @@ def verify_event_integrity(
     if existing is None:
         chain_record = EvidenceChain(
             edge_device_id=edge_device_id,
+            analysis_session_id=analysis_session_id,
             sequence_number=sequence_number,
             event_id=evidence_package.event_id,
             previous_hash=evidence_package.previous_hash,
@@ -367,6 +400,7 @@ def verify_event_integrity(
         db.flush()
     else:
         existing.previous_hash = evidence_package.previous_hash
+        existing.analysis_session_id = analysis_session_id
         existing.current_hash = evidence_package.hash or ""
         existing.kid = evidence_package.kid
         existing.signature = evidence_package.signature or ""
@@ -406,7 +440,13 @@ def verify_event_integrity(
         verified_at=datetime.utcnow(),
     )
 
-def resolve_pending_chains(db: Session, edge_device_id: str, start_sequence_number: int, start_hash: str):
+def resolve_pending_chains(
+    db: Session,
+    edge_device_id: str,
+    start_sequence_number: int,
+    start_hash: str,
+    analysis_session_id: Optional[str] = None,
+):
     """
     Iteratively heals PENDING chain gaps going forward.
     Bound: max 1000 records to prevent infinite loops.
@@ -422,6 +462,8 @@ def resolve_pending_chains(db: Session, edge_device_id: str, start_sequence_numb
         current_hash = current_hashes.pop(0)
         next_chains = db.query(EvidenceChain).filter(
             EvidenceChain.edge_device_id == edge_device_id,
+            EvidenceChain.analysis_session_id == analysis_session_id
+            if analysis_session_id else EvidenceChain.analysis_session_id.is_(None),
             EvidenceChain.previous_hash == current_hash,
             EvidenceChain.chain_status == "PENDING",
         ).all()

@@ -1,6 +1,7 @@
 import time
 import os
 import sqlite3
+import json
 from datetime import datetime
 
 import pytest
@@ -134,6 +135,24 @@ class TestQueueDepthUnaffected:
         client.enqueue(_package("evt-1", severity=Severity.HIGH), sequence_number=1)
         client.enqueue(_package("evt-2", severity=Severity.LOW), sequence_number=2)
         assert client.get_queue_depth() == 2
+
+
+def test_sync_payload_preserves_the_signed_analysis_session_scope(tmp_path):
+    """Exercise the real outbox serialization used by POST /events."""
+    package = _package("evt-scoped")
+    package.analysis_session_id = "analysis-run-1"
+    package.schema_version = "2.0"
+    package.crypto_version = "crypto-v2"
+    package.hash = "a" * 64
+    package.signature = "b" * 128
+    client = _client(tmp_path)
+    client.enqueue(package, sequence_number=0)
+
+    row = client._fetch_pending()[0]
+    payload = json.loads(row[3])
+    assert payload["sequence_number"] == 0
+    assert payload["evidence_package"]["analysis_session_id"] == "analysis-run-1"
+    assert payload["evidence_package"]["crypto_version"] == "crypto-v2"
 
 
 class TestBoundedFairness:

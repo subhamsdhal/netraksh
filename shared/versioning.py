@@ -10,6 +10,8 @@ class PartialVersionMetadataError(Exception):
 
 SCHEMA_VERSION_V1: str = "1.0"
 CRYPTO_VERSION_V1: str = "crypto-v1"
+SCHEMA_VERSION_V2: str = "2.0"
+CRYPTO_VERSION_V2: str = "crypto-v2"
 PROFILE_LEGACY_V0: str = "legacy-v0"
 
 LEGACY_V0_SIGNABLE_FIELDS: tuple = (
@@ -42,11 +44,20 @@ CRYPTO_V1_SIGNABLE_FIELDS: tuple = (
     "previous_hash",
 )
 
+# A replay chain must be bound to the concrete analysis run, not merely the
+# durable source.  This profile intentionally extends (rather than changes)
+# V1, leaving already-signed historical evidence verifiable as-is.
+CRYPTO_V2_SIGNABLE_FIELDS: tuple = CRYPTO_V1_SIGNABLE_FIELDS + (
+    "analysis_session_id",
+)
+
 def extract_signable_dict(envelope_dict: Dict[str, Any], profile_id: str) -> Dict[str, Any]:
     if profile_id == "legacy-v0":
         fields = LEGACY_V0_SIGNABLE_FIELDS
     elif profile_id == "crypto-v1":
         fields = CRYPTO_V1_SIGNABLE_FIELDS
+    elif profile_id == "crypto-v2":
+        fields = CRYPTO_V2_SIGNABLE_FIELDS
     else:
         raise UnsupportedProfileError(f"Unknown profile: {profile_id!r}")
         
@@ -123,9 +134,20 @@ _PROFILE_CRYPTO_V1 = CryptoProfile(
     status=CryptoProfileStatus.ACTIVE,
 )
 
+_PROFILE_CRYPTO_V2 = CryptoProfile(
+    profile_id="crypto-v2",
+    hash_algorithm="SHA-256",
+    signature_algorithm="Ed25519",
+    serialization="JSON(sort_keys=True, ensure_ascii=True, UTF-8)",
+    signature_input="hex-string-bytes",
+    signable_fields=CRYPTO_V2_SIGNABLE_FIELDS,
+    status=CryptoProfileStatus.ACTIVE,
+)
+
 CRYPTO_REGISTRY = MappingProxyType({
     "legacy-v0": _PROFILE_LEGACY_V0,
     "crypto-v1": _PROFILE_CRYPTO_V1,
+    "crypto-v2": _PROFILE_CRYPTO_V2,
 })
 
 def lookup_profile(profile_id: str) -> CryptoProfile:
