@@ -361,6 +361,8 @@ async def _retry_edge_wake_until_ready(camera_id: str) -> None:
             "[Dashboard] Edge worker did not become ready within bounded wake window camera_id=%s",
             camera_id,
         )
+        if camera_id in _edge_prewarm_status:
+            _cache_prewarm_status(camera_id, "timeout", error="bounded_wake_timeout")
     finally:
         current = asyncio.current_task()
         if _edge_wake_tasks.get(camera_id) is current:
@@ -406,6 +408,7 @@ def _prewarm_response() -> dict:
         "eligible": len(eligible),
         "warming": sum(item["status"] == "warming" for item in cameras.values()),
         "ready": sum(item["status"] == "ready" for item in cameras.values()),
+        "terminal": sum(item["status"] in {"timeout", "unavailable"} for item in cameras.values()),
         "cameras": cameras,
     }
 

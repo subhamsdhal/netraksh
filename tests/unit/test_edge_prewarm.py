@@ -97,3 +97,18 @@ def test_ready_status_expires_without_keepalive():
     )
     assert expired["status"] == "unknown"
     assert expired["error"] == "readiness_expired"
+
+
+def test_bounded_prewarm_retry_becomes_explicit_terminal_timeout(monkeypatch):
+    _reset_cache()
+    dashboard._cache_prewarm_status(CAMERAS[0], "warming")
+    monkeypatch.setattr(dashboard, "_EDGE_WAKE_RETRY_DELAYS", (0,))
+
+    async def still_warming(_camera_id):
+        return "waking"
+
+    monkeypatch.setattr(dashboard, "_probe_edge_service", still_warming)
+    asyncio.run(dashboard._retry_edge_wake_until_ready(CAMERAS[0]))
+    response = dashboard._prewarm_response()
+    assert response["terminal"] == 1
+    assert response["cameras"][CAMERAS[0]]["status"] == "timeout"

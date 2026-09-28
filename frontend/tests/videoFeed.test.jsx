@@ -56,4 +56,15 @@ describe('per-camera authoritative analyzed frame', () => {
     expect(authFetch).not.toHaveBeenCalled();
     expect(screen.getByText(/SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME/)).toBeInTheDocument();
   });
+
+  it('does not offer an add-source action while durable authority is restoring', () => {
+    render(<VideoFeed
+      cameraId="cam-border-01"
+      sourceRestoring
+      sourceRunState="RESTORING"
+      canUpload
+    />);
+    expect(screen.getByText('RESTORING STORED SOURCE...')).toBeInTheDocument();
+    expect(screen.queryByText('ADD VIDEO SOURCE')).not.toBeInTheDocument();
+  });
 });

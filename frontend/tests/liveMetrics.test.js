@@ -30,6 +30,23 @@ describe('live dashboard metrics', () => {
     })).toBe('ONLINE');
   });
 
+  it('reports an exhausted prewarm as unavailable rather than idle or ready', () => {
+    expect(deriveGlobalEdgeStatus({
+      analysisStates: [{ intent: 'IDLE' }],
+      prewarm: { eligible: 2, warming: 0, ready: 0, terminal: 2 },
+      now,
+    })).toBe('UNAVAILABLE');
+  });
+
+  it('lets authoritative ready state replace the initial startup-warming hint', () => {
+    expect(deriveGlobalEdgeStatus({
+      analysisStates: [{ intent: 'IDLE' }],
+      startupWakeRequested: true,
+      prewarm: { eligible: 2, warming: 0, ready: 2, terminal: 0 },
+      now,
+    })).toBe('READY');
+  });
+
   it('uses processing throughput, not pipeline metric or source FPS, for AI FPS', () => {
     expect(processingFpsForTelemetry(live, now)).toBe(0.24);
     expect(processingFpsForTelemetry({ ...live, processing_fps: 0.24, source_fps: 24 }, now)).not.toBe(24);

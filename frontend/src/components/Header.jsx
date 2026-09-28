@@ -6,6 +6,7 @@ import { authFetch, logout, BACKEND_URL, WS_URL } from '../services/auth';
 import useAuth from '../hooks/useAuth';
 import useWebSocket from '../hooks/useWebSocket';
 import { deriveGlobalEdgeStatus } from '../utils/liveMetrics';
+import { startupWakeState } from '../services/startupWake';
 
 // Freshness thresholds for edge telemetry
 const EDGE_STALE_MS  = 30_000;   // >30s without telemetry → STALE
@@ -37,6 +38,7 @@ export default function Header() {
   const [edgeTelemetrySignalAt, setEdgeTelemetrySignalAt] = useState(0);
   const [analysisStates, setAnalysisStates] = useState([]);
   const [edgePrewarm, setEdgePrewarm] = useState(null);
+  const [startupWakeRequested, setStartupWakeRequested] = useState(() => startupWakeState().requested);
 
   // ── Real connectivity & edge freshness ────────────────────────────────────
   // Accept freshness from both this header's socket hook and the application
@@ -105,13 +107,16 @@ export default function Header() {
       const detail = event?.detail;
       if (detail && typeof detail === 'object') setEdgePrewarm(detail);
     };
+    const onStartupWake = () => setStartupWakeRequested(true);
     window.addEventListener('netraksh:edge-wake', onWake);
     window.addEventListener('netraksh-edge-telemetry', onTelemetry);
     window.addEventListener('netraksh:edge-prewarm', onPrewarm);
+    window.addEventListener('netraksh:startup-wake', onStartupWake);
     return () => {
       window.removeEventListener('netraksh:edge-wake', onWake);
       window.removeEventListener('netraksh-edge-telemetry', onTelemetry);
       window.removeEventListener('netraksh:edge-prewarm', onPrewarm);
+      window.removeEventListener('netraksh:startup-wake', onStartupWake);
     };
   }, []);
 
@@ -187,16 +192,20 @@ export default function Header() {
     lastTelemetryAt: lastEdgeTelemetryMs,
     edgeWakeUntil,
     prewarm: edgePrewarm,
+    startupWakeRequested,
   });
   const edgeColor =
     edgeStatus === 'ONLINE'  ? 'var(--color-ok)'     :
     edgeStatus === 'READY' ? 'var(--color-ok)' :
     edgeStatus === 'STALE' || edgeStatus === 'WAKING' || edgeStatus === 'WARMING' ? 'var(--color-warning)' :
+    edgeStatus === 'UNAVAILABLE' ? 'var(--color-danger)' :
                                'var(--text-dim)';
   const edgeDisplay = edgeStatus === 'WARMING'
     ? `WARMING · ${Number(edgePrewarm?.ready || 0)}/${Number(edgePrewarm?.eligible || 0)}`
     : edgeStatus === 'READY'
       ? `READY · ${Number(edgePrewarm?.ready || 0)}/${Number(edgePrewarm?.eligible || 0)}`
+      : edgeStatus === 'UNAVAILABLE'
+        ? `UNAVAILABLE · ${Number(edgePrewarm?.ready || 0)}/${Number(edgePrewarm?.eligible || 0)}`
       : edgeStatus;
 
   // SYNC: reflects WS link + queue state

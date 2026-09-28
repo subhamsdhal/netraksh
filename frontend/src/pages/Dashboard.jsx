@@ -236,9 +236,9 @@ export default function Dashboard() {
     });
   }, []);
 
-  // One authenticated, backend-ready dashboard mount may request a bounded prewarm. The
-  // server decides eligibility from durable control records; this browser
-  // never talks to edge URLs and never retries a control action itself.
+  // One authenticated, backend-ready dashboard mount may request a bounded
+  // authoritative prewarm. Direct startup wakes happen before this, but only
+  // this authenticated API exposes readiness truth and bounded retries.
   useEffect(() => {
     if (!canUpload || backendStatus !== 'HEALTHY' || prewarmRequestStateRef.current === 'ACCEPTED') return undefined;
     if (prewarmRequestStateRef.current === 'IN_FLIGHT') return undefined;
@@ -260,11 +260,17 @@ export default function Dashboard() {
         return payload;
       } catch (_) { return null; }
     };
-    const pollWhileWarming = async () => {
+    const shouldPoll = (payload) => {
+      const eligible = Number(payload?.eligible || 0);
+      const ready = Number(payload?.ready || 0);
+      const terminal = Number(payload?.terminal || 0);
+      return eligible > 0 && ready < eligible && ready + terminal < eligible;
+    };
+    const pollWhilePending = async () => {
       const payload = await fetchStatus();
       if (!payload || cancelled) return;
-      if (Number(payload.warming || 0) > 0 && Date.now() < deadline) {
-        pollTimer = window.setTimeout(pollWhileWarming, 2_000);
+      if (shouldPoll(payload) && Date.now() < deadline) {
+        pollTimer = window.setTimeout(pollWhilePending, 2_000);
       }
     };
     const requestPrewarm = async () => {
@@ -280,7 +286,9 @@ export default function Dashboard() {
         const payload = await response.json();
         prewarmRequestStateRef.current = 'ACCEPTED';
         publish(payload);
-        if (Number(payload.warming || 0) > 0) pollTimer = window.setTimeout(pollWhileWarming, 2_000);
+        // An accepted request must always obtain at least one cache-only
+        // status read when any eligible worker is not ready yet.
+        if (shouldPoll(payload)) pollTimer = window.setTimeout(pollWhilePending, 2_000);
       } catch (_) {
         if (!cancelled && attempts < 3) retryTimer = window.setTimeout(requestPrewarm, attempts * 750);
         else if (!cancelled) prewarmRequestStateRef.current = 'IDLE';
@@ -1017,6 +1025,7 @@ export default function Dashboard() {
           const status = lifecycleStatus(sourceState, telemetry, now);
           const liveStatus = telemetryStatusAt(telemetry, now);
           const telemetryAvailable = Boolean(telemetry && liveStatus === 'LIVE');
+          const completedRun = status === 'COMPLETED';
           const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
           const displayRunState = sourceState?.restoring
             ? 'RESTORING'
@@ -1026,6 +1035,15 @@ export default function Dashboard() {
           const statusLabel = status;
           const cardFps = processingFpsForTelemetry(telemetry, now);
           const sourceFps = sourceFpsForTelemetry(telemetry);
+          // Process-local telemetry is not a durable completed-run record.
+          // Only display it after EOF when it belongs to the exact restored
+          // analysis session; otherwise name the absence instead of implying
+          // that an old global/latest value is current evidence.
+          const completedTelemetry = completedRun
+            && telemetry?.analysis_session_id
+            && telemetry.analysis_session_id === sourceState?.latestAnalysisSessionId
+            ? telemetry
+            : null;
           const updateAge = telemetry?.timestamp ? Math.max(0, now - telemetry.timestamp) : null;
           return (
             <article className="dashboard-camera-card card" key={`demo-slot-${slotIndex}`}>
@@ -1051,8 +1069,8 @@ export default function Dashboard() {
                 </div>
                 <div className="dashboard-camera-card-controls">
                   <span className={`dashboard-camera-status status-${status.toLowerCase().replace(/\s+/g, '-')}`}>{statusLabel}</span>
-                  {cameraId && canUpload && <div className="dashboard-slot-actions">
-                    <button type="button" className="btn btn-sm btn-outline" disabled={Boolean(sourceState?.restoring)} onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
+                  {cameraId && canUpload && !sourceState?.restoring && <div className="dashboard-slot-actions">
+                    <button type="button" className="btn btn-sm btn-outline" onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
                     {sourceState?.sourceMode && lifecycleAction(sourceState) === 'START' && <button type="button" className="btn btn-sm btn-outline" data-action="start-analysis" data-camera-id={cameraId} disabled={Boolean(controlRequests[cameraId])} onClick={() => handleStartAnalysis(cameraId, sourceState)}>{controlRequests[cameraId] ? 'STARTING...' : 'START / ANALYZE'}</button>}
                     {sourceState?.sourceMode && lifecycleAction(sourceState) === 'STOP' && <button className="btn btn-sm btn-outline" onClick={async () => {
                       const payload = scenarioAction(cameraId, sourceState, 'paused');
@@ -1117,6 +1135,7 @@ export default function Dashboard() {
                     sourceMode={sourceState?.sourceMode || null}
                     expectedSessionId={sourceState?.sourceId || null}
                     sourceRunState={displayRunState}
+                    sourceRestoring={Boolean(sourceState?.restoring)}
                     onVideoEnded={() => updateCameraMedia(cameraId, { playbackEnded: true })}
                   />
                 ) : (
@@ -1142,13 +1161,13 @@ export default function Dashboard() {
                 <span><b>SCORE</b>{latestFaceEvent?.recognition_score == null ? 'N/A' : Number(latestFaceEvent.recognition_score).toFixed(1)}</span>
               </div>
               <div className="dashboard-camera-telemetry">
-                <span><b>{liveStatus === 'COMPLETED' ? 'FINAL AI FPS' : 'AI FPS'}</b>{liveStatus === 'COMPLETED'
-                  ? (Number.isFinite(telemetry?.processing_fps) ? Number(telemetry.processing_fps).toFixed(2) : 'N/A · COMPLETED')
+                <span><b>{completedRun ? 'FINAL AI FPS' : 'AI FPS'}</b>{completedRun
+                  ? (Number.isFinite(completedTelemetry?.processing_fps) ? Number(completedTelemetry.processing_fps).toFixed(2) : 'NOT RECORDED FOR THIS COMPLETED RUN')
                   : (cardFps == null ? 'N/A' : cardFps.toFixed(2))}</span>
-                <span><b>SOURCE FPS</b>{sourceFps == null ? 'N/A' : sourceFps.toFixed(2)}</span>
-                <span><b>PERSONS</b>{telemetryAvailable ? telemetry.person_count : 'N/A'}</span>
-                <span><b>VEHICLES</b>{telemetryAvailable ? telemetry.vehicle_count : 'N/A'}</span>
-                <span><b>TRACKS</b>{telemetryAvailable ? telemetry.track_count : 'N/A'}</span>
+                <span><b>SOURCE FPS</b>{completedRun ? (sourceFpsForTelemetry(completedTelemetry) == null ? 'NOT RECORDED FOR THIS COMPLETED RUN' : sourceFpsForTelemetry(completedTelemetry).toFixed(2)) : (sourceFps == null ? 'N/A' : sourceFps.toFixed(2))}</span>
+                <span><b>PERSONS</b>{completedRun ? (completedTelemetry?.person_count ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : (telemetryAvailable ? telemetry.person_count : 'N/A')}</span>
+                <span><b>VEHICLES</b>{completedRun ? (completedTelemetry?.vehicle_count ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : (telemetryAvailable ? telemetry.vehicle_count : 'N/A')}</span>
+                <span><b>TRACKS</b>{completedRun ? (completedTelemetry?.track_count ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : (telemetryAvailable ? telemetry.track_count : 'N/A')}</span>
                 <span><b>LAST UPDATE</b>{updateAge == null ? 'Never' : liveStatus === 'COMPLETED' ? `COMPLETED ${(updateAge / 1000).toFixed(1)}s AGO` : liveStatus === 'OFFLINE' ? 'OFFLINE' : liveStatus === 'STALE' ? `STALE · ${(updateAge / 1000).toFixed(1)}s ago` : `${(updateAge / 1000).toFixed(1)}s ago`}</span>
                 <span><b>LATEST EVENT</b>{formatLatestEvent(latestCameraEvent, now)}</span>
               </div>

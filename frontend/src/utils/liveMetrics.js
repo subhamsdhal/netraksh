@@ -1,15 +1,19 @@
 import { telemetryStatusAt } from './dashboardScope';
 
-export function deriveGlobalEdgeStatus({ analysisStates = [], lastTelemetryAt = 0, edgeWakeUntil = 0, prewarm = null, now = Date.now() }) {
+export function deriveGlobalEdgeStatus({ analysisStates = [], lastTelemetryAt = 0, edgeWakeUntil = 0, prewarm = null, startupWakeRequested = false, now = Date.now() }) {
   const edgeWaking = Number(edgeWakeUntil) > now;
   const freshTelemetry = Number(lastTelemetryAt) > 0 && now - Number(lastTelemetryAt) < 30_000;
   const prewarmWarming = Number(prewarm?.warming || 0) > 0;
   const prewarmReady = Number(prewarm?.eligible || 0) > 0
     && Number(prewarm?.ready || 0) === Number(prewarm?.eligible || 0);
+  const prewarmTerminal = Number(prewarm?.eligible || 0) > 0
+    && Number(prewarm?.ready || 0) < Number(prewarm?.eligible || 0)
+    && Number(prewarm?.terminal || 0) >= Number(prewarm?.eligible || 0) - Number(prewarm?.ready || 0);
   if (!analysisStates.length) {
     if (freshTelemetry) return 'ONLINE';
     if (edgeWaking) return 'WAKING';
-    if (prewarmWarming) return 'WARMING';
+    if (prewarmWarming || (startupWakeRequested && !prewarm)) return 'WARMING';
+    if (prewarmTerminal) return 'UNAVAILABLE';
     return prewarmReady ? 'READY' : 'IDLE';
   }
   const anyActive = analysisStates.some((state) => state.intent === 'ACTIVE');
@@ -18,7 +22,8 @@ export function deriveGlobalEdgeStatus({ analysisStates = [], lastTelemetryAt = 
   // must outrank a stale local wake timer or a delayed lifecycle intent.
   if (analysisStates.some((state) => state.hasFreshCurrentTelemetry)) return 'ONLINE';
   if (!anyActive && !anyWaking) {
-    if (prewarmWarming) return 'WARMING';
+    if (prewarmWarming || (startupWakeRequested && !prewarm)) return 'WARMING';
+    if (prewarmTerminal) return 'UNAVAILABLE';
     return prewarmReady ? 'READY' : 'IDLE';
   }
   if (anyWaking) return 'WAKING';
