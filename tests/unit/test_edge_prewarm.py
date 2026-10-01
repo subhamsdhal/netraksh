@@ -1,4 +1,5 @@
 import asyncio
+import copy
 
 from backend.api import dashboard
 
@@ -23,13 +24,13 @@ def _reset_cache():
     dashboard._edge_wake_tasks.clear()
 
 
-def test_prewarm_wakes_two_durable_sources_concurrently_without_control_mutation(monkeypatch):
+def test_prewarm_wakes_two_configured_workers_concurrently_without_control_mutation(monkeypatch):
     _reset_cache()
     records = {camera_id: _durable(camera_id) for camera_id in CAMERAS}
     entered = set()
     release = asyncio.Event()
 
-    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: records.get(camera_id))
+    monkeypatch.setattr(dashboard, "_edge_wake_url", lambda camera_id: f"https://{camera_id}.example.test")
 
     async def wake(camera_id):
         entered.add(camera_id)
@@ -47,10 +48,14 @@ def test_prewarm_wakes_two_durable_sources_concurrently_without_control_mutation
     assert records == {camera_id: _durable(camera_id) for camera_id in CAMERAS}
 
 
-def test_prewarm_skips_no_source_camera(monkeypatch):
+def test_prewarm_skips_only_unconfigured_worker(monkeypatch):
     _reset_cache()
     calls = []
-    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: _durable(camera_id) if camera_id == CAMERAS[0] else None)
+    monkeypatch.setattr(
+        dashboard,
+        "_edge_wake_url",
+        lambda camera_id: "https://edge.example.test" if camera_id == CAMERAS[0] else "",
+    )
 
     async def wake(camera_id):
         calls.append(camera_id)
@@ -62,6 +67,30 @@ def test_prewarm_skips_no_source_camera(monkeypatch):
     assert calls == [CAMERAS[0]]
     assert result["eligible"] == 1
     assert result["cameras"][CAMERAS[1]]["status"] == "not_configured"
+
+
+def test_prewarm_requires_no_durable_source_and_preserves_control_state(monkeypatch):
+    _reset_cache()
+    original_state = copy.deepcopy(dashboard._demo_state)
+    monkeypatch.setattr(dashboard, "_edge_wake_url", lambda camera_id: f"https://{camera_id}.example.test")
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda _camera_id: None)
+
+    def forbidden_mutation(*_args, **_kwargs):
+        raise AssertionError("prewarm must not create or mutate a video/analysis session")
+
+    monkeypatch.setattr(dashboard, "start_active_session", forbidden_mutation)
+    monkeypatch.setattr(dashboard, "activate_session", forbidden_mutation)
+    monkeypatch.setattr(dashboard, "update_active_session", forbidden_mutation)
+
+    async def wake(_camera_id):
+        return "ready"
+
+    monkeypatch.setattr(dashboard, "_wake_edge_service", wake)
+    result = asyncio.run(dashboard.prewarm_edge_workers(_user={}))
+
+    assert result["eligible"] == 2
+    assert result["ready"] == 2
+    assert dashboard._demo_state == original_state
 
 
 def test_health_requires_worker_alive_and_no_error():

@@ -9,7 +9,13 @@ import {
   User,
 } from 'lucide-react';
 import netrakshMark from '../assets/netraksh-mark.png';
+import useStartupReadiness from '../hooks/useStartupReadiness';
 import { login } from '../services/auth';
+import {
+  retryStartupWake,
+  STARTUP_STATUS,
+  waitForBackendReady,
+} from '../services/startupWake';
 import './login.css';
 
 export default function Login() {
@@ -18,6 +24,8 @@ export default function Login() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
+  const [waitingForStartup, setWaitingForStartup] = useState(false);
+  const startup = useStartupReadiness();
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -29,11 +37,16 @@ export default function Login() {
     setError(null);
 
     try {
+      if (startup.backend.status !== STARTUP_STATUS.READY) {
+        setWaitingForStartup(true);
+        await waitForBackendReady();
+      }
       await login(username, password);
       navigate(from, { replace: true });
     } catch (err) {
       setError(err.message);
     } finally {
+      setWaitingForStartup(false);
       setSubmitting(false);
     }
   };
@@ -149,8 +162,23 @@ export default function Login() {
               </div>
             )}
 
+            {startup.backend.status === STARTUP_STATUS.TIMEOUT && (
+              <button
+                className="auth-submit"
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  retryStartupWake();
+                }}
+              >
+                <span>Retry Startup</span>
+              </button>
+            )}
+
             <button className="auth-submit" type="submit" disabled={submitting}>
-              <span>{submitting ? 'Authenticating' : 'Sign In'}</span>
+              <span>
+                {waitingForStartup ? 'Starting secure services…' : (submitting ? 'Authenticating' : 'Sign In')}
+              </span>
               <ArrowRight size={25} strokeWidth={2.3} aria-hidden="true" />
             </button>
           </div>

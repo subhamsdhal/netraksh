@@ -382,17 +382,14 @@ async def _wake_edge_service(camera_id: str | None) -> str:
     return status
 
 
-def _eligible_durable_source(camera_id: str) -> bool:
-    """Read durable control only; prewarm is forbidden from mutating it."""
-    if camera_id not in _PREWARM_CAMERA_IDS:
-        return False
-    current = get_valid_active_session(camera_id)
-    return bool(
-        current
-        and current.get("source_mode") == "durable"
-        and current.get("session_id")
-        and current.get("source_object_key")
-    )
+def _configured_edge_worker(camera_id: str) -> bool:
+    """A configured wake URL is sufficient for control-plane prewarming.
+
+    This deliberately does not inspect or mutate durable video state. Waking a
+    worker is not authorization to create a source, generation, or analysis
+    session.
+    """
+    return camera_id in _PREWARM_CAMERA_IDS and bool(_edge_wake_url(camera_id))
 
 
 async def _prewarm_one(camera_id: str) -> dict:
@@ -415,13 +412,13 @@ def _prewarm_response() -> dict:
 
 @router.post("/edge/prewarm")
 async def prewarm_edge_workers(_user=Depends(require_operator_or_admin)):
-    """Begin one bounded, deduplicated wake for configured durable sources.
+    """Begin one bounded, deduplicated wake for configured edge workers.
 
     This route deliberately does not invoke any video-control operation. It
-    reads durable records, then probes the two independent Render workers in
-    parallel. Paused, ready, and completed sources remain in those states.
+    only probes the two independent Render workers in parallel. Paused, ready,
+    completed, and absent source records remain unchanged.
     """
-    eligible = [camera_id for camera_id in _PREWARM_CAMERA_IDS if _eligible_durable_source(camera_id)]
+    eligible = [camera_id for camera_id in _PREWARM_CAMERA_IDS if _configured_edge_worker(camera_id)]
     ineligible = set(_PREWARM_CAMERA_IDS) - set(eligible)
     for camera_id in ineligible:
         _cache_prewarm_status(camera_id, "not_configured")

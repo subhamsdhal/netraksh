@@ -155,6 +155,7 @@ export default function useWebSocket(url, { fetchInitial = true } = {}) {
     let isMounted = true;
     let reconnectTimer = null;
     let reconnectAttempts = 0;
+    let hasOpened = false;
     const connect = () => {
       if (!isMounted) return;
       setConnectionStatus(reconnectAttempts === 0 ? 'CONNECTING' : 'RECONNECTING');
@@ -169,10 +170,16 @@ export default function useWebSocket(url, { fetchInitial = true } = {}) {
 
       ws.onopen = () => {
         if (!isMounted) { ws.close(); return; }
+        const recoveredConnection = hasOpened;
+        hasOpened = true;
         reconnectAttempts = 0;
         setIsConnected(true);
         setConnectionStatus('CONNECTED');
         window.dispatchEvent(new Event('netraksh-ws-connect'));
+        // The startup gate prevents the first connection from racing the
+        // initial REST load. After a real reconnect, refresh authoritative
+        // REST state once so a recovered socket never leaves stale gaps.
+        if (fetchInitial && recoveredConnection) fetchInitialData();
       };
 
       ws.onmessage = (event) => {
@@ -299,7 +306,7 @@ export default function useWebSocket(url, { fetchInitial = true } = {}) {
       clearTimeout(reconnectTimer);
       if (wsRef.current) wsRef.current.close();
     };
-  }, [url, fetchInitialData]);
+  }, [url, fetchInitial, fetchInitialData]);
 
   return {
     events, health, alerts, metrics, liveTracks, watchlist, cameras, correlation,

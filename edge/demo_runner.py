@@ -662,6 +662,7 @@ def run_demo_pipeline(
     video_source: str,
     backend_url: str,
     zones_config_path: str = "demo/scripts/zones_config.json",
+    require_explicit_session: bool = False,
 ) -> None:
     """
     Build and run a DemoAwareEdgePipeline for one named camera.
@@ -693,6 +694,7 @@ def run_demo_pipeline(
         time.sleep(0.05)
     _scenario["should_restart"] = False
 
+    waiting_for_session_logged = False
     while True:
         # The CLI replay is the fallback, but an explicit browser upload must
         # take precedence so Start/Analyze uses the selected local file.
@@ -703,6 +705,15 @@ def run_demo_pipeline(
         current_session = uploaded_session if use_uploaded_source else None
         lifecycle = str(_scenario.get("analysis_state") or "READY").upper()
         scenario = str(_scenario.get("current") or "paused").lower()
+        if require_explicit_session and not current_session:
+            if not waiting_for_session_logged:
+                logger.info(
+                    "[DemoRunner] Worker ready; waiting for explicit operator START / ANALYZE"
+                )
+                waiting_for_session_logged = True
+            time.sleep(0.5)
+            continue
+        waiting_for_session_logged = False
         # A cloud worker must remain a cheap control-plane poller until an
         # explicit START creates a coherent WAKING/ACTIVE generation. A
         # contradictory WAKING+paused record must not open the source and
