@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
-import { AlertTriangle, WifiOff } from 'lucide-react';
+import { WifiOff } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
 import DemoSidebar from './components/DemoSidebar';
@@ -23,7 +23,7 @@ import Analytics from './pages/Analytics';
 import Audit from './pages/Audit';
 
 function AppLayout() {
-  const [isWsConnected, setIsWsConnected] = useState(true);
+  const [isWsConnected, setIsWsConnected] = useState(false);
 
   useEffect(() => {
     const handleConnect    = () => setIsWsConnected(true);
@@ -68,7 +68,7 @@ function AppLayout() {
                 className="font-mono text-muted"
                 style={{ fontSize: '0.7rem', letterSpacing: '0.06em' }}
               >
-                Reestablishing secure WebSocket connection…
+                Reestablishing WebSocket control-plane connection…
               </span>
             </div>
           </div>

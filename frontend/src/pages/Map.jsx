@@ -66,8 +66,9 @@ export default function MapView() {
   const latestEvent = selectedEvents[0] || null;
 
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return;
-    const map = L.map(containerRef.current, { zoomControl: false }).setView([20.5937, 78.9629], 4.5);
+    if (!containerRef.current || mapRef.current || mappedCameras.length === 0) return;
+    const first = mappedCameras[0];
+    const map = L.map(containerRef.current, { zoomControl: false }).setView([first.latitude, first.longitude], 12);
     L.control.zoom({ position: 'bottomright' }).addTo(map);
     // Removed CartoDB tile layer to avoid any API KEY REQUIRED overlays or dependency on external providers.
     // The static map SVG background will serve as the visualization layer.
@@ -81,7 +82,7 @@ export default function MapView() {
       map.remove();
       mapRef.current = null;
     };
-  }, []);
+  }, [mappedCameras.length]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -126,13 +127,13 @@ export default function MapView() {
       </div>
 
       <div className="relative flex-grow rounded border border-color overflow-hidden bg-panel">
-        <div className="absolute inset-0 z-[0] opacity-40" style={{
+        {mappedCameras.length > 0 && <div className="absolute inset-0 z-[0] opacity-40" style={{
             backgroundImage: `url('/assets/images/india_map_bg.svg')`,
             backgroundSize: 'cover',
             backgroundPosition: 'center'
-        }} />
+        }} />}
         <div ref={containerRef} className="w-full h-full z-10 relative" style={{ background: 'transparent' }} />
-        {mappedCameras.length === 0 && <div className="absolute inset-0 z-[5] flex items-center justify-center bg-panel/90 text-muted text-sm text-center px-4">NO GEOLOCATION CONFIGURED<br />Register real camera coordinates to enable map markers.</div>}
+        {mappedCameras.length === 0 && <div className="absolute inset-0 z-[5] flex items-center justify-center bg-panel/90 text-muted text-sm text-center px-4">NO REGISTERED CAMERA LOCATION<br />Register real camera coordinates to enable map markers.</div>}
 
         {selectedCamera && (
           <div className="card absolute top-4 left-4 w-96 z-10" style={{ maxHeight: 'calc(100% - 32px)', boxShadow: '0 10px 40px -10px rgba(0,0,0,.8)' }}>

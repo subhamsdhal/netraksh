@@ -119,6 +119,8 @@ class HealthHandler(BaseHTTPRequestHandler):
     server_version = "NETRAKSH-CloudEdge/1.0"
 
     def _send(self, status: int = 200) -> None:
+        constrained = os.environ.get("EDGE_CONSTRAINED_CLOUD", "true").lower() == "true"
+        ocr_backend = os.environ.get("ANPR_OCR_BACKEND", "disabled" if constrained else "easyocr").lower()
         payload = {
             "service": "NETRAKSH Cloud Edge",
             "status": "ok" if _state["worker_alive"] else "starting",
@@ -127,6 +129,16 @@ class HealthHandler(BaseHTTPRequestHandler):
             "uptime_seconds": round(time.time() - float(_state["started_at"]), 1),
             "last_error": _state["last_error"],
             "phase": _state["phase"],
+            "capabilities": {
+                "detector_runtime": os.environ.get("DETECTOR_RUNTIME", "unknown"),
+                "tracking": "BYTE_TRACK",
+                "line_and_fence_events": True,
+                "anpr_localization": True,
+                "anpr_ocr": ocr_backend != "disabled",
+                "anpr_ocr_backend": ocr_backend,
+                "face_recognition_engine": os.environ.get("FACE_RECOGNITION_ENGINE", "lbph").lower(),
+                "behavior_analytics": os.environ.get("BEHAVIOR_ANALYTICS", "false").lower() == "true",
+            },
         }
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)

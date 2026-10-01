@@ -106,11 +106,11 @@ async def acknowledge_alert(
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
         
-    # Isolation: Operator cannot spoof receiving_command_id or acknowledge alerts outside their scope.
+    # Command identity is authoritative server-side user/session state.  The
+    # browser must never be able to name a command on an acknowledgement.
     command_filter = get_command_filter(current_user)
-    target_receiving_command = payload.receiving_command_id
+    target_receiving_command = current_user.command_id
     if command_filter:
-        target_receiving_command = command_filter
         if command_filter not in [alert.command_id_issuing, alert.command_id_receiving]:
             raise HTTPException(status_code=403, detail="Access denied: command isolation boundary.")
             
@@ -146,7 +146,7 @@ async def acknowledge_alert(
         bc = get_blockchain_client()
         tx = AlertAcknowledgedTransaction(
             alert_id=alert_id,
-            receiving_command_id=payload.receiving_command_id,
+            receiving_command_id=target_receiving_command,
             ack_timestamp=datetime.utcnow(),
             status=payload.status,
             signature="",  # would be org signature in real Fabric

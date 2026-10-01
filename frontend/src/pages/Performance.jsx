@@ -3,6 +3,8 @@ import { Cpu, Zap, HardDrive, Gauge, AlertTriangle } from 'lucide-react';
 import useWebSocket from '../hooks/useWebSocket';
 import { WS_URL, authFetch } from '../services/auth';
 import { parseUtc } from '../utils/time';
+import useStartupReadiness from '../hooks/useStartupReadiness';
+import { telemetryStatusAt } from '../utils/dashboardScope';
 
 // Real edge performance telemetry (edge/instrumentation/metrics.py's
 // perf_counter()-measured latency/FPS/CPU/RSS) previously existed only as
@@ -44,7 +46,8 @@ function formatCounter(value) {
 }
 
 export default function Performance() {
-  const { metrics: wsMetrics } = useWebSocket(WS_URL);
+  const { metrics: wsMetrics, liveTracks } = useWebSocket(WS_URL);
+  const startup = useStartupReadiness();
   const [restMetrics, setRestMetrics] = useState([]);
   const [status, setStatus] = useState('loading'); // loading | ready | auth-required | error
   const [nowMs, setNowMs] = useState(Date.now());
@@ -110,8 +113,12 @@ export default function Performance() {
     const reportedAt = m.timestamp ? parseUtc(m.timestamp)?.getTime() : NaN;
     const ageSeconds = Number.isFinite(reportedAt) ? Math.max(0, (nowMs - reportedAt) / 1000) : Infinity;
     const fresh = ageSeconds <= METRICS_STALE_AFTER_SECONDS;
-    const freshnessLabel = fresh ? 'LIVE' : 'STALE';
+    const freshnessLabel = fresh ? 'CURRENT WORKER REPORT' : 'HISTORICAL REPORT';
     const staleNote = `STALE · last report ${Number.isFinite(ageSeconds) ? `${Math.floor(ageSeconds)}s ago` : 'unknown'}`;
+    const liveTelemetry = liveTracks[m.edge_device_id];
+    const analysisState = telemetryStatusAt(liveTelemetry, nowMs) === 'LIVE' ? 'ACTIVE ANALYSIS' : 'ANALYSIS IDLE';
+    const node = m.edge_device_id === 'cam-border-01' ? startup.camBorder01 : m.edge_device_id === 'cam-checkpoint-01' ? startup.camCheckpoint01 : null;
+    const workerState = node?.status === 'READY' ? 'WORKER READY' : node?.status === 'TIMEOUT' ? 'WORKER UNAVAILABLE' : 'WORKER WARMING';
 
     return (
     <div className="card" style={{ padding: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
@@ -121,7 +128,9 @@ export default function Performance() {
             <span className="text-lg font-display text-main uppercase tracking-widest">{m.edge_device_id}</span>
             {/* Explicit prototype disclaimer — no Jetson/GPU/TensorRT hardware */}
             <span className="badge badge-warning">CPU PROTOTYPE — not Jetson/GPU</span>
-            <span className={fresh ? 'badge badge-ok' : 'badge badge-danger'}>{freshnessLabel}</span>
+            <span className={fresh ? 'badge badge-ok' : 'badge badge-warning'}>{freshnessLabel}</span>
+            <span className={node?.status === 'READY' ? 'badge badge-ok' : 'badge badge-warning'}>{workerState}</span>
+            <span className={analysisState === 'ACTIVE ANALYSIS' ? 'badge badge-ok' : 'badge badge-outline'}>{analysisState}</span>
           </div>
           <span className="font-display text-muted uppercase tracking-widest block mt-1" style={{ fontSize: '0.65rem' }}>
             Uptime {formatUptime(m.uptime_seconds)} · Last report {m.timestamp ? parseUtc(m.timestamp).toLocaleTimeString() : '—'}
@@ -134,7 +143,7 @@ export default function Performance() {
           exist in this project's CSS (see docs/LIMITATIONS.md); auto-fill
           gives real responsive columns with no media query needed. */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '0.75rem' }}>
-        <StatTile icon={Zap} label="Measured FPS" value={fresh ? formatMetric(m.fps) : '—'} sub={fresh ? 'rolling window, not declared rate' : staleNote} />
+        <StatTile icon={Zap} label="Measured AI FPS" value={fresh && analysisState === 'ACTIVE ANALYSIS' ? formatMetric(m.fps) : '—'} sub={analysisState === 'ACTIVE ANALYSIS' ? 'rolling current-run window' : (fresh ? 'analysis idle; worker report only' : staleNote)} />
         {/* CPU and RSS gate independently on their own field being non-null,
             not jointly on `psutil_available` — a single end-of-run CPU%
             sample can be uncredible (see docs/PERFORMANCE_REPORT.md: "this

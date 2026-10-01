@@ -177,7 +177,7 @@ export default function Login() {
 
             <button className="auth-submit" type="submit" disabled={submitting}>
               <span>
-                {waitingForStartup ? 'Starting secure services…' : (submitting ? 'Authenticating' : 'Sign In')}
+                {waitingForStartup ? 'Starting required services…' : (submitting ? 'Authenticating' : 'Sign In')}
               </span>
               <ArrowRight size={25} strokeWidth={2.3} aria-hidden="true" />
             </button>

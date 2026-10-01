@@ -1,5 +1,5 @@
-import { User, Activity, AlertTriangle, Cpu, ChevronDown, ShieldCheck, ShieldAlert, LogOut, Radio } from 'lucide-react';
-import { useState, useEffect, useRef } from 'react';
+import { User, Activity, AlertTriangle, ChevronDown, ShieldCheck, ShieldAlert, LogOut } from 'lucide-react';
+import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import Logo from './Logo';
 import { authFetch, logout, BACKEND_URL, WS_URL } from '../services/auth';
@@ -7,10 +7,7 @@ import useAuth from '../hooks/useAuth';
 import useWebSocket from '../hooks/useWebSocket';
 import { deriveGlobalEdgeStatus } from '../utils/liveMetrics';
 import { startupWakeState } from '../services/startupWake';
-
-// Freshness thresholds for edge telemetry
-const EDGE_STALE_MS  = 30_000;   // >30s without telemetry → STALE
-const EDGE_OFFLINE_MS = 120_000; // >2 min → OFFLINE
+import { deriveSyncState } from '../utils/systemTruth';
 
 const ROLE_COLORS = {
   ADMIN:    { text: 'var(--color-danger)', border: 'var(--color-danger)' },
@@ -33,6 +30,7 @@ export default function Header() {
   const [showAccountPanel, setShowAccountPanel] = useState(false);
   const [syncStatus, setSyncStatus]     = useState({ queued: 0, synced: 0, failed: 0 });
   const [pendingAlerts, setPendingAlerts] = useState(null);
+  const [commandId, setCommandId] = useState(null);
   const [chainStatus, setChainStatus]   = useState(null);
   const [edgeWakeUntil, setEdgeWakeUntil] = useState(0);
   const [edgeTelemetrySignalAt, setEdgeTelemetrySignalAt] = useState(0);
@@ -143,6 +141,7 @@ export default function Header() {
         if (res.ok) {
           const data = await res.json();
           setPendingAlerts(data.pending_acknowledgements);
+          setCommandId(data.command_id || null);
         }
       } catch (_e) {}
     };
@@ -178,12 +177,6 @@ export default function Header() {
 
   // EDGE: reflects analysis intent plus telemetry freshness. Worker/process
   // health is intentionally not treated as active analysis.
-  const edgeAgeMs = lastEdgeTelemetryMs ? (Date.now() - lastEdgeTelemetryMs) : Infinity;
-  const edgeWaking = edgeWakeUntil > Date.now();
-  const activeStates = analysisStates.filter((state) => state.intent === 'ACTIVE');
-  const anyActive = activeStates.length > 0;
-  const anyWaking = analysisStates.some((state) => state.intent === 'WAKING') || (edgeWaking && !anyActive);
-  const activeTelemetryAgeMs = activeStates.reduce((oldest, state) => Math.max(oldest, state.ageMs ?? Infinity), 0);
   // Fresh telemetry is stronger evidence than an outstanding wake timer.
   // Until Dashboard publishes intent, retain the legacy telemetry-only
   // fallback used by other protected pages.
@@ -210,13 +203,16 @@ export default function Header() {
 
   // SYNC: reflects WS link + queue state
   const syncBuffering = syncStatus.queued > 0;
-  const syncStatus_val =
-    !isWsConnected ? 'DISCONNECTED' :
-    syncBuffering   ? 'BUFFERING'   :
-                      'CURRENT';
+  const syncStatus_val = deriveSyncState({
+    isConnected: isWsConnected,
+    queued: syncStatus.queued,
+    failed: syncStatus.failed,
+    hasActivity: syncStatus.has_activity,
+  });
   const syncColor =
     syncStatus_val === 'CURRENT'      ? 'var(--color-ok)'     :
     syncStatus_val === 'BUFFERING'    ? 'var(--color-warning)' :
+    syncStatus_val === 'IDLE'         ? 'var(--text-muted)' :
                                         'var(--color-danger)';
 
   const roleStyle = ROLE_COLORS[role] || ROLE_COLORS.OPERATOR;
@@ -244,8 +240,8 @@ export default function Header() {
       {/* Center — Mission Status Strip */}
       <div className="topbar-status-strip">
         <StatusItem
-          label="Command Zone"
-          value="Sector Alpha"
+          label="Command"
+          value={commandId || 'NOT REPORTED'}
           valueColor="var(--accent)"
         />
         <StatusItem
@@ -379,6 +375,8 @@ export default function Header() {
             { label: 'Sync',      val: syncStatus_val, col: syncColor   },
             { label: 'Buffered',  val: syncStatus.queued,  col: syncBuffering ? 'var(--color-warning)' : 'var(--text-main)' },
             { label: 'Synced',    val: syncStatus.synced,  col: 'var(--color-ok)' },
+            { label: 'Failed',    val: syncStatus.failed,  col: syncStatus.failed ? 'var(--color-danger)' : 'var(--text-main)' },
+            { label: 'Last activity', val: syncStatus.last_activity_at ? new Date(syncStatus.last_activity_at).toLocaleString() : 'NONE', col: 'var(--text-muted)' },
           ].map(({ label, val, col }) => (
             <div key={label} className="flex justify-between" style={{ fontSize: '0.8rem', fontFamily: 'var(--font-body)' }}>
               <span className="text-muted">{label}:</span>

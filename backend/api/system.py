@@ -81,11 +81,15 @@ async def readiness_check(db: Session = Depends(get_db)):
     # 2. Storage configuration (not a live ping — just proves config is present)
     storage_provider = settings.OBJECT_STORAGE_PROVIDER or "local"
     checks["storage_provider"] = storage_provider
+    storage_durable = storage_provider == "s3" and bool(settings.OBJECT_STORAGE_BUCKET)
     if storage_provider == "s3" and not settings.OBJECT_STORAGE_BUCKET:
         checks["storage"] = "misconfigured_missing_bucket"
         ready = False
+    elif storage_provider == "local":
+        checks["storage"] = "non_durable_local"
     else:
         checks["storage"] = "configured"
+    checks["storage_durable"] = storage_durable
 
     if not ready:
         from fastapi import HTTPException
@@ -171,6 +175,36 @@ async def system_status(
     }
 
 
+@router.get("/system/capabilities")
+async def system_capabilities(
+    db: Session = Depends(get_db),
+    _user = Depends(require_any_role),
+):
+    """Safe runtime configuration/capability facts for authenticated UI clients."""
+    storage_provider = settings.OBJECT_STORAGE_PROVIDER or "local"
+    storage_durable = storage_provider == "s3" and bool(settings.OBJECT_STORAGE_BUCKET)
+    return {
+        "command_id": settings.COMMAND_ID,
+        "registered_camera_count": db.query(Camera).filter(Camera.is_active == True).count(),
+        "corroboration": {
+            "temporal_spatial": True,
+            "cross_camera_reid": settings.CROSS_CAMERA_REID != "disabled",
+        },
+        "evidence": {
+            "cryptographic_chain": True,
+            "storage_provider": storage_provider,
+            "durable_storage": storage_durable,
+            "status": "CONFIGURED" if storage_durable else "BLOCKED_NON_DURABLE_LOCAL",
+        },
+        "blockchain": {
+            "mode": settings.BLOCKCHAIN_MODE,
+            "label": settings.BLOCKCHAIN_MOCK_LABEL if settings.BLOCKCHAIN_MODE == "mock" else "FABRIC",
+            "simulated": settings.BLOCKCHAIN_MODE == "mock",
+        },
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
 @router.get("/sync/status")
 async def sync_status(
     db: Session = Depends(get_db),
@@ -190,11 +224,20 @@ async def sync_status(
     # For 'synced' and 'failed', we can either use the metrics or keep using the backend DB 
     # to show the overall backend-to-chain status as well, but the instruction specifically 
     # said: "Propagate the true edge queue depth... UI must show the edge's actual outbound queue size."
+    backend_queued = db.query(SyncQueue).filter(SyncQueue.sync_status == "QUEUED").count()
+    backend_failed = db.query(SyncQueue).filter(SyncQueue.sync_status == "FAILED").count()
+    backend_synced = db.query(SyncQueue).filter(SyncQueue.sync_status == "SYNCED").count()
+    last_sync = db.query(SyncQueue).order_by(desc(SyncQueue.queued_at)).first()
+    has_activity = bool(latest_metrics or last_sync)
     return {
-        "queued": edge_queued,
-        "synced": latest_metrics.events_json.get("sent", {}).get("count", 0) if latest_metrics and latest_metrics.events_json else 0,
-        "failed": latest_metrics.events_json.get("failed", {}).get("count", 0) if latest_metrics and latest_metrics.events_json else 0,
-        "timestamp": datetime.utcnow().isoformat(),
+        "queued": max(edge_queued, backend_queued),
+        "edge_queued": edge_queued,
+        "backend_queued": backend_queued,
+        "synced": latest_metrics.events_json.get("sent", {}).get("count", backend_synced) if latest_metrics and latest_metrics.events_json else backend_synced,
+        "failed": latest_metrics.events_json.get("failed", {}).get("count", backend_failed) if latest_metrics and latest_metrics.events_json else backend_failed,
+        "has_activity": has_activity,
+        "last_activity_at": latest_metrics.timestamp.isoformat() if latest_metrics else (last_sync.queued_at.isoformat() if last_sync else None),
+        "observed_at": datetime.utcnow().isoformat(),
     }
 
 

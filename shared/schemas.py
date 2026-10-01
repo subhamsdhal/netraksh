@@ -696,7 +696,6 @@ class AlertResponse(BaseModel):
 
 
 class AlertAcknowledgeRequest(BaseModel):
-    receiving_command_id: str
     status: str = "ACKNOWLEDGED"
     notes: Optional[str] = None
 

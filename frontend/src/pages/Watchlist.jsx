@@ -16,7 +16,7 @@
  *   ELEVATED  → Amber (#fbbf24)
  *
  * SCOPE NOTE on face recognition:
- *   Cards show "LBPH — DEMO QUALITY" reminder because classical LBPH is the
+ *   Cards show the classical-LBPH limitation because this recognizer is the
  *   actual recognizer in use. This text is intentionally visible so any
  *   evaluator understands the scope without reading docs.
  */
@@ -152,7 +152,7 @@ function SubjectCard({ person, onInspect, onDeactivate, isAdmin }) {
         borderTop: '1px solid var(--border-color)', paddingTop: '0.4rem',
         marginTop: '0.2rem',
       }}>
-        LBPH — DEMO QUALITY · HUMAN REVIEW REQUIRED
+        CLASSICAL LBPH · HUMAN REVIEW REQUIRED
       </div>
 
       {/* Action buttons */}
@@ -453,7 +453,7 @@ function InspectModal({ person, onClose }) {
           fontFamily: 'var(--font-display)', letterSpacing: '0.07em',
           borderTop: '1px solid var(--border-color)', paddingTop: '0.5rem',
         }}>
-          LBPH face recognition — DEMO QUALITY. Results are investigation leads,
+          Classical LBPH face recognition. Results are investigation leads,
           NOT confirmed identifications. Verify via human review before action.
         </div>
       </div>
@@ -532,7 +532,7 @@ export default function Watchlist() {
           </h2>
           <div className="section-sub">
             {persons.length} active subject{persons.length !== 1 ? 's' : ''} ·
-            LBPH face recogniser · DEMO QUALITY — leads only, not identifications
+            Classical LBPH face recogniser — leads only, not identifications
           </div>
         </div>
         {isAdmin && (

@@ -1,6 +1,14 @@
-import { Box, Server, Camera, ShieldCheck, Database, Link, ArrowRight, CheckCircle, Activity, HardDrive, Cpu, Network } from 'lucide-react';
+import { Server, Camera, ShieldCheck, Database, Link, ArrowRight, CheckCircle, Activity, HardDrive, Cpu, Network } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { authFetch } from '../services/auth';
 
 export default function Architecture() {
+  const [capabilities, setCapabilities] = useState(null);
+  useEffect(() => {
+    authFetch('/system/capabilities').then((response) => response.ok ? response.json() : null).then(setCapabilities).catch(() => setCapabilities(null));
+  }, []);
+  const simulatedLedger = capabilities?.blockchain?.simulated !== false;
+  const durableStorage = capabilities?.evidence?.durable_storage === true;
   const ArchNode = ({ step, title, subtitle, icon: Icon, children, isCore, glowColor }) => (
     <div 
       className={`bg-panel border rounded flex flex-col ${isCore ? 'border-ok glow-ok' : 'border-color'}`}
@@ -54,7 +62,7 @@ export default function Architecture() {
         <div>
           <h2 className="section-title">System Architecture</h2>
           <div className="section-sub">
-            The NETRAKSH pipeline operates on a decentralized edge-to-cloud architecture. It processes video streams locally on CPU hardware, mathematically scores event reliability, and commits high-confidence incidents to a secure cryptographic ledger.
+            Runtime-aware architecture view. Implemented capabilities are separated from current configuration and live operational state.
           </div>
         </div>
       </div>
@@ -152,7 +160,7 @@ export default function Architecture() {
         {/* Divider / Transition Text */}
         <div className="flex items-center gap-3 text-xs text-muted font-body pt-4 border-t border-color">
           <ArrowRight size={14} className="opacity-50" style={{ flexShrink: 0 }} />
-          <span>Every event generates local cryptographically signed evidence. High-severity, cross-command events are additionally dispatched to the Permissioned Ledger.</span>
+          <span>Evidence hashing and signing are implemented. External durable storage and ledger dispatch depend on the runtime configuration shown below.</span>
         </div>
 
         {/* Data Layer Row (Using Flexbox) */}
@@ -190,6 +198,9 @@ export default function Architecture() {
                 <CheckCircle size={14} className="mt-1 text-ok opacity-80" style={{ flexShrink: 0 }} />
                 <span style={{ lineHeight: '1.5' }}>SHA-256 hashing computed per-event over real evidence bytes (bounding boxes, imagery, JSON).</span>
               </div>
+              <div className="bg-dark p-3 rounded border border-color text-xs">
+                Durable object storage: {durableStorage ? 'CONFIGURED' : 'NOT CONFIGURED — local Render filesystem is ephemeral'}
+              </div>
               <div className="flex items-start gap-2">
                 <CheckCircle size={14} className="mt-1 text-ok opacity-80" style={{ flexShrink: 0 }} />
                 <span style={{ lineHeight: '1.5' }}>Ed25519 signing ensures immutable local tamper evidence.</span>
@@ -226,11 +237,11 @@ export default function Architecture() {
               </div>
               <span className="bg-danger text-white rounded font-display tracking-widest" style={{ padding: '0.25rem 0.5rem', fontSize: '9px', boxShadow: '0 0 10px rgba(239,68,68,0.4)' }}>HIGH SEVERITY</span>
             </div>
-            <h3 className="text-danger font-display mb-2 text-lg tracking-wide">Permissioned Ledger</h3>
+            <h3 className="text-danger font-display mb-2 text-lg tracking-wide">{simulatedLedger ? 'Simulated Blockchain Mode' : 'Permissioned Ledger'}</h3>
             <div className="flex flex-col gap-3 text-sm font-body text-muted mt-2">
-              <span>Permissioned Ledger adapter prototype.</span>
+              <span>{capabilities?.blockchain?.label || 'Runtime mode not reported.'}</span>
               <div className="bg-dark p-3 rounded border border-danger text-xs text-muted" style={{ borderOpacity: 0.3, lineHeight: '1.5' }}>
-                Currently running in MOCK mode due to deployment environment constraints. Architecture supports immediate live-switch upon Fabric node availability.
+                {simulatedLedger ? 'MOCK / SIMULATED mode. No production blockchain confirmation is implied.' : 'Fabric mode reported by the backend runtime.'}
               </div>
             </div>
           </div>

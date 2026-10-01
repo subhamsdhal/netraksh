@@ -12,6 +12,9 @@ describe('per-camera authoritative analyzed frame', () => {
     global.ResizeObserver = class { observe() {} disconnect() {} };
     URL.createObjectURL = vi.fn(() => 'blob:analyzed-frame');
     URL.revokeObjectURL = vi.fn();
+    global.Image = class {
+      set src(_value) { queueMicrotask(() => this.onload?.()); }
+    };
     const headers = new Headers({
       'X-Analysis-Session': 'session-1', 'X-Frame-Index': '42',
       'X-Person-Count': '1', 'X-Vehicle-Count': '1', 'X-Track-Count': '2',

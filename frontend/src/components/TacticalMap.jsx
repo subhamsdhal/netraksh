@@ -50,6 +50,7 @@ export default function TacticalMap({ alerts = [] }) {
   const markersRef = useRef([]);
   const [cameras, setCameras] = useState([]);
   const [status, setStatus] = useState('loading'); // loading | ready | auth-required | error
+  const camerasWithCoords = cameras.filter((camera) => camera.latitude != null && camera.longitude != null);
 
   useEffect(() => {
     const load = async () => {
@@ -75,8 +76,9 @@ export default function TacticalMap({ alerts = [] }) {
 
   // Init the map once.
   useEffect(() => {
-    if (!containerRef.current || mapRef.current) return;
-    const map = L.map(containerRef.current, { zoomControl: true, attributionControl: true }).setView([20.5937, 78.9629], 4); // India, default
+    if (!containerRef.current || mapRef.current || camerasWithCoords.length === 0) return;
+    const first = camerasWithCoords[0];
+    const map = L.map(containerRef.current, { zoomControl: true, attributionControl: true }).setView([first.latitude, first.longitude], 12);
     
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '&copy; OpenStreetMap contributors',
@@ -104,7 +106,7 @@ export default function TacticalMap({ alerts = [] }) {
       map.remove();
       mapRef.current = null;
     };
-  }, []);
+  }, [camerasWithCoords.length]);
 
   // Re-plot markers whenever real camera/alert data changes.
   useEffect(() => {
@@ -114,7 +116,7 @@ export default function TacticalMap({ alerts = [] }) {
     markersRef.current.forEach((m) => map.removeLayer(m));
     markersRef.current = [];
 
-    const withCoords = cameras.filter((c) => c.latitude != null && c.longitude != null);
+    const withCoords = camerasWithCoords;
     const activeAlertCameraIds = new Set(alerts.filter((a) => !a.isMock && !a.acknowledged_at).map((a) => a.camera_id));
 
     withCoords.forEach((cam) => {
@@ -138,7 +140,7 @@ export default function TacticalMap({ alerts = [] }) {
     }
   }, [cameras, alerts]);
 
-  const withCoordsCount = cameras.filter((c) => c.latitude != null && c.longitude != null).length;
+  const withCoordsCount = camerasWithCoords.length;
 
   return (
     <div className="w-full h-full relative rounded overflow-hidden" style={{ border: '1px solid rgba(255,255,255,0.1)' }}>
@@ -178,7 +180,7 @@ export default function TacticalMap({ alerts = [] }) {
       )}
       {status === 'ready' && withCoordsCount === 0 && (
         <div className="absolute inset-0 flex items-center justify-center text-muted text-xs font-display text-center px-6 z-[1000] pointer-events-none" style={{ backgroundColor: 'rgba(10,15,13,0.85)' }}>
-          No camera has a registered location yet — set one via PUT /cameras/{'{id}'}/location.
+          NO REGISTERED CAMERA LOCATION
         </div>
       )}
 

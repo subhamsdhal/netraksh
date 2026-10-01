@@ -100,7 +100,7 @@ export function createStartupCoordinator({
     return snapshot;
   };
 
-  const updateService = (key, status) => publish({ [key]: { status } });
+  const updateService = (key, result) => publish({ [key]: result });
 
   const clearAllTimers = () => {
     timers.forEach((timer) => clearTimer(timer));
@@ -117,7 +117,7 @@ export function createStartupCoordinator({
 
   const probe = async (key) => {
     const service = services[key];
-    if (!service?.url || service.url === '/wake') return STARTUP_STATUS.WAKING;
+    if (!service?.url || service.url === '/wake') return { status: STARTUP_STATUS.WAKING, payload: null };
 
     const controller = new AbortController();
     const timeout = setTimer(() => controller.abort(), requestTimeoutMs);
@@ -136,9 +136,9 @@ export function createStartupCoordinator({
       } catch {
         payload = null;
       }
-      return classifyStartupResponse(service, response, payload);
+      return { status: classifyStartupResponse(service, response, payload), payload };
     } catch {
-      return STARTUP_STATUS.WAKING;
+      return { status: STARTUP_STATUS.WAKING, payload: null };
     } finally {
       clearTimer(timeout);
       timers.delete(timeout);
@@ -217,7 +217,7 @@ export function createStartupCoordinator({
   const waitForBackend = () => {
     if (snapshot.backend.status === STARTUP_STATUS.READY) return Promise.resolve(snapshot);
     if (snapshot.backend.status === STARTUP_STATUS.TIMEOUT) {
-      return Promise.reject(new Error('Secure services did not become ready. Retry startup.'));
+      return Promise.reject(new Error('Required services did not become ready. Retry startup.'));
     }
     start();
     return new Promise((resolve, reject) => {
@@ -227,7 +227,7 @@ export function createStartupCoordinator({
           resolve(next);
         } else if (next.backend.status === STARTUP_STATUS.TIMEOUT) {
           unsubscribe();
-          reject(new Error('Secure services did not become ready. Retry startup.'));
+          reject(new Error('Required services did not become ready. Retry startup.'));
         }
       });
     });

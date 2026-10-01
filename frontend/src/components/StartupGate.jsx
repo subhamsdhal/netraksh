@@ -38,7 +38,7 @@ export default function StartupGate({ children }) {
             </div>
           ))}
         </div>
-        <p>{timedOut ? 'One or more secure services did not become ready.' : 'Starting secure services…'}</p>
+        <p>{timedOut ? 'One or more required services did not become ready.' : 'Starting required services…'}</p>
         {timedOut && (
           <button type="button" onClick={() => retryStartupWake()}>
             RETRY STARTUP

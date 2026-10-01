@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { AlertTriangle, Globe, Crosshair, MapPin, CheckCircle, Eye, Shield } from 'lucide-react';
+import { AlertTriangle, Crosshair, MapPin, CheckCircle, Eye, Shield } from 'lucide-react';
 import useWebSocket from '../hooks/useWebSocket';
 import { WS_URL, authFetch } from '../services/auth';
 import useAuth from '../hooks/useAuth';
@@ -53,7 +53,7 @@ export default function Alerts() {
   // REST below owns the initial lifecycle snapshot. Avoid the hook's
   // unrelated five-request bootstrap here; this page only needs its live
   // WebSocket alert additions.
-  const { alerts: wsAlerts } = useWebSocket(WS_URL, { fetchInitial: false });
+  const { alerts: wsAlerts, isConnected } = useWebSocket(WS_URL, { fetchInitial: false });
   const { role } = useAuth();
   // Backend's real RBAC (require_operator_or_admin, backend/api/alerts.py)
   // already rejects AUDITOR's acknowledge attempt with a 403 — this just
@@ -66,6 +66,7 @@ export default function Alerts() {
   const [closingId, setClosingId] = useState(null);
   const [severityFilter, setSeverityFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [capabilities, setCapabilities] = useState(null);
 
   const loadAlerts = useCallback(async () => {
     setStatus('loading');
@@ -89,6 +90,12 @@ export default function Alerts() {
   }, []);
 
   useEffect(() => { loadAlerts(); }, [loadAlerts]);
+  useEffect(() => {
+    authFetch('/system/capabilities')
+      .then((res) => (res.ok ? res.json() : null))
+      .then(setCapabilities)
+      .catch(() => setCapabilities(null));
+  }, []);
 
   // Real alerts only — deduped by alert_id from REST + WS
   const realAlerts = useMemo(() => {
@@ -120,7 +127,7 @@ export default function Alerts() {
       const res = await authFetch(`/alerts/${alertId}/acknowledge`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ receiving_command_id: 'COMMAND_A', status: 'ACKNOWLEDGED' }),
+        body: JSON.stringify({ status: 'ACKNOWLEDGED' }),
       });
       if (res.ok) await loadAlerts();
     } catch (_e) {
@@ -178,7 +185,7 @@ export default function Alerts() {
         <div>
           <div className="section-title">Alerts &amp; Incidents</div>
           <div className="section-sub">
-            Cross-command escalated events · Temporal/spatial corroboration active
+            Cross-command escalated events{capabilities?.corroboration?.temporal_spatial ? ' · Corroboration capability available' : ''}
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -198,7 +205,7 @@ export default function Alerts() {
             }}
           >
             <Shield size={11} />
-            Network Secure
+            {isConnected ? 'Control plane connected' : 'Control plane disconnected'}
           </div>
           <div className="badge badge-outline">
             {realAlerts.length} Total
@@ -240,13 +247,12 @@ export default function Alerts() {
               <div className="state-empty">
                 <CheckCircle size={28} className="state-empty-icon" />
                 <div className="state-empty-title">No Active Incidents</div>
-                <div className="state-empty-sub">No alerts match the current filters. The sector is clear.</div>
+                <div className="state-empty-sub">No recorded alerts match the current filters.</div>
               </div>
             )}
 
             {displayAlerts.map(alert => {
               const sc = severityBadgeColor(alert.severity);
-              const isOpen = !alert.acknowledged_at && !alert.closed_at;
               return (
                 <div
                   key={alert.alert_id}

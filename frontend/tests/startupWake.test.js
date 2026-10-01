@@ -100,6 +100,7 @@ describe('startup coordinator', () => {
     await startup;
 
     expect(coordinator.getSnapshot().allReady).toBe(true);
+    expect(coordinator.getSnapshot().camBorder01.payload.camera_id).toBe('cam-border-01');
   });
 
   it('does not report allReady until every service is READY', async () => {

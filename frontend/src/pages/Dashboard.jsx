@@ -6,10 +6,12 @@ import useDemoScenario from '../hooks/useDemoScenario';
 import { WS_URL, BACKEND_URL, authFetch } from '../services/auth';
 import useAuth from '../hooks/useAuth';
 import { parseUtc } from '../utils/time';
-import { DEMO_CAMERA_LABELS, MAX_VISIBLE_CAMERAS, selectDemoCameraSlots } from '../utils/demoCameraSlots';
+import { MAX_VISIBLE_CAMERAS, selectCameraSlots, cameraDisplayMetadata } from '../utils/cameraSlots';
+import { capabilityLabel, deriveCameraOperationalState } from '../utils/systemTruth';
+import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
-import { applyReplayResult, bundledSourceState, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
+import { applyReplayResult, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 
 // Reads structured scores from the event instead of string-parsing the reason.
@@ -93,6 +95,7 @@ function explainDecision(parsed) {
 }
 
 export default function Dashboard() {
+  const startupReadiness = useStartupReadiness();
   const {
     events, health, metrics, liveTracks, cameras, isConnected,
     connectionStatus, refreshEventsForContext, refreshTelemetryForContext,
@@ -115,26 +118,23 @@ export default function Dashboard() {
   const [eventCameraFilter, setEventCameraFilter] = useState('ALL');
   const [reliabilityCameraId, setReliabilityCameraId] = useState(null);
   const [correlationState, setCorrelationState] = useState(null);
-  const [demoSlots, setDemoSlots] = useState(() => {
+  const [cameraSlots, setCameraSlots] = useState(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem('netraksh.demoCameraSlots') || '[]');
+      const saved = JSON.parse(localStorage.getItem('netraksh.cameraSlots') || localStorage.getItem('netraksh.demoCameraSlots') || '[]');
       return Array.isArray(saved) ? saved.slice(0, MAX_VISIBLE_CAMERAS) : [];
     } catch (_) { return []; }
   });
   const [now, setNow] = useState(Date.now());
   const [backendStatus, setBackendStatus] = useState('CHECKING');
-  const [sourceRestoreReady, setSourceRestoreReady] = useState({});
   const [controlRequests, setControlRequests] = useState({});
-  const sourceRestoreReadyRef = useRef({});
   const fileInputRefs = useRef({});
-  const autoStartedDemoCamerasRef = useRef(new Set());
   const wakeTimeoutsRef = useRef({});
   // This is a request lifecycle, not a mount latch.  A cold backend must not
   // consume the only prewarm attempt before it can accept the POST.
   const prewarmRequestStateRef = useRef('IDLE');
 
   // Remove the retired source cache once.  It contains no authority and is
-  // deliberately never read; slot assignment remains in demoCameraSlots.
+  // deliberately never read; camera slot assignment is independent.
   useEffect(() => { localStorage.removeItem('netraksh.slotSources'); }, []);
 
   const updateCameraMedia = (cameraId, patch) => {
@@ -326,7 +326,7 @@ export default function Dashboard() {
     // Saved slots are layout only.  Including them while a cold backend is
     // restoring lets the card say RESTORING rather than falsely "not
     // configured"; GET /video/current remains the source authority.
-    ...demoSlots,
+    ...cameraSlots,
     ...cameras.map(camera => camera.camera_id),
     ...Object.keys(liveTracks),
     ...Object.keys(metrics),
@@ -361,7 +361,7 @@ export default function Dashboard() {
     return {
       cameraId,
       friendlyName,
-      location: camera.location || DEMO_CAMERA_LABELS[cameraId]?.location || 'Unspecified location',
+      location: camera.location || 'Location not registered',
       displayId: cameraId.toUpperCase(),
       streamId: scopedLiveTracks[cameraId]?.stream_id || null,
       sourceType: 'EDGE CAMERA',
@@ -370,11 +370,9 @@ export default function Dashboard() {
     };
   }), [cameraIds, cameras, scopedLiveTracks, now]);
   const visibleCameraIds = useMemo(
-    () => selectDemoCameraSlots(cameraIds, demoSlots),
-    [cameraIds.join('|'), demoSlots.join('|')],
+    () => selectCameraSlots(cameraIds, cameraSlots),
+    [cameraIds.join('|'), cameraSlots.join('|')],
   );
-  const dedicatedDemoView = visibleCameraIds.filter(Boolean).length > 0
-    && visibleCameraIds.filter(Boolean).every((id) => Boolean(DEMO_CAMERA_LABELS[id]));
   const activeCameraIds = useMemo(() => visibleCameraIds.filter((id) => {
     return isActiveTelemetry(scopedLiveTracks[id], now);
   }), [visibleCameraIds.join('|'), scopedLiveTracks, now]);
@@ -452,13 +450,13 @@ export default function Dashboard() {
     ? reliabilityCameraId : configuredCameraIds[0] || null;
   useEffect(() => {
     if (!cameraIds.length) return;
-    setDemoSlots((current) => {
+    setCameraSlots((current) => {
       // Keep persisted assignments while the inventory is arriving in
       // separate websocket batches. Reconcile defaults only when no slots
       // have been chosen yet; otherwise a one-camera first batch can replace
       // slot 1 with an empty value and lose the operator's assignment.
       if (current.length) return current;
-      const next = selectDemoCameraSlots(cameraIds, current);
+      const next = selectCameraSlots(cameraIds, current);
       return JSON.stringify(current) === JSON.stringify(next) ? current : next;
     });
   }, [cameraIds.join('|')]);
@@ -467,22 +465,17 @@ export default function Dashboard() {
     // while the websocket camera inventory is still empty. Route changes
     // remount Dashboard, and writing [] here used to clear both configured
     // slots before the inventory could restore them.
-    if (!demoSlots.length) return;
+    if (!cameraSlots.length) return;
     // Persist the operator's assignments, not only the cameras that have
     // arrived in this websocket batch. A route remount can briefly receive
     // one worker before the other; saving the filtered visible list there
     // silently dropped the missing slot.
-    localStorage.setItem('netraksh.demoCameraSlots', JSON.stringify(demoSlots));
+    localStorage.setItem('netraksh.cameraSlots', JSON.stringify(cameraSlots));
+    localStorage.removeItem('netraksh.demoCameraSlots');
     if (visibleCameraIds[0] && !visibleCameraIds.includes(selectedCameraId)) setSelectedCameraId(visibleCameraIds[0]);
-  }, [demoSlots.join('|'), visibleCameraIds.join('|')]);
+  }, [cameraSlots.join('|'), visibleCameraIds.join('|')]);
   useEffect(() => {
     let mounted = true;
-    visibleCameraIds.filter(Boolean).forEach((cameraId) => { sourceRestoreReadyRef.current[cameraId] = false; });
-    setSourceRestoreReady((current) => {
-      const next = { ...current };
-      visibleCameraIds.filter(Boolean).forEach((cameraId) => { next[cameraId] = false; });
-      return next;
-    });
     setSlotSources((current) => {
       const next = { ...current };
       visibleCameraIds.filter(Boolean).forEach((cameraId) => { next[cameraId] = restoringSourceState(); });
@@ -557,39 +550,12 @@ export default function Dashboard() {
             setSlotSources((current) => ({ ...current, [cameraId]: { restoring: false, runState: 'UNAVAILABLE' } }));
           }
         } catch (_) { return; /* transport failure remains RESTORING */ }
-        if (mounted && authoritativeResponse) {
-          sourceRestoreReadyRef.current[cameraId] = true;
-          setSourceRestoreReady((current) => ({ ...current, [cameraId]: true }));
-        }
+        if (!mounted || !authoritativeResponse) return;
       }));
     };
     restoreScopedSources();
     return () => { mounted = false; };
   }, [visibleCameraIds.join('|'), backendStatus]);
-  useEffect(() => {
-    // Start the backend-authoritative source only after restoration completes.
-    // This prevents the evaluator auto-start from racing a durable upload and
-    // replacing it with the bundled demo on every page load.
-    visibleCameraIds.filter(Boolean).forEach((cameraId) => {
-      if (!sourceRestoreReady[cameraId] || !sourceRestoreReadyRef.current[cameraId]) return;
-      if (!DEMO_CAMERA_LABELS[cameraId]) return;
-      if (activeCameraIds.includes(cameraId)) return;
-      if (autoStartedDemoCamerasRef.current.has(cameraId)) return;
-      autoStartedDemoCamerasRef.current.add(cameraId);
-
-      const restoredSource = slotSources[cameraId];
-      const source = restoredSource || bundledSourceState('paused');
-      // A durable upload is operator-controlled. If its finite run already
-      // reached EOF, page restore must preserve COMPLETED/IDLE rather than
-      // silently restarting the same cloud source on every refresh.
-      if (restoredSource?.sourceMode === 'durable') return;
-      if (!restoredSource) {
-        setSlotSources((current) => ({ ...current, [cameraId]: source }));
-      }
-      requestScenario(cameraId, scenarioAction(cameraId, source, 'normal', true));
-    });
-  }, [sourceRestoreReady, visibleCameraIds.join('|'), activeCameraIds.join('|'), slotSources]);
-
   useEffect(() => {
     if (dashboardMode !== 'DUAL') setEventCameraFilter('ALL');
     if (!configuredCameraIds.includes(reliabilityCameraId)) setReliabilityCameraId(configuredCameraIds[0] || null);
@@ -913,7 +879,7 @@ export default function Dashboard() {
   const decisionMeta = DECISION_META[reliabilityEvent?.decision_state] || null;
   const whyExplanation = explainDecision(reliabilityEvent ? parseDecisionReason(reliabilityEvent) : null);
   let liveTelemetry = !activeCameraId ? null : scopedLiveTracks[activeCameraId];
-  if (!dedicatedDemoView && liveTelemetry && videoSessionId && liveTelemetry.stream_id && liveTelemetry.stream_id !== videoSessionId) {
+  if (liveTelemetry && videoSessionId && liveTelemetry.stream_id && liveTelemetry.stream_id !== videoSessionId) {
     liveTelemetry = null;
   }
 
@@ -1006,7 +972,7 @@ export default function Dashboard() {
         <div><span>LAST TELEMETRY</span><strong>{telemetryAgeMs == null ? (telemetryStatus === 'PAUSED' ? 'N/A · PAUSED' : telemetryStatus === 'WAKING' ? 'WAITING FOR FIRST CURRENT-RUN TELEMETRY' : 'Never') : `${Math.max(0, telemetryAgeMs / 1000).toFixed(1)}s ago`}</strong></div>
       </div>
 
-      <section className={`dashboard-camera-grid camera-mode-${dashboardMode.toLowerCase()}`} aria-label="SIH camera source slots">
+      <section className={`dashboard-camera-grid camera-mode-${dashboardMode.toLowerCase()}`} aria-label="Camera source slots">
         {Array.from({ length: MAX_VISIBLE_CAMERAS }, (_, slotIndex) => {
           const cameraId = visibleCameraIds[slotIndex];
           const camera = cameraModels.find(item => item.cameraId === cameraId) || null;
@@ -1020,8 +986,13 @@ export default function Dashboard() {
           const faceLabel = latestFaceEvent?.watchlist_label || latestFaceEvent?.face_match_person_name || null;
           const lightingState = latestCameraEvent?.lighting_state || telemetry?.lighting_state || (String(latestCameraEvent?.scene_condition || '').includes('LOW_LIGHT') ? 'LOW_LIGHT' : 'N/A');
           const analyticsMethod = latestCameraEvent?.detection_method || telemetry?.detection_method || (latestCameraEvent?.event_type === 'MOVEMENT_UNCLASSIFIED' ? 'MOTION_FALLBACK' : 'N/A');
-          const locationLabel = DEMO_CAMERA_LABELS[cameraId]?.location || camera?.location || 'Unspecified location';
-          const title = DEMO_CAMERA_LABELS[cameraId]?.name || camera?.friendlyName || `Camera slot ${slotIndex + 1}`;
+          const metadata = cameraDisplayMetadata(camera, slotIndex);
+          const locationLabel = metadata.location;
+          const title = metadata.name;
+          const startupKey = cameraId === 'cam-border-01' ? 'camBorder01' : cameraId === 'cam-checkpoint-01' ? 'camCheckpoint01' : null;
+          const edgeRuntime = startupKey ? startupReadiness[startupKey] : null;
+          const operational = deriveCameraOperationalState({ nodeStatus: edgeRuntime?.status, sourceState, telemetry, now });
+          const capabilities = edgeRuntime?.payload?.capabilities || null;
           const status = lifecycleStatus(sourceState, telemetry, now);
           const liveStatus = telemetryStatusAt(telemetry, now);
           const telemetryAvailable = Boolean(telemetry && liveStatus === 'LIVE');
@@ -1046,7 +1017,7 @@ export default function Dashboard() {
             : null;
           const updateAge = telemetry?.timestamp ? Math.max(0, now - telemetry.timestamp) : null;
           return (
-            <article className="dashboard-camera-card card" key={`demo-slot-${slotIndex}`}>
+            <article className="dashboard-camera-card card" key={`camera-slot-${slotIndex}`}>
               {cameraId && <input
                 type="file"
                 accept=".mp4,.avi,.mov,.mkv,.webm,.m4v,video/*"
@@ -1057,7 +1028,7 @@ export default function Dashboard() {
               />}
               <div className="dashboard-camera-card-header">
                 <div>
-                  <div className="dashboard-camera-kicker">CAMERA {String(slotIndex + 1).padStart(2, '0')} · SIH DEMO SLOT</div>
+                  <div className="dashboard-camera-kicker">CAMERA {String(slotIndex + 1).padStart(2, '0')}</div>
                   <h2>{title}</h2>
                   <p>{cameraId ? `${cameraId.toUpperCase()} · ${locationLabel}` : 'No source selected'}</p>
                   {sourceState?.restoring && <p className="dashboard-source-name">RESTORING CLOUD SOURCE...</p>}
@@ -1107,7 +1078,7 @@ export default function Dashboard() {
                     onChange={(event) => {
                       const next = [...visibleCameraIds];
                       next[slotIndex] = event.target.value || null;
-                      setDemoSlots(next);
+                      setCameraSlots(next);
                       if (event.target.value) setSelectedCameraId(event.target.value);
                     }}
                   >
@@ -1149,11 +1120,15 @@ export default function Dashboard() {
                 <span className="ai-context">SCENE {lightingState.replace(/_/g, ' ')}</span>
                 <span className="ai-context">ANALYTICS {analyticsMethod.replace(/_/g, ' ')}</span>
                 <span className="ai-context">LINE / FENCE EVENT {cameraId ? 'BACKEND' : 'WAITING'}</span>
-                <span className="ai-context">ANPR {cameraId ? 'LOCALIZATION AVAILABLE' : 'N/A'}</span>
-                <span className="ai-context">OCR {cameraId ? 'UNAVAILABLE · CLOUD MODE' : 'N/A'}</span>
+                <span className="ai-context">NODE {operational.node}</span>
+                <span className="ai-context">SOURCE {operational.source}</span>
+                <span className="ai-context">ANALYSIS {operational.analysis}</span>
+                <span className="ai-context">TELEMETRY {operational.telemetry}</span>
+                <span className="ai-context">ANPR {capabilityLabel(capabilities?.anpr_localization, 'LOCALIZATION AVAILABLE')}</span>
+                <span className="ai-context">OCR {capabilityLabel(capabilities?.anpr_ocr, 'AVAILABLE', 'UNAVAILABLE')}</span>
               </div>
               <div className="dashboard-camera-telemetry" aria-label={`ANPR result for ${cameraId || 'empty slot'}`}>
-                <span><b>ANPR OCR</b>{latestCameraEvent?.normalized_plate_text || latestCameraEvent?.plate_text || 'Unavailable in constrained cloud mode'}</span>
+                <span><b>ANPR OCR</b>{latestCameraEvent?.normalized_plate_text || latestCameraEvent?.plate_text || (capabilities?.anpr_ocr === false ? 'Unavailable' : 'No plate evaluated')}</span>
                 <span><b>CONFIDENCE</b>{latestCameraEvent?.plate_confidence == null ? 'N/A' : `${Math.round(Number(latestCameraEvent.plate_confidence) * 100)}%`}</span>
               </div>
               <div className="dashboard-camera-telemetry" aria-label={`Face watchlist result for ${cameraId || 'empty slot'}`}>
@@ -1213,7 +1188,7 @@ export default function Dashboard() {
           <div><span className="card-title">Recent Number Plate Reads</span><span className="dashboard-events-subtitle">Current camera/session scope · {recentPlateReads.length} read{recentPlateReads.length === 1 ? '' : 's'}</span></div>
           {dashboardMode === 'DUAL' && <div className="dashboard-event-filters" role="group" aria-label="ANPR camera filter">
             <button className={`btn btn-sm ${eventCameraFilter === 'ALL' ? 'btn-primary' : 'btn-outline'}`} onClick={() => setEventCameraFilter('ALL')}>ALL</button>
-            {activeCameraIds.map((cameraId) => <button key={`anpr-${cameraId}`} className={`btn btn-sm ${eventCameraFilter === cameraId ? 'btn-primary' : 'btn-outline'}`} onClick={() => setEventCameraFilter(cameraId)}>{cameraId === 'cam-border-01' ? 'CAM 1' : 'CAM 2'}</button>)}
+            {activeCameraIds.map((cameraId) => <button key={`anpr-${cameraId}`} className={`btn btn-sm ${eventCameraFilter === cameraId ? 'btn-primary' : 'btn-outline'}`} onClick={() => setEventCameraFilter(cameraId)}>{cameraModels.find((camera) => camera.cameraId === cameraId)?.friendlyName || cameraId}</button>)}
           </div>}
         </div>
         {recentPlateReads.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">NO PLATE READ — accepted OCR results will appear here.</div></div> : (
@@ -1415,11 +1390,11 @@ export default function Dashboard() {
             </div>
             <div className="overflow-y-auto custom-scrollbar flex flex-col gap-2" style={{ padding: '0.75rem' }}>
               {cameraInventoryRestoring ? <div className="state-empty-sub">RESTORING CAMERA INVENTORY</div> : configuredCameraIds.length === 0 && <div className="state-empty-sub">WAITING FOR SOURCE</div>}
-              {fleetHealth.filter((node) => configuredCameraIds.includes(node.camera_id)).map((node) => {
-                const nodeState = node.health_state || 'UNKNOWN';
+              {fleetHealth.map((node) => {
                 const cameraSource = slotSources[node.camera_id];
-                const state = lifecycleStatus(cameraSource, scopedLiveTracks[node.camera_id], now);
-                return <div key={node.camera_id} className="flex justify-between items-center border rounded p-2" style={{ borderColor: 'var(--border-color)' }}><span className="font-display text-main" style={{ fontSize: '.7rem' }}>{node.name || node.camera_id}</span><span className={state === 'ONLINE' ? 'text-ok' : 'text-warning'} style={{ fontSize: '.6rem' }}>{state}</span></div>;
+                const startupKey = node.camera_id === 'cam-border-01' ? 'camBorder01' : node.camera_id === 'cam-checkpoint-01' ? 'camCheckpoint01' : null;
+                const operational = deriveCameraOperationalState({ nodeStatus: startupKey ? startupReadiness[startupKey]?.status : null, sourceState: cameraSource, telemetry: scopedLiveTracks[node.camera_id], now });
+                return <div key={node.camera_id} className="flex justify-between items-center border rounded p-2" style={{ borderColor: 'var(--border-color)' }}><span className="font-display text-main" style={{ fontSize: '.7rem' }}>{node.name || node.camera_id}</span><span className="text-muted" style={{ fontSize: '.6rem' }}>NODE {operational.node} · ANALYSIS {operational.analysis}</span></div>;
               })}
             </div>
           </div>
@@ -1431,7 +1406,7 @@ export default function Dashboard() {
           <div className="dashboard-reliability-card card">
             <div className="card-header">
               <div><span className="card-title">Reliability Decision Pipeline</span><span className="dashboard-events-subtitle">{reliabilityScopeCameraId ? `Camera: ${cameraModels.find((camera) => camera.cameraId === reliabilityScopeCameraId)?.friendlyName || reliabilityScopeCameraId}${!activeCameraIds.includes(reliabilityScopeCameraId) ? ` · SOURCE LOADED · ANALYSIS ${lifecycleStatus(slotSources[reliabilityScopeCameraId], scopedLiveTracks[reliabilityScopeCameraId], now) === 'COMPLETED' ? 'COMPLETED' : 'PAUSED'}` : ''}` : cameraInventoryRestoring ? 'RESTORING CAMERA CONFIGURATION' : 'WAITING FOR SOURCE'}</span></div>
-              {configuredCameraIds.length > 1 && <select aria-label="Reliability camera" value={reliabilityScopeCameraId || ''} onChange={(event) => setReliabilityCameraId(event.target.value)}>{configuredCameraIds.map((cameraId) => <option key={cameraId} value={cameraId}>{cameraId === 'cam-border-01' ? 'Camera 1' : 'Camera 2'}</option>)}</select>}
+              {configuredCameraIds.length > 1 && <select aria-label="Reliability camera" value={reliabilityScopeCameraId || ''} onChange={(event) => setReliabilityCameraId(event.target.value)}>{configuredCameraIds.map((cameraId) => <option key={cameraId} value={cameraId}>{cameraModels.find((camera) => camera.cameraId === cameraId)?.friendlyName || cameraId}</option>)}</select>}
               <ShieldCheck size={14} className="text-muted" />
             </div>
 
