@@ -357,7 +357,7 @@ export default function Dashboard() {
       ? rawName
       : friendlyFromId || 'Camera';
     const receivedAt = scopedLiveTracks[cameraId]?.timestamp;
-    const status = telemetryStatusAt(scopedLiveTracks[cameraId], now);
+    const status = lifecycleStatus(slotSources[cameraId], scopedLiveTracks[cameraId], now);
     return {
       cameraId,
       friendlyName,
@@ -368,7 +368,7 @@ export default function Dashboard() {
       status,
       lastSeen: receivedAt || null,
     };
-  }), [cameraIds, cameras, scopedLiveTracks, now]);
+  }), [cameraIds, cameras, scopedLiveTracks, slotSources, now]);
   const visibleCameraIds = useMemo(
     () => selectCameraSlots(cameraIds, cameraSlots),
     [cameraIds.join('|'), cameraSlots.join('|')],

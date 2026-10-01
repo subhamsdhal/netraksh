@@ -217,9 +217,8 @@ async def sync_status(
         .first()
     )
     
-    edge_queued = 0
-    if latest_metrics and latest_metrics.events_json and "queue_depth" in latest_metrics.events_json:
-        edge_queued = latest_metrics.events_json["queue_depth"]
+    metrics_events = latest_metrics.events_json if latest_metrics and latest_metrics.events_json else {}
+    edge_queued = int(metrics_events.get("queue_depth", 0) or 0)
 
     # For 'synced' and 'failed', we can either use the metrics or keep using the backend DB 
     # to show the overall backend-to-chain status as well, but the instruction specifically 
@@ -228,15 +227,30 @@ async def sync_status(
     backend_failed = db.query(SyncQueue).filter(SyncQueue.sync_status == "FAILED").count()
     backend_synced = db.query(SyncQueue).filter(SyncQueue.sync_status == "SYNCED").count()
     last_sync = db.query(SyncQueue).order_by(desc(SyncQueue.queued_at)).first()
-    has_activity = bool(latest_metrics or last_sync)
+    metric_sent = metrics_events.get("sent", {})
+    metric_failed = metrics_events.get("failed", {})
+    metric_sent_count = int(metric_sent.get("count", 0) if isinstance(metric_sent, dict) else metric_sent or 0)
+    metric_failed_count = int(metric_failed.get("count", 0) if isinstance(metric_failed, dict) else metric_failed or 0)
+    synced = max(metric_sent_count, backend_synced)
+    failed = max(metric_failed_count, backend_failed)
+    queued = max(edge_queued, backend_queued)
+    metrics_has_sync_activity = bool(edge_queued or metric_sent_count or metric_failed_count)
+    # A worker process snapshot is not evidence that any event/evidence sync
+    # occurred.  Keep the control plane IDLE until a queue row or a non-zero
+    # queue/sent/failed counter proves real synchronization activity.
+    has_activity = bool(last_sync or queued or synced or failed)
     return {
-        "queued": max(edge_queued, backend_queued),
+        "queued": queued,
         "edge_queued": edge_queued,
         "backend_queued": backend_queued,
-        "synced": latest_metrics.events_json.get("sent", {}).get("count", backend_synced) if latest_metrics and latest_metrics.events_json else backend_synced,
-        "failed": latest_metrics.events_json.get("failed", {}).get("count", backend_failed) if latest_metrics and latest_metrics.events_json else backend_failed,
+        "synced": synced,
+        "failed": failed,
         "has_activity": has_activity,
-        "last_activity_at": latest_metrics.timestamp.isoformat() if latest_metrics else (last_sync.queued_at.isoformat() if last_sync else None),
+        "last_activity_at": (
+            latest_metrics.timestamp.isoformat()
+            if latest_metrics and metrics_has_sync_activity
+            else (last_sync.queued_at.isoformat() if last_sync else None)
+        ),
         "observed_at": datetime.utcnow().isoformat(),
     }
 

@@ -12,7 +12,9 @@ export function lifecycleStatus(sourceState, telemetry, now = Date.now()) {
   if (state === 'WAKING') return 'WAKING';
   if (state === 'PAUSED' || state === 'READY') return 'PAUSED';
   if (state === 'COMPLETED') return 'COMPLETED';
-  return sourceState?.sourceMode ? 'PAUSED' : 'OFFLINE';
+  // No source is an honest idle analysis state. Node availability is rendered
+  // independently and OFFLINE is reserved for a genuinely unavailable node.
+  return sourceState?.sourceMode ? 'PAUSED' : 'IDLE';
 }
 
 export function isActiveTelemetry(telemetry, now = Date.now()) {

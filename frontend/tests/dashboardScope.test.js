@@ -73,6 +73,7 @@ describe('camera telemetry correctness', () => {
     expect(lifecycleStatus({ sourceMode: 'durable', runState: 'WAKING' }, null)).toBe('WAKING');
     expect(lifecycleStatus({ sourceMode: 'durable', runState: 'COMPLETED' }, null)).toBe('COMPLETED');
     expect(lifecycleStatus({ sourceMode: 'durable', runState: 'PAUSED' }, { timestamp: 1000 }, 1001)).toBe('ONLINE');
+    expect(lifecycleStatus(null, null)).toBe('IDLE');
   });
 
   it('binds durable telemetry to source stream_id, not analyzed-frame session id', () => {
