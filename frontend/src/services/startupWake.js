@@ -38,7 +38,7 @@ const DEFAULT_POLL_INTERVAL_MS = 1_750;
 const DEFAULT_BACKEND_TIMEOUT_MS = 12_000;
 const DEFAULT_EDGE_TIMEOUT_MS = 5_000;
 const DEFAULT_PREWARM_TIMEOUT_MS = 8_000;
-const RESUME_AFTER_MS = 60_000;
+export const RESUME_AFTER_MS = 60_000;
 
 function initialSnapshot() {
   return {
@@ -47,8 +47,12 @@ function initialSnapshot() {
     camBorder01: { status: STARTUP_STATUS.UNKNOWN },
     camCheckpoint01: { status: STARTUP_STATUS.UNKNOWN },
     allReady: false,
+    admitted: false,
+    revalidating: false,
+    lastReadyEdgeCount: 0,
     startedAt: null,
     readyAt: null,
+    lastReadyAt: null,
   };
 }
 
@@ -107,7 +111,12 @@ export function createStartupCoordinator({
       (key) => snapshot[key].status === STARTUP_STATUS.READY,
     );
     if (snapshot.allReady && !snapshot.readyAt) {
-      snapshot.readyAt = now();
+      const completedAt = now();
+      snapshot.readyAt = completedAt;
+      snapshot.lastReadyAt = completedAt;
+      snapshot.lastReadyEdgeCount = 2;
+      snapshot.revalidating = false;
+      snapshot.admitted = true;
       inFlight.forEach(({ controller }) => controller.abort());
       clearAllTimers();
     }
@@ -275,7 +284,7 @@ export function createStartupCoordinator({
       if (remaining <= 0) {
         const updates = {};
         unfinished.forEach((key) => { updates[key] = { status: STARTUP_STATUS.TIMEOUT }; });
-        publish(updates);
+        publish({ ...updates, revalidating: false });
         clearAllTimers();
         return snapshot;
       }
@@ -300,6 +309,10 @@ export function createStartupCoordinator({
     inFlight.clear();
     prewarmAccepted = false;
     const startedAt = now();
+    const priorReadyEdgeCount = ['camBorder01', 'camCheckpoint01'].filter(
+      (key) => snapshot[key].status === STARTUP_STATUS.READY,
+    ).length;
+    const revalidating = Boolean(force && (snapshot.allReady || snapshot.lastReadyAt));
     const waking = Object.fromEntries(
       SERVICE_KEYS.map((key) => [key, { status: STARTUP_STATUS.WAKING }]),
     );
@@ -307,6 +320,10 @@ export function createStartupCoordinator({
       requested: true,
       ...waking,
       allReady: false,
+      revalidating,
+      lastReadyEdgeCount: revalidating
+        ? Math.max(snapshot.lastReadyEdgeCount || 0, priorReadyEdgeCount)
+        : 0,
       startedAt,
       readyAt: null,
     });
@@ -385,13 +402,17 @@ export function waitForBackendReady() {
   return coordinator.waitForBackend();
 }
 
+export function shouldRevalidateOnResume(state, now = Date.now()) {
+  const lastActivity = state.readyAt || state.lastReadyAt || state.startedAt || 0;
+  return lastActivity > 0 && now - lastActivity >= RESUME_AFTER_MS;
+}
+
 export function installStartupResumeHandlers() {
   if (resumeHandlersInstalled || typeof window === 'undefined' || typeof document === 'undefined') return;
   resumeHandlersInstalled = true;
   const resume = () => {
     const state = startupWakeState();
-    const lastActivity = state.readyAt || state.startedAt || 0;
-    if (Date.now() - lastActivity >= RESUME_AFTER_MS) requestStartupWake({ force: true });
+    if (shouldRevalidateOnResume(state)) requestStartupWake({ force: true });
   };
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') resume();

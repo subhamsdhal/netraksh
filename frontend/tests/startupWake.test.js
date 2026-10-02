@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createStartupCoordinator,
   classifyStartupResponse,
+  shouldRevalidateOnResume,
+  RESUME_AFTER_MS,
   STARTUP_STATUS,
 } from '../src/services/startupWake';
 
@@ -98,6 +100,12 @@ describe('startup response classification', () => {
 });
 
 describe('startup coordinator', () => {
+  it('does not revalidate after a short tab switch but does after the resume threshold', () => {
+    const state = { readyAt: 10_000, lastReadyAt: 10_000, startedAt: 1_000 };
+    expect(shouldRevalidateOnResume(state, 10_000 + RESUME_AFTER_MS - 1)).toBe(false);
+    expect(shouldRevalidateOnResume(state, 10_000 + RESUME_AFTER_MS)).toBe(true);
+  });
+
   it('dispatches all three direct probes and backend prewarm before awaiting any response', async () => {
     const resolvers = [];
     const fetchImpl = vi.fn(() => new Promise((resolve) => resolvers.push(resolve)));
@@ -237,6 +245,28 @@ describe('startup coordinator', () => {
     await second;
 
     expect(fetchImpl.mock.calls.length).toBeGreaterThan(firstCycleCalls);
+    expect(coordinator.getSnapshot().allReady).toBe(true);
+  });
+
+  it('marks a forced cycle as background revalidation and retains last-ready edge truth', async () => {
+    const pending = [];
+    const fetchImpl = vi.fn(readyFetch);
+    const coordinator = createStartupCoordinator({ services, prewarm, fetchImpl });
+    await coordinator.start();
+
+    fetchImpl.mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
+    const revalidation = coordinator.start({ force: true });
+    const state = coordinator.getSnapshot();
+    expect(state.revalidating).toBe(true);
+    expect(state.lastReadyEdgeCount).toBe(2);
+    expect(state.allReady).toBe(false);
+
+    pending[0](response(payloads.backend));
+    pending[1](response(payloads.camBorder01));
+    pending[2](response(payloads.camCheckpoint01));
+    pending[3](response({ cameras: {} }));
+    await revalidation;
+    expect(coordinator.getSnapshot().revalidating).toBe(false);
     expect(coordinator.getSnapshot().allReady).toBe(true);
   });
 

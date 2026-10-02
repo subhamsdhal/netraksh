@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveGlobalEdgeStatus, processingFpsForTelemetry, sourceFpsForTelemetry } from '../src/utils/liveMetrics';
+import { deriveGlobalEdgeStatus, processingFpsForTelemetry, sourceFpsForTelemetry, startupEdgeReadiness } from '../src/utils/liveMetrics';
 
 const now = 1_000_000;
 const live = { timestamp: now - 100, processing_fps: 0.24, source_fps: 29.97 };
@@ -45,6 +45,50 @@ describe('live dashboard metrics', () => {
       prewarm: { eligible: 2, warming: 0, ready: 2, terminal: 0 },
       now,
     })).toBe('READY');
+  });
+
+  it('uses the authoritative startup snapshot without an optional prewarm event', () => {
+    const startup = {
+      requested: true,
+      camBorder01: { status: 'READY' },
+      camCheckpoint01: { status: 'READY' },
+    };
+    expect(deriveGlobalEdgeStatus({ startup, now })).toBe('READY');
+    expect(startupEdgeReadiness(startup)).toMatchObject({ eligible: 2, ready: 2 });
+  });
+
+  it('keeps two configured edges in the denominator while startup is warming', () => {
+    const startup = {
+      requested: true,
+      camBorder01: { status: 'WAKING' },
+      camCheckpoint01: { status: 'WAKING' },
+    };
+    expect(deriveGlobalEdgeStatus({ startup, now })).toBe('WARMING');
+    expect(startupEdgeReadiness(startup)).toMatchObject({ eligible: 2, ready: 0 });
+  });
+
+  it('distinguishes background revalidation from initial warming', () => {
+    const startup = {
+      requested: true,
+      revalidating: true,
+      lastReadyEdgeCount: 2,
+      camBorder01: { status: 'WAKING' },
+      camCheckpoint01: { status: 'WAKING' },
+    };
+    expect(deriveGlobalEdgeStatus({ startup, now })).toBe('RECHECKING');
+    expect(startupEdgeReadiness(startup)).toMatchObject({ eligible: 2, ready: 0, lastReady: 2 });
+  });
+
+  it('reports current partial progress during revalidation', () => {
+    const startup = {
+      requested: true,
+      revalidating: true,
+      lastReadyEdgeCount: 2,
+      camBorder01: { status: 'READY' },
+      camCheckpoint01: { status: 'WAKING' },
+    };
+    expect(deriveGlobalEdgeStatus({ startup, now })).toBe('RECHECKING');
+    expect(startupEdgeReadiness(startup)).toMatchObject({ eligible: 2, ready: 1 });
   });
 
   it('uses processing throughput, not pipeline metric or source FPS, for AI FPS', () => {

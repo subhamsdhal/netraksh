@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -23,9 +23,11 @@ vi.mock('../src/services/startupWake', () => ({
 
 import StartupGate from '../src/components/StartupGate';
 
-function state(statuses) {
+function state(statuses, { admitted } = {}) {
+  const allReady = Object.values(statuses).every((status) => status === 'READY');
   return {
-    allReady: Object.values(statuses).every((status) => status === 'READY'),
+    allReady,
+    admitted: admitted ?? allReady,
     backend: { status: statuses.backend },
     camBorder01: { status: statuses.camBorder01 },
     camCheckpoint01: { status: statuses.camCheckpoint01 },
@@ -89,5 +91,25 @@ describe('StartupGate', () => {
     fireEvent.click(screen.getByRole('button', { name: 'RETRY STARTUP' }));
 
     expect(mocks.retryStartupWake).toHaveBeenCalledTimes(1);
+  });
+
+  it('latches successful admission during a later background revalidation', async () => {
+    mocks.state = state({
+      backend: 'READY',
+      camBorder01: 'READY',
+      camCheckpoint01: 'READY',
+    });
+    const view = render(<StartupGate><div>Protected Dashboard</div></StartupGate>);
+    expect(screen.getByText('Protected Dashboard')).toBeInTheDocument();
+
+    mocks.state = state({
+      backend: 'WAKING',
+      camBorder01: 'WAKING',
+      camCheckpoint01: 'WAKING',
+    }, { admitted: true });
+    view.rerender(<StartupGate><div>Protected Dashboard</div></StartupGate>);
+
+    await waitFor(() => expect(screen.getByText('Protected Dashboard')).toBeInTheDocument());
+    expect(screen.queryByText('NETRAKSH INITIALIZING')).not.toBeInTheDocument();
   });
 });

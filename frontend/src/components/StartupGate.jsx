@@ -17,7 +17,7 @@ function displayStatus(status) {
 export default function StartupGate({ children }) {
   const startup = useStartupReadiness();
 
-  if (startup.allReady) return children;
+  if (startup.admitted || startup.allReady) return children;
 
   const timedOut = labels.some(([key]) => startup[key].status === STARTUP_STATUS.TIMEOUT);
   return (

@@ -1,6 +1,23 @@
 import { telemetryStatusAt } from './dashboardScope';
 
-export function deriveGlobalEdgeStatus({ analysisStates = [], lastTelemetryAt = 0, edgeWakeUntil = 0, prewarm = null, startupWakeRequested = false, now = Date.now() }) {
+const STARTUP_EDGE_KEYS = ['camBorder01', 'camCheckpoint01'];
+
+export function startupEdgeReadiness(startup = null) {
+  const eligible = STARTUP_EDGE_KEYS.length;
+  const ready = startup
+    ? STARTUP_EDGE_KEYS.filter((key) => startup[key]?.status === 'READY').length
+    : 0;
+  return {
+    eligible,
+    ready,
+    revalidating: Boolean(startup?.revalidating),
+    lastReady: Number(startup?.lastReadyEdgeCount || 0),
+    hasSnapshot: Boolean(startup),
+    hasTimeout: Boolean(startup && STARTUP_EDGE_KEYS.some((key) => startup[key]?.status === 'TIMEOUT')),
+  };
+}
+
+export function deriveGlobalEdgeStatus({ analysisStates = [], lastTelemetryAt = 0, edgeWakeUntil = 0, prewarm = null, startup = null, startupWakeRequested = false, now = Date.now() }) {
   const edgeWaking = Number(edgeWakeUntil) > now;
   const freshTelemetry = Number(lastTelemetryAt) > 0 && now - Number(lastTelemetryAt) < 30_000;
   const prewarmWarming = Number(prewarm?.warming || 0) > 0;
@@ -9,10 +26,17 @@ export function deriveGlobalEdgeStatus({ analysisStates = [], lastTelemetryAt = 
   const prewarmTerminal = Number(prewarm?.eligible || 0) > 0
     && Number(prewarm?.ready || 0) < Number(prewarm?.eligible || 0)
     && Number(prewarm?.terminal || 0) >= Number(prewarm?.eligible || 0) - Number(prewarm?.ready || 0);
+  const startupEdges = startupEdgeReadiness(startup);
+  const startupReady = startupEdges.ready === startupEdges.eligible;
+  const startupRequested = Boolean(startup?.requested || startupWakeRequested);
   if (!analysisStates.length) {
     if (freshTelemetry) return 'ONLINE';
     if (edgeWaking) return 'WAKING';
-    if (prewarmWarming || (startupWakeRequested && !prewarm)) return 'WARMING';
+    if (startupEdges.revalidating) return 'RECHECKING';
+    if (startupReady) return 'READY';
+    if (startupEdges.hasTimeout) return 'UNAVAILABLE';
+    if (startupEdges.hasSnapshot && startupRequested) return 'WARMING';
+    if (prewarmWarming || (startupRequested && !prewarm)) return 'WARMING';
     if (prewarmTerminal) return 'UNAVAILABLE';
     return prewarmReady ? 'READY' : 'IDLE';
   }
@@ -22,7 +46,11 @@ export function deriveGlobalEdgeStatus({ analysisStates = [], lastTelemetryAt = 
   // must outrank a stale local wake timer or a delayed lifecycle intent.
   if (analysisStates.some((state) => state.hasFreshCurrentTelemetry)) return 'ONLINE';
   if (!anyActive && !anyWaking) {
-    if (prewarmWarming || (startupWakeRequested && !prewarm)) return 'WARMING';
+    if (startupEdges.revalidating) return 'RECHECKING';
+    if (startupReady) return 'READY';
+    if (startupEdges.hasTimeout) return 'UNAVAILABLE';
+    if (startupEdges.hasSnapshot && startupRequested) return 'WARMING';
+    if (prewarmWarming || (startupRequested && !prewarm)) return 'WARMING';
     if (prewarmTerminal) return 'UNAVAILABLE';
     return prewarmReady ? 'READY' : 'IDLE';
   }
