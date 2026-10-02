@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -600,6 +600,9 @@ class EventResponse(BaseModel):
     # Phase 4 WP-3.3 Object Storage Metadata
     storage_provider: Optional[str] = None
     storage_status: Optional[str] = None
+    artifact_state: Optional[Literal[
+        "AVAILABLE", "SYNCING", "METADATA_ONLY", "MISSING", "FAILED", "NONE"
+    ]] = None
     content_hash: Optional[str] = None
     content_size: Optional[int] = None
     uploaded_at: Optional[datetime] = None

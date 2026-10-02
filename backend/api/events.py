@@ -39,6 +39,42 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/events", tags=["events"])
 
 
+def _has_binary_reference(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def derive_artifact_state(event: Event, evidence_package: Optional[EvidencePackage]) -> str:
+    """Derive binary-artifact truth without rewriting signed historical data."""
+    has_edge_clip = _has_binary_reference(getattr(event, "evidence_clip_ref", None))
+    has_object = _has_binary_reference(getattr(event, "object_key", None))
+    has_content_hash = _has_binary_reference(getattr(event, "content_hash", None))
+    storage_status = getattr(event, "storage_status", None)
+    normalized_status = storage_status.upper() if isinstance(storage_status, str) else None
+
+    if normalized_status == "MISSING":
+        return "MISSING"
+    if normalized_status == "FAILED":
+        return "FAILED"
+
+    # Evidence Vault rows are backed by a signed package.  When neither the
+    # signed package nor the event points at binary content, the record is a
+    # complete metadata-only package, not an upload that is still pending.
+    # UPLOADING remains a genuine syncing state even before an object key is
+    # assigned, while CREATED is the historical state of metadata-only rows.
+    if (
+        evidence_package is not None
+        and normalized_status in {None, "CREATED"}
+        and not (has_edge_clip or has_object or has_content_hash)
+    ):
+        return "METADATA_ONLY"
+
+    if normalized_status == "AVAILABLE":
+        return "AVAILABLE" if has_object else "MISSING"
+    if normalized_status in {"CREATED", "UPLOADING", "PENDING"}:
+        return "SYNCING"
+    return "NONE"
+
+
 @router.get("", response_model=List[EventResponse])
 async def list_events(
     camera_id: Optional[str] = Query(None),
@@ -332,25 +368,26 @@ async def get_evidence_image(
     as get_event() and verify_event() above (auth was added to those two as
     part of the pre-deployment hardening pass — see docs/LIMITATIONS.md).
 
-    IMPORTANT DEPLOYMENT CAVEAT (docs/LIMITATIONS.md): this reads the file
-    directly from the local path stored in Event.evidence_clip_ref, which
-    only works because the backend and edge device share a filesystem in
-    this project's current single-machine deployment. Edge sync
-    (edge/sync/sync_client.py) transmits only this path string today, not
-    the evidence bytes themselves — a real distributed deployment, where
-    the edge device and backend run on different machines, would need the
-    edge to actually upload the bytes during sync. That is a separate,
-    larger change, not implemented here.
+    Event.object_key is the authoritative binary reference. Metadata-only
+    signed packages return a terminal semantic response and are never put
+    into the binary synchronization retry path.
     """
     event = db.query(Event).filter(Event.id == event_id).first()
     if not event:
         raise HTTPException(status_code=404, detail="Event not found")
         
     enforce_command_access(_user, event.camera.owning_command_id)
-        
-    if event.storage_status in ("CREATED", "UPLOADING"):
+
+    evidence_package = db.query(EvidencePackage).filter(EvidencePackage.event_id == event.id).first()
+    artifact_state = derive_artifact_state(event, evidence_package)
+    if artifact_state == "METADATA_ONLY":
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "METADATA_ONLY", "message": "NO_BINARY_ARTIFACT"},
+        )
+    if artifact_state == "SYNCING":
         raise HTTPException(status_code=425, detail="Evidence is still synchronizing")
-    elif event.storage_status not in (None, "AVAILABLE"):
+    if artifact_state != "AVAILABLE":
         raise HTTPException(status_code=404, detail=f"Evidence is not available (status: {event.storage_status})")
 
     # Treat object_key as the authoritative backend storage reference.
@@ -909,6 +946,7 @@ def _event_to_response(event: Event, db: Session) -> EventResponse:
         blockchain_status=alert.blockchain_status if alert else None,
         storage_provider=event.storage_provider,
         storage_status=event.storage_status,
+        artifact_state=derive_artifact_state(event, ep),
         content_hash=event.content_hash,
         content_size=event.content_size,
         uploaded_at=event.uploaded_at,

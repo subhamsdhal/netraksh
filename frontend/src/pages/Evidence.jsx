@@ -20,7 +20,7 @@
  *   - Blob URLs are revoked on component unmount to avoid memory leaks
  *   - Hash/signature display is read-only — never executed or eval'd
  */
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Search, Shield, CheckCircle, Database, GitBranch, Cloud, Lock, Download } from 'lucide-react';
 import { authFetch } from '../services/auth';
 import { parseUtc } from '../utils/time';
@@ -121,7 +121,9 @@ function EvidenceImageOverlay({ imageUrl, event, status }) {
         display: 'flex', alignItems: 'center', gap: '0.3rem',
       }}>
         <Lock size={8} />
-        {status === 'ready' ? 'DECRYPTED EVIDENCE' : 'CH-04 | PREVIEW'}
+        {event?.camera_id
+          ? `${String(event.camera_id).toUpperCase()} · EVIDENCE PREVIEW`
+          : 'EVIDENCE PREVIEW'}
       </div>
 
       {/* Evidence image — object-fit:contain keeps full frame visible, no crop */}
@@ -157,6 +159,24 @@ function EvidenceImageOverlay({ imageUrl, event, status }) {
             letterSpacing: '0.1em', color: status === 'syncing' ? '#fbbf24' : '#4ade80',
           }}>
             {status === 'syncing' ? 'SYNCING EVIDENCE...' : 'DECRYPTING…'}
+          </span>
+        </div>
+      )}
+
+      {/* A complete signed package can legitimately have no binary artifact. */}
+      {status === 'metadata-only' && (
+        <div style={{
+          position: 'absolute', inset: 0, zIndex: 20,
+          background: 'rgba(0,0,0,0.82)',
+          display: 'flex', flexDirection: 'column', alignItems: 'center',
+          justifyContent: 'center', gap: '0.45rem', padding: '1rem', textAlign: 'center',
+        }}>
+          <span style={{
+            fontFamily: 'var(--font-display)', fontSize: '0.72rem',
+            letterSpacing: '0.1em', color: '#e2e8f0',
+          }}>METADATA-ONLY EVIDENCE</span>
+          <span style={{ fontSize: '0.62rem', color: '#94a3b8' }}>
+            NO BINARY ARTIFACT WAS PRODUCED FOR THIS EVENT
           </span>
         </div>
       )}
@@ -281,7 +301,7 @@ const VerificationStep = ({ icon: Icon, title, status, active }) => (
       <span className="text-xs font-display text-muted">STEP</span>
       <span className="text-sm font-display text-main uppercase mt-1">{title}</span>
       <span className={`text-[10px] font-display px-2 py-1 border rounded mt-2 ${
-        status === 'VERIFIED' || status === 'MATCH'
+        ['VERIFIED', 'MATCH', 'VALID', 'PRESENT'].includes(status)
           ? 'text-ok border-ok'
           : 'text-muted border-color'
       }`}>
@@ -312,11 +332,10 @@ export default function Evidence() {
   // Evidence image state
   const [evidenceImageUrl, setEvidenceImageUrl]           = useState(null);
   const [evidenceImageStatus, setEvidenceImageStatus]     = useState('idle');
-  const [evidenceImageSizeBytes, setEvidenceImageSizeBytes] = useState(null);
-
-  const displayEvents = vaultEvents;
   const filteredEvents = vaultEvents;
   const [filterOptions, setFilterOptions] = useState({ decisions: [], types: [], streams: [], cameras: [] });
+  const selectedEventId = selectedEvent?.event_id;
+  const selectedArtifactState = selectedEvent?.artifact_state;
 
   const loadVault = useCallback(async () => {
     setVaultStatus('loading');
@@ -364,7 +383,16 @@ export default function Evidence() {
   }, [selectedEvent?.event_id]);
 
   useEffect(() => {
-    if (!selectedEvent) return;
+    if (!selectedEventId) return;
+
+    if (selectedArtifactState === 'METADATA_ONLY') {
+      setEvidenceImageUrl((previousUrl) => {
+        if (previousUrl) URL.revokeObjectURL(previousUrl);
+        return null;
+      });
+      setEvidenceImageStatus('metadata-only');
+      return;
+    }
     
     let active = true;
     let timer = null;
@@ -375,7 +403,6 @@ export default function Evidence() {
       // Only show 'loading' or 'syncing' initially, avoid flickering on retry
       if (attempt === 1) {
         setEvidenceImageStatus('loading');
-        setEvidenceImageSizeBytes(null);
       }
       
       try {
@@ -401,7 +428,6 @@ export default function Evidence() {
         const blob = await res.blob();
         if (!active) return;
         
-        setEvidenceImageSizeBytes(blob.size);
         setEvidenceImageUrl((prev) => {
           if (prev) URL.revokeObjectURL(prev);
           return URL.createObjectURL(blob);
@@ -422,13 +448,13 @@ export default function Evidence() {
       }
     };
 
-    loadEvidenceImage(selectedEvent.event_id);
+    loadEvidenceImage(selectedEventId);
 
     return () => {
       active = false;
       if (timer) clearTimeout(timer);
     };
-  }, [selectedEvent?.event_id]);
+  }, [selectedEventId, selectedArtifactState]);
 
   // Revoke blob URL on unmount
   useEffect(() => () => {
@@ -453,9 +479,12 @@ export default function Evidence() {
         setVaultError(data?.detail || `Verification failed (${res.status}).`);
         return;
       }
-      const allValid = res.ok && data.hash_valid && data.signature_valid && data.chain_valid;
+      const allValid = res.ok
+        && data.hash_valid === true
+        && data.signature_valid === true
+        && data.chain_valid === true;
       setVerifyStatus(allValid ? 'verified' : 'failed');
-      setVerifyData(data);
+      setVerifyData({ ...data, verified_ok: allValid });
       setVaultEvents(current => current.map(event => event.event_id === selectedEvent.event_id ? {
         ...event,
         hash_valid: data.hash_valid,
@@ -508,6 +537,7 @@ export default function Evidence() {
   // Never substitute a fabricated/static image for missing evidence.
   const displayImageUrl = evidenceImageStatus === 'ready' ? evidenceImageUrl : null;
   const currentVerification = verifyData || (selectedEvent ? {
+    verified_ok: selectedEvent.verified_ok,
     hash_valid: selectedEvent.hash_valid,
     signature_valid: selectedEvent.signature_valid,
     chain_valid: selectedEvent.chain_valid,
@@ -517,9 +547,10 @@ export default function Evidence() {
     verified_at: selectedEvent.evidence_verified_at,
   } : null);
   const locallyVerified = Boolean(
-    currentVerification?.hash_valid
-    && currentVerification?.signature_valid
-    && currentVerification?.chain_valid,
+    currentVerification?.verified_ok === true
+    && currentVerification?.hash_valid === true
+    && currentVerification?.signature_valid === true
+    && currentVerification?.chain_valid === true,
   );
 
   return (
@@ -701,7 +732,13 @@ export default function Evidence() {
                 </div>
                 <div className="flex-col">
                   <span className="text-xs text-muted font-display uppercase tracking-widest mb-1">STORAGE</span>
-                  <span className="text-sm font-body">{selectedEvent?.storage_provider || 'N/A'} · {selectedEvent?.storage_status || 'UNKNOWN'}{selectedEvent?.content_size != null ? ` · ${(selectedEvent.content_size / 1024).toFixed(1)} KB` : ''}</span>
+                  {selectedEvent?.artifact_state === 'METADATA_ONLY' ? (
+                    <span className="text-sm font-body">
+                      METADATA ONLY · NO BINARY ARTIFACT
+                    </span>
+                  ) : (
+                    <span className="text-sm font-body">{selectedEvent?.storage_provider || 'N/A'} · {selectedEvent?.storage_status || 'UNKNOWN'}{selectedEvent?.content_size != null ? ` · ${(selectedEvent.content_size / 1024).toFixed(1)} KB` : ''}</span>
+                  )}
                 </div>
                 <div className="flex-col">
                   <span className="text-xs text-muted font-display uppercase tracking-widest mb-1">INTEGRITY PROFILE</span>
@@ -742,10 +779,10 @@ export default function Evidence() {
                   </span>
                 </div>
                 <div className="flex-col">
-                  <span className="text-xs text-muted font-display uppercase tracking-widest mb-1">EDGE NODE</span>
+                  <span className="text-xs text-muted font-display uppercase tracking-widest mb-1">EDGE PRODUCER</span>
                   <span className="text-sm font-body">
                     {selectedEvent?.edge_device_id
-                      ? `${selectedEvent.edge_device_id} (Active)`
+                      ? selectedEvent.edge_device_id
                       : <span className="text-muted">Not tracked</span>}
                   </span>
                 </div>
@@ -785,21 +822,23 @@ export default function Evidence() {
                   )}
                 </div>
 
-                {/* Reliability scoring */}
+                {/* Persisted reliability facts only; no frontend-owned formula. */}
                 <div className="flex-col" style={{ gridColumn: 'span 2' }}>
                   <span className="text-xs text-muted font-display uppercase tracking-widest mb-1">
-                    RELIABILITY SCORING
+                    RECORDED RELIABILITY FACTORS
                   </span>
-                  {selectedEvent?.score_r != null ? (
+                  {[selectedEvent?.score_d, selectedEvent?.score_t, selectedEvent?.score_s, selectedEvent?.score_h, selectedEvent?.score_r].some(value => value != null) ? (
                     <div className="flex flex-col gap-1">
-                      <span className="text-[10px] text-muted font-display uppercase tracking-widest block mt-1">
-                        Formula: R = (0.40 × D) + (0.20 × T) + (0.20 × S) + (0.20 × H)
-                      </span>
                       <span className="text-sm font-body">
-                        D = {selectedEvent.score_d?.toFixed(2)} | T = {selectedEvent.score_t?.toFixed(2)} | S = {selectedEvent.score_s?.toFixed(2)} | H = {selectedEvent.score_h?.toFixed(2)}
-                      </span>
-                      <span className="text-sm font-body font-bold text-main mt-1">
-                        R = {selectedEvent.score_r?.toFixed(3)}
+                        {[
+                          ['D', selectedEvent.score_d, 2],
+                          ['T', selectedEvent.score_t, 2],
+                          ['S', selectedEvent.score_s, 2],
+                          ['H', selectedEvent.score_h, 2],
+                          ['R', selectedEvent.score_r, 3],
+                        ].filter(([, value]) => value != null)
+                          .map(([label, value, precision]) => `${label} = ${Number(value).toFixed(precision)}`)
+                          .join(' | ')}
                       </span>
                     </div>
                   ) : (
@@ -871,12 +910,12 @@ export default function Evidence() {
                 style={{ left: '10%', right: '10%', height: '1px' }}
               />
               <VerificationStep
-                icon={Database} title="Event Data Extracted"
-                status={selectedEvent?.storage_status === 'AVAILABLE' ? 'AVAILABLE' : (selectedEvent?.storage_status || 'UNKNOWN')}
-                active={selectedEvent?.storage_status === 'AVAILABLE'}
+                icon={Database} title="Signed Evidence Package"
+                status={selectedEvent ? 'PRESENT' : 'UNVERIFIED'}
+                active={Boolean(selectedEvent)}
               />
               <VerificationStep
-                icon={Shield} title="Content Hash"
+                icon={Shield} title="Content / Package Hash"
                 status={currentVerification?.hash_valid === true ? 'VALID' : currentVerification?.hash_valid === false ? 'INVALID' : 'UNVERIFIED'}
                 active={currentVerification?.hash_valid === true}
               />
@@ -902,7 +941,7 @@ export default function Evidence() {
               <div className="mt-6 mx-4 mb-4 p-3 bg-dark border border-color rounded">
                 <div className="flex flex-col gap-2">
                   <div className="flex justify-between items-center">
-                    <span className="font-display text-muted uppercase" style={{ fontSize: '0.65rem' }}>Hashed Artifact</span>
+                    <span className="font-display text-muted uppercase" style={{ fontSize: '0.65rem' }}>Hashed Package</span>
                     <span className="font-body text-main ml-4 text-right" style={{ fontSize: '0.7rem' }}>
                       Evidence Package (payload fields)
                     </span>
@@ -922,17 +961,17 @@ export default function Evidence() {
                   <div className="flex justify-between items-center border-t border-color pt-2">
                     <span className="font-display text-muted uppercase" style={{ fontSize: '0.65rem' }}>Ed25519 Signature</span>
                     <span className={`font-body font-bold ml-4 text-right ${
-                      currentVerification.signature_valid ? 'text-ok' : 'text-danger'
+                      currentVerification.signature_valid === true ? 'text-ok' : currentVerification.signature_valid === false ? 'text-danger' : 'text-muted'
                     }`} style={{ fontSize: '0.7rem' }}>
-                      {currentVerification.signature_valid ? '✓ VALID' : '✗ INVALID'}
+                      {currentVerification.signature_valid === true ? '✓ VALID' : currentVerification.signature_valid === false ? '✗ INVALID' : 'UNVERIFIED'}
                     </span>
                   </div>
                   <div className="flex justify-between items-center">
                     <span className="font-display text-muted uppercase" style={{ fontSize: '0.65rem' }}>Hash Chain</span>
                     <span className={`font-body font-bold ml-4 text-right ${
-                      currentVerification.chain_valid ? 'text-ok' : currentVerification.chain_status === 'PENDING' ? 'text-warning' : 'text-danger'
+                      currentVerification.chain_valid === true ? 'text-ok' : currentVerification.chain_status === 'PENDING' ? 'text-warning' : currentVerification.chain_valid === false ? 'text-danger' : 'text-muted'
                     }`} style={{ fontSize: '0.7rem' }}>
-                      {currentVerification.chain_valid ? '✓ VALID' : currentVerification.chain_status === 'PENDING' ? '⌛ PENDING — PREDECESSOR NOT YET RESOLVED' : `✗ ${currentVerification.chain_status || 'BROKEN'}`}
+                      {currentVerification.chain_valid === true ? '✓ VALID' : currentVerification.chain_status === 'PENDING' ? '⌛ PENDING — PREDECESSOR NOT YET RESOLVED' : currentVerification.chain_valid === false ? `✗ ${currentVerification.chain_status || 'INVALID'}` : 'UNVERIFIED'}
                     </span>
                   </div>
                   <div className="flex justify-between items-center">

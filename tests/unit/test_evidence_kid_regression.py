@@ -170,6 +170,8 @@ async def test_backend_kid_propagation():
     event_mock.event_type = "LINE_CROSSING"
     event_mock.detection_class = "person"
     event_mock.edge_device_id = "test-cam"
+    event_mock.evidence_clip_ref = None
+    event_mock.object_key = None
     event_mock.storage_status = "CREATED"
     event_mock.storage_provider = "local"
     event_mock.content_hash = ""
@@ -204,5 +206,6 @@ async def test_backend_kid_propagation():
     assert resp.kid == test_kid
     assert resp.hash == orm_ep.sha256
     assert resp.signature == orm_ep.digital_signature
+    assert resp.artifact_state == "METADATA_ONLY"
 
 
