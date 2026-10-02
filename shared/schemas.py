@@ -273,11 +273,20 @@ class LiveTelemetryPayload(BaseModel):
     source_fps: Optional[float] = None
     fps_declared: Optional[float] = None
     expected_interval_ms: Optional[float] = None
-    raw_detection_count: int = 0
-    tracker_output_count: int = 0
-    person_count: int = 0
-    vehicle_count: int = 0
-    track_count: int = 0
+    # None means the producer did not report the metric.  In particular, the
+    # sparse EOF lifecycle packet must not overwrite the last measured value
+    # with a fabricated zero.  A literal 0 from an ordinary telemetry packet
+    # remains a real measurement.
+    raw_detection_count: Optional[int] = None
+    tracker_output_count: Optional[int] = None
+    person_count: Optional[int] = None
+    vehicle_count: Optional[int] = None
+    track_count: Optional[int] = None
+    scene_condition: Optional[str] = None
+    lighting_state: Optional[str] = None
+    mean_luminance: Optional[float] = None
+    enhancement_applied: Optional[bool] = None
+    detection_method: Optional[str] = None
     active_track_ids: List[int] = Field(default_factory=list)
     tracker_output_ids: List[int] = Field(default_factory=list)
     raw_detections: List[LiveDetection] = Field(default_factory=list)

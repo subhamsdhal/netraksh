@@ -22,6 +22,7 @@ import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import { CameraOff, CloudFog, AlertTriangle, Upload, Play, Activity } from 'lucide-react';
 import { authFetch } from '../services/auth';
 import { frameResponseMatchesTelemetry } from '../utils/dashboardScope';
+import { formatTelemetryAge } from '../utils/systemTruth';
 
 // ─── Threat-aware colour palette ────────────────────────────────────────────
 //
@@ -203,7 +204,7 @@ function DebugHud({ visible, videoRect, liveTracksData, videoRef, analyzedFrame 
         : vt
         ? `VID  t=${vt.currentTime?.toFixed(2)}s  RS:${vt.readyState}\n`
         : `VIDEO NOT READY\n`}
-      {`PERSONS ${liveTracksData?.person_count ?? 0}  VEHICLES ${liveTracksData?.vehicle_count ?? 0}  TRACKS ${liveTracksData?.track_count ?? 0}`}
+      {`PERSONS ${liveTracksData?.person_count ?? 'NOT REPORTED'}  VEHICLES ${liveTracksData?.vehicle_count ?? 'NOT REPORTED'}  TRACKS ${liveTracksData?.track_count ?? 'NOT REPORTED'}`}
     </div>
   );
 }
@@ -252,7 +253,7 @@ export default function VideoFeed({
   const showAnalyzedFrame = Boolean(
     analyzedFrameUrl
     && hudVisible
-    && ['LIVE', 'STALE'].includes(telemetryStatus)
+    && ['LIVE', 'STALE', 'COMPLETED'].includes(telemetryStatus)
   );
 
   useEffect(() => {
@@ -799,7 +800,7 @@ export default function VideoFeed({
           fontFamily: 'ui-monospace, monospace', fontSize: '0.55rem', letterSpacing: '0.07em',
           pointerEvents: 'none',
         }}>
-          {analyzedFrameStatus} · FRAME {liveTracksData?.frame_index ?? '—'} · PROCESSED {processedAgeSeconds == null ? 'RECENTLY' : `${processedAgeSeconds.toFixed(1)}s AGO`} · EXACT TELEMETRY SAMPLE
+          {analyzedFrameStatus} · FRAME {liveTracksData?.frame_index ?? '—'} · PROCESSED {processedAgeSeconds == null ? 'RECENTLY' : formatTelemetryAge(processedAgeSeconds * 1000).toUpperCase()} · EXACT TELEMETRY SAMPLE
         </div>
       )}
       {!showAnalyzedFrame && mediaUrl && isDurableSource && (
@@ -811,15 +812,18 @@ export default function VideoFeed({
           pointerEvents: 'none',
         }}>
           {analyzedFrameUrl
-            ? `SOURCE PREVIEW · AI SAMPLE AVAILABLE · FRAME ${liveTracksData?.frame_index ?? '—'} · SOURCE TIME ${Number.isFinite(liveTracksData?.video_time) ? `${liveTracksData.video_time.toFixed(2)}s` : '—'} · PROCESSED ${processedAgeSeconds == null ? 'RECENTLY' : `${processedAgeSeconds.toFixed(1)}s AGO`}`
-            : 'SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME'}
+            ? `SOURCE PREVIEW · AI SAMPLE AVAILABLE · FRAME ${liveTracksData?.frame_index ?? '—'} · SOURCE TIME ${Number.isFinite(liveTracksData?.video_time) ? `${liveTracksData.video_time.toFixed(2)}s` : '—'} · PROCESSED ${processedAgeSeconds == null ? 'RECENTLY' : formatTelemetryAge(processedAgeSeconds * 1000).toUpperCase()}`
+            : telemetryStatus === 'COMPLETED' || sourceRunState === 'COMPLETED'
+              ? 'SOURCE PREVIEW · COMPLETED RUN · ANALYZED FRAME UNAVAILABLE'
+              : 'SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME'}
         </div>
       )}
 
       {/* ── Corner HUD toggle button ── */}
       <button
-        onClick={() => setHudVisible((v) => !v)}
-        title="Toggle debug HUD"
+        onClick={() => { if (analyzedFrameUrl) setHudVisible((v) => !v); }}
+        disabled={!analyzedFrameUrl}
+        title={analyzedFrameUrl ? 'Toggle debug HUD' : 'Analyzed frame unavailable'}
         aria-pressed={hudVisible}
         style={{
           position: 'absolute', top: '0.4rem', right: '0.4rem',
@@ -836,7 +840,7 @@ export default function VideoFeed({
           display: 'flex', alignItems: 'center', gap: '0.25rem',
         }}
       >
-        <Activity size={8} /> {hudVisible ? 'ANALYZED' : 'SOURCE'}
+        <Activity size={8} /> {hudVisible && analyzedFrameUrl ? 'ANALYZED' : analyzedFrameUrl ? 'SOURCE' : 'ANALYZED FRAME UNAVAILABLE'}
       </button>
 
       {/* ── Toggleable debug HUD (replaces removed [SUPER DEBUG OVERLAY]) ── */}

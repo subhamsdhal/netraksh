@@ -93,6 +93,7 @@ describe('dashboard video control ownership', () => {
     const source = { sourceMode: 'durable', sourceId: '94efecfd', sourceName: 'cam 2.mp4', runState: 'COMPLETED', analysisState: 'COMPLETED', analysisGeneration: 4 };
     const replayed = applyReplayResult(source, { analysis_state: 'WAKING', analysis_generation: 5 });
     expect(replayed).toMatchObject({ sourceId: '94efecfd', sourceName: 'cam 2.mp4', analysisState: 'WAKING', analysisGeneration: 5 });
+    expect(replayed.latestAnalysisSessionId).toBeNull();
     expect({ ...replayed, previewUrl: '/media/signed' }).toMatchObject({ sourceId: '94efecfd', sourceName: 'cam 2.mp4' });
   });
 

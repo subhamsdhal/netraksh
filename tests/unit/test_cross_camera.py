@@ -127,7 +127,7 @@ def _make_camera(session, camera_id, lat=None, lon=None, active=True):
     return cam
 
 
-def _make_event(session, event_id, camera_id, ts, detection_class="person", event_type=None, stream_id=None):
+def _make_event(session, event_id, camera_id, ts, detection_class="person", event_type=None, stream_id=None, analysis_session_id=None):
     ev = Event(
         id=event_id, camera_id=camera_id, timestamp=ts,
         detection_class=detection_class, confidence=0.9,
@@ -135,6 +135,7 @@ def _make_event(session, event_id, camera_id, ts, detection_class="person", even
         decision_state="DETECTED",
         event_type=event_type,
         stream_id=stream_id,
+        analysis_session_id=analysis_session_id,
     )
     session.add(ev)
     session.flush()
@@ -142,6 +143,24 @@ def _make_event(session, event_id, camera_id, ts, detection_class="person", even
 
 
 class TestFindCorroborationHonestlySkips:
+    def test_current_run_scope_rejects_an_old_replay_on_the_same_stream(self, db_session):
+        _make_camera(db_session, "cam-a", lat=28.6000, lon=77.2000)
+        _make_camera(db_session, "cam-b", lat=28.6001, lon=77.2000)
+        current = _make_event(
+            db_session, "current-a", "cam-a", datetime(2026, 1, 1, 12, 0, 10),
+            stream_id="stream-a", analysis_session_id="run-a-2",
+        )
+        _make_event(
+            db_session, "old-b", "cam-b", datetime(2026, 1, 1, 12, 0, 9),
+            stream_id="stream-b", analysis_session_id="run-b-1",
+        )
+        status, result = find_corroboration(current, db_session, run_scope={
+            "cam-a": ("stream-a", "run-a-2"),
+            "cam-b": ("stream-b", "run-b-2"),
+        })
+        assert result is None
+        assert status != "CORROBORATED"
+
     def test_no_corroboration_when_camera_has_no_coordinates(self, db_session):
         _make_camera(db_session, "cam-a", lat=None, lon=None)
         _make_camera(db_session, "cam-b", lat=28.60, lon=77.20)

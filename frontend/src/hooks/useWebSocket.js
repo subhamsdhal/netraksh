@@ -52,6 +52,26 @@ export default function useWebSocket(url, { fetchInitial = true } = {}) {
     setCorrelation(null);
   }, []);
 
+  const resetCameraContext = useCallback((cameraId) => {
+    if (!cameraId) return;
+    telemetryResetAt.current = Date.now();
+    delete latestTelemetry.current[cameraId];
+    telemetryContextRequest.current[cameraId] = (telemetryContextRequest.current[cameraId] || 0) + 1;
+    eventsContextRequest.current[cameraId] = (eventsContextRequest.current[cameraId] || 0) + 1;
+    setEvents(previous => previous.filter(event => event.camera_id !== cameraId));
+    setLiveTracks(previous => {
+      const next = { ...previous };
+      delete next[cameraId];
+      return next;
+    });
+    setHealth(previous => {
+      const next = { ...previous };
+      delete next[cameraId];
+      return next;
+    });
+    setCorrelation(null);
+  }, []);
+
   // ── Initial REST fetch ────────────────────────────────────────────────────
   const fetchInitialData = useCallback(async () => {
     const safeJson = async (promise) => {
@@ -104,20 +124,25 @@ export default function useWebSocket(url, { fetchInitial = true } = {}) {
       const contextualEvents = await response.json();
       if (!Array.isArray(contextualEvents)) return [];
       if (requestId !== eventsContextRequest.current[requestKey]) return [];
-      setEvents(previous => dedupeEvents([...contextualEvents, ...previous]).slice(0, 100));
+      setEvents(previous => dedupeEvents([
+        ...contextualEvents,
+        ...previous.filter(event => event.camera_id !== cameraId),
+      ]).slice(0, 100));
       return contextualEvents;
     } catch {
       return [];
     }
   }, []);
 
-  const refreshTelemetryForContext = useCallback(async (cameraId, streamId) => {
+  const refreshTelemetryForContext = useCallback(async (cameraId, streamId, analysisSessionId, analysisGeneration) => {
     const requestKey = cameraId || '*';
     const requestId = (telemetryContextRequest.current[requestKey] || 0) + 1;
     telemetryContextRequest.current[requestKey] = requestId;
     const params = new URLSearchParams();
     if (cameraId) params.set('camera_id', cameraId);
     if (streamId) params.set('stream_id', streamId);
+    if (analysisSessionId) params.set('analysis_session_id', analysisSessionId);
+    if (analysisGeneration != null) params.set('analysis_generation', String(analysisGeneration));
     try {
       const response = await authFetch(`/system/telemetry/latest?${params.toString()}`);
       if (!response.ok) return [];
@@ -129,6 +154,8 @@ export default function useWebSocket(url, { fetchInitial = true } = {}) {
       const matchingSnapshots = snapshots.filter(tel => (
         (!cameraId || tel?.camera_id === cameraId)
         && (!streamId || tel?.stream_id === streamId)
+        && (!analysisSessionId || tel?.analysis_session_id === analysisSessionId)
+        && (analysisGeneration == null || Number(tel?.analysis_generation) === Number(analysisGeneration))
       ));
       setLiveTracks(previous => {
         const next = { ...previous };
@@ -311,7 +338,7 @@ export default function useWebSocket(url, { fetchInitial = true } = {}) {
   return {
     events, health, alerts, metrics, liveTracks, watchlist, cameras, correlation,
     isConnected, connectionStatus, lastMessageAt, lastTelemetryAt,
-    resetRealtimeState, refreshEventsForContext, refreshTelemetryForContext,
+    resetRealtimeState, resetCameraContext, refreshEventsForContext, refreshTelemetryForContext,
   };
 }
 
@@ -365,9 +392,7 @@ function telemetryToState(tel, receivedAt = null) {
     // source time so the stale-check can fire correctly.
     const ageMs = Date.now() - sourceTimestamp;
     effectiveTimestamp = ageMs <= TELEMETRY_LIVE_WINDOW_MS ? Date.now() : sourceTimestamp;
-  } else {
-    effectiveTimestamp = Date.now();
-  }
+  } else effectiveTimestamp = null;
 
   return {
     ...tel,

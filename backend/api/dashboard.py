@@ -39,8 +39,11 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status, Request
 from fastapi.responses import FileResponse, RedirectResponse
+from sqlalchemy.orm import Session
 
 from backend.config import settings
+from backend.database.session import get_db
+from backend.models.orm import AnalysisRunSummary
 from backend.security.auth import require_edge_auth, require_operator_or_admin
 from backend.services.video_storage import (
     activate_bundled_source,
@@ -891,7 +894,11 @@ async def post_video_scenario(
 
 
 @router.post("/video/internal-complete")
-async def complete_dashboard_video(payload: dict, _edge=Depends(require_edge_auth)):
+async def complete_dashboard_video(
+    payload: dict,
+    _edge=Depends(require_edge_auth),
+    db: Session = Depends(get_db),
+):
     """Edge-only, idempotent EOF callback for one durable analysis generation."""
     camera_id = str(payload.get("camera_id") or "")
     session_id = str(payload.get("video_session_id") or "")
@@ -910,6 +917,18 @@ async def complete_dashboard_video(payload: dict, _edge=Depends(require_edge_aut
     completed = complete_active_session(camera_id, session_id, generation, changes)
     if completed is None:
         raise HTTPException(status_code=409, detail="Completion does not match active durable generation")
+    analysis_session_id = str(payload.get("analysis_session_id") or "")
+    if analysis_session_id:
+        summary = db.get(AnalysisRunSummary, analysis_session_id)
+        if summary is not None:
+            if (summary.camera_id, summary.stream_id, summary.analysis_generation) != (camera_id, session_id, generation):
+                raise HTTPException(status_code=409, detail="Completion run identity conflict")
+            summary.completed_at = time.time()
+            if payload.get("final_frame_index") is not None:
+                summary.final_frame_index = int(payload["final_frame_index"])
+            if payload.get("final_video_time") is not None:
+                summary.final_video_time = float(payload["final_video_time"])
+            db.commit()
     return {"status": "completed", "analysis_state": "COMPLETED", "analysis_generation": completed.get("analysis_generation")}
 
 

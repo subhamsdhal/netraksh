@@ -34,7 +34,12 @@ export function telemetryForSource(telemetry, sourceState, cameraId = null) {
   // perfectly healthy new upload look offline and can let an older analyzed
   // frame remain visible. Bind the card to the source session only.
   const sourceSession = telemetry.stream_id || null;
-  return Boolean(sourceState.sourceId && sourceSession === sourceState.sourceId) ? telemetry : null;
+  if (!sourceState.sourceId || sourceSession !== sourceState.sourceId) return null;
+  if (sourceState.analysisGeneration != null
+      && Number(telemetry.analysis_generation) !== Number(sourceState.analysisGeneration)) return null;
+  if (sourceState.latestAnalysisSessionId
+      && telemetry.analysis_session_id !== sourceState.latestAnalysisSessionId) return null;
+  return telemetry;
 }
 
 // A completed durable source can outlive the process-local telemetry cache.
@@ -45,19 +50,31 @@ export function analysisSessionIdForSource(telemetry, sourceState) {
 }
 
 export function filterLiveEvents(events = [], activeCameraIds = [], cameraFilter = 'ALL') {
-  const active = new Set(activeCameraIds.filter(Boolean));
-  return events.filter((event) => active.has(event.camera_id)
-    && (cameraFilter === 'ALL' || event.camera_id === cameraFilter));
+  const contexts = Array.isArray(activeCameraIds) ? null : activeCameraIds;
+  const active = new Set(Array.isArray(activeCameraIds) ? activeCameraIds.filter(Boolean) : Object.keys(contexts || {}));
+  return events.filter((event) => {
+    if (!active.has(event.camera_id) || (cameraFilter !== 'ALL' && event.camera_id !== cameraFilter)) return false;
+    if (!contexts) return true;
+    const context = contexts[event.camera_id];
+    if (!context?.streamId || event.stream_id !== context.streamId) return false;
+    return !context.analysisSessionId || event.analysis_session_id === context.analysisSessionId;
+  });
 }
 
-export function selectReliabilityEvent(events = [], cameraId = null, activeCameraIds = [], analysisSessionId = null) {
+export function selectReliabilityEvent(events = [], cameraId = null, activeCameraIds = [], analysisSessionId = null, streamId = null) {
   if (activeCameraIds.length && !activeCameraIds.includes(cameraId)) return null;
   return events.find((event) => event.camera_id === cameraId
+    && (!streamId || event.stream_id === streamId)
     && (!analysisSessionId || event.analysis_session_id === analysisSessionId)) || null;
 }
 
 export function shouldAcceptTelemetry(current, incoming) {
   if (!current) return true;
+  if (current.stream_id === incoming.stream_id
+      && current.analysis_generation != null && incoming.analysis_generation != null
+      && Number(current.analysis_generation) !== Number(incoming.analysis_generation)) {
+    return Number(incoming.analysis_generation) > Number(current.analysis_generation);
+  }
   const currentSession = current.analysis_session_id || current.stream_id;
   const incomingSession = incoming.analysis_session_id || incoming.stream_id;
   if (currentSession !== incomingSession) {
@@ -110,6 +127,7 @@ export function formatLatestEvent(event, now = Date.now()) {
 export function frameResponseMatchesTelemetry(telemetry, headers) {
   if (!telemetry || !headers?.get) return false;
   const sessionId = telemetry.analysis_session_id || telemetry.stream_id;
+  if (['person_count', 'vehicle_count', 'track_count'].some((field) => telemetry[field] == null)) return false;
   return headers.get('X-Analysis-Session') === sessionId
     && Number(headers.get('X-Frame-Index')) === Number(telemetry.frame_index)
     && Number(headers.get('X-Person-Count')) === Number(telemetry.person_count)

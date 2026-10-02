@@ -84,6 +84,21 @@ describe('per-camera authoritative analyzed frame', () => {
     expect(screen.queryByText('TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL')).not.toBeInTheDocument();
   });
 
+  it('does not say a completed source is waiting for its first analyzed frame', () => {
+    render(<VideoFeed
+      cameraId="cam-border-01"
+      mediaUrl="blob:video"
+      sourceMode="durable"
+      sourceRunState="COMPLETED"
+      expectedSessionId="source-1"
+      telemetryStatus="COMPLETED"
+      liveTracksData={{ stream_id: 'source-1', analysis_session_id: 'run-1', frame_index: 42, preview_available: false }}
+    />);
+    expect(screen.getByText('SOURCE PREVIEW · COMPLETED RUN · ANALYZED FRAME UNAVAILABLE')).toBeInTheDocument();
+    expect(screen.queryByText('SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME')).not.toBeInTheDocument();
+    expect(screen.getByTitle('Analyzed frame unavailable')).toBeDisabled();
+  });
+
   it('uses the active label only for live telemetry', () => {
     const { rerender } = render(<VideoFeed
       cameraId="cam-border-01"

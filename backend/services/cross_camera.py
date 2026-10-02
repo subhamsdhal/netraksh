@@ -181,7 +181,11 @@ def temporal_consistency(delta_t_s: float, t_min_s: float, t_max_s: float) -> fl
     return max(0.0, min(1.0, tc)), sigma
 
 
-def find_corroboration(event: Event, db: Session) -> tuple[str, Optional[CorroborationResult]]:
+def find_corroboration(
+    event: Event,
+    db: Session,
+    run_scope: Optional[dict[str, tuple[Optional[str], Optional[str]]]] = None,
+) -> tuple[str, Optional[CorroborationResult]]:
     """
     Look for a real, already-stored event at another real-coordinate camera
     that is temporally/spatially plausible as corroboration for `event`.
@@ -244,8 +248,14 @@ def find_corroboration(event: Event, db: Session) -> tuple[str, Optional[Corrobo
             .filter(Event.id != event.id)
             .filter(Event.timestamp >= window_start)
             .filter(Event.timestamp <= window_end)
-            .all()
         )
+        if run_scope and other_cam.id in run_scope:
+            expected_stream, expected_session = run_scope[other_cam.id]
+            if expected_stream:
+                candidates = candidates.filter(Event.stream_id == expected_stream)
+            if expected_session:
+                candidates = candidates.filter(Event.analysis_session_id == expected_session)
+        candidates = candidates.all()
         if not candidates:
             if db.query(Event.id).filter(Event.camera_id == other_cam.id, Event.id != event.id).first():
                 best_status = "OUTSIDE_TIME_WINDOW"

@@ -25,6 +25,15 @@ describe('production UI contains no retired operational claims', () => {
     expect(dashboard).not.toContain('telemetryAgeMs / 1000).toFixed(1)');
   });
 
+  it('does not present invented reliability, count, or correlation values', () => {
+    const dashboard = read('../src/pages/Dashboard.jsx');
+    expect(dashboard).not.toContain('let threshold = 0.75');
+    expect(dashboard).not.toContain('score_r ?? 0');
+    expect(dashboard).not.toContain('R = 0.40·D');
+    expect(dashboard).not.toContain('correlation_window_seconds || 20');
+    expect(dashboard).toContain('THRESHOLD NOT REPORTED');
+  });
+
   it('names missing geolocation explicitly', () => {
     expect(read('../src/pages/Map.jsx')).toContain('NO REGISTERED CAMERA LOCATION');
     expect(read('../src/components/TacticalMap.jsx')).toContain('NO REGISTERED CAMERA LOCATION');

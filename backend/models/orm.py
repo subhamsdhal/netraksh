@@ -500,6 +500,36 @@ class AnalysisTelemetrySnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class AnalysisRunSummary(Base):
+    """Last real measurements for one exact inference run."""
+    __tablename__ = "analysis_run_summaries"
+    __table_args__ = (
+        Index("ix_analysis_run_summary_camera_stream", "camera_id", "stream_id"),
+    )
+
+    analysis_session_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    camera_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    stream_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    analysis_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    first_telemetry_at: Mapped[float] = mapped_column(Float, nullable=False)
+    last_telemetry_at: Mapped[float] = mapped_column(Float, nullable=False)
+    completed_at: Mapped[Optional[float]] = mapped_column(Float)
+    final_frame_index: Mapped[Optional[int]] = mapped_column(Integer)
+    final_video_time: Mapped[Optional[float]] = mapped_column(Float)
+    processing_fps: Mapped[Optional[float]] = mapped_column(Float)
+    source_fps: Mapped[Optional[float]] = mapped_column(Float)
+    frame_width: Mapped[Optional[int]] = mapped_column(Integer)
+    frame_height: Mapped[Optional[int]] = mapped_column(Integer)
+    person_count: Mapped[Optional[int]] = mapped_column(Integer)
+    vehicle_count: Mapped[Optional[int]] = mapped_column(Integer)
+    track_count: Mapped[Optional[int]] = mapped_column(Integer)
+    scene_condition: Mapped[Optional[str]] = mapped_column(String(64))
+    lighting_state: Mapped[Optional[str]] = mapped_column(String(64))
+    detection_method: Mapped[Optional[str]] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 # ---------------------------------------------------------------------------
 # PipelineMetricsSnapshot — real edge performance telemetry (architecture v4 §15)
 # ---------------------------------------------------------------------------

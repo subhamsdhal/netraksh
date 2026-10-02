@@ -53,6 +53,7 @@ export function applyReplayResult(sourceState, result) {
     runState: String(result?.analysis_state || 'WAKING').toUpperCase(),
     analysisState: String(result?.analysis_state || 'WAKING').toUpperCase(),
     scenario: String(result?.scenario || 'normal').toLowerCase(),
+    latestAnalysisSessionId: null,
     analysisGeneration: Number.isFinite(Number(result?.analysis_generation))
       ? Number(result.analysis_generation)
       : sourceState.analysisGeneration,

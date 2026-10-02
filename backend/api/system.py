@@ -24,7 +24,7 @@ from backend.config import settings
 from backend.database.session import get_db
 from backend.models.orm import (
     Alert, Camera, Event, PipelineMetricsSnapshot, SyncQueue, AuditLog,
-    CameraHealth, AnalysisTelemetrySnapshot,
+    CameraHealth, AnalysisTelemetrySnapshot, AnalysisRunSummary,
 )
 from backend.security.auth import require_edge_auth
 from backend.security.auth import require_any_role
@@ -307,6 +307,52 @@ def _telemetry_is_newer(current: Optional[dict], incoming: dict) -> bool:
     return int(incoming.get("sequence") or 0) > int(current.get("sequence") or 0)
 
 
+_SUMMARY_FIELDS = (
+    "frame_width", "frame_height", "person_count", "vehicle_count",
+    "track_count", "scene_condition", "lighting_state", "detection_method",
+)
+
+
+def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[AnalysisRunSummary]:
+    if not (payload.stream_id and payload.analysis_session_id and payload.analysis_generation is not None):
+        return None
+    observed_at = float(payload.processed_timestamp or payload.timestamp)
+    summary = db.query(AnalysisRunSummary).filter(
+        AnalysisRunSummary.analysis_session_id == payload.analysis_session_id,
+    ).first()
+    if summary is None:
+        summary = AnalysisRunSummary(
+            analysis_session_id=payload.analysis_session_id,
+            camera_id=payload.camera_id,
+            stream_id=payload.stream_id,
+            analysis_generation=payload.analysis_generation,
+            first_telemetry_at=observed_at,
+            last_telemetry_at=observed_at,
+        )
+        db.add(summary)
+    elif (summary.camera_id, summary.stream_id, summary.analysis_generation) != (
+        payload.camera_id, payload.stream_id, payload.analysis_generation
+    ):
+        raise HTTPException(status_code=409, detail="analysis_session_id identity conflict")
+    summary.last_telemetry_at = max(float(summary.last_telemetry_at), observed_at)
+    if payload.frame_index is not None:
+        summary.final_frame_index = payload.frame_index
+    if payload.video_time is not None:
+        summary.final_video_time = payload.video_time
+    if payload.processing_fps is not None:
+        summary.processing_fps = payload.processing_fps
+    reported_source_fps = payload.source_fps if payload.source_fps is not None else payload.fps_declared
+    if reported_source_fps is not None:
+        summary.source_fps = reported_source_fps
+    for field in _SUMMARY_FIELDS:
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(summary, field, value)
+    if str(payload.analysis_state or "").upper() == "COMPLETED":
+        summary.completed_at = observed_at
+    return summary
+
+
 @router.post("/system/telemetry/frame", status_code=202)
 async def post_telemetry_frame(
     payload: TelemetryFramePayload,
@@ -457,6 +503,7 @@ async def post_telemetry(
     else:
         for key, value in snapshot_values.items():
             setattr(snapshot, key, value)
+    _record_run_summary(db, payload)
     db.commit()
     await broadcast_telemetry(telemetry)
     return {"status": "ok"}
@@ -468,6 +515,8 @@ async def latest_telemetry(
     stream_id: Optional[str] = None,
     db: Session = Depends(get_db),
     _user=Depends(require_any_role),
+    analysis_session_id: Optional[str] = None,
+    analysis_generation: Optional[int] = None,
 ):
     """Return real last-seen telemetry snapshots matching the active context."""
     in_memory = [item for item in _latest_telemetry.values() if (
@@ -476,6 +525,8 @@ async def latest_telemetry(
         # analysis_session_id identifies the concrete analyzed-frame generation
         # and must not be substituted here.
         and (not stream_id or item.get("stream_id") == stream_id)
+        and (not analysis_session_id or item.get("analysis_session_id") == analysis_session_id)
+        and (analysis_generation is None or item.get("analysis_generation") == analysis_generation)
     )]
     if in_memory:
         return sorted(in_memory, key=lambda item: item.get("processed_timestamp") or item.get("timestamp") or 0, reverse=True)
@@ -485,6 +536,10 @@ async def latest_telemetry(
         query = query.filter(AnalysisTelemetrySnapshot.camera_id == camera_id)
     if stream_id:
         query = query.filter(AnalysisTelemetrySnapshot.stream_id == stream_id)
+    if analysis_session_id:
+        query = query.filter(AnalysisTelemetrySnapshot.analysis_session_id == analysis_session_id)
+    if analysis_generation is not None:
+        query = query.filter(AnalysisTelemetrySnapshot.analysis_generation == analysis_generation)
     persisted = query.order_by(desc(AnalysisTelemetrySnapshot.timestamp)).all()
     return [
         {
@@ -503,11 +558,11 @@ async def latest_telemetry(
             "processed_timestamp": item.timestamp,
             "processing_fps": None,
             "expected_interval_ms": None,
-            "raw_detection_count": 0,
-            "tracker_output_count": len(item.tracks_json or []),
-            "person_count": sum(str(track.get("detection_class", "")).lower() == "person" for track in (item.tracks_json or [])),
-            "vehicle_count": sum(str(track.get("detection_class", "")).lower() == "vehicle" for track in (item.tracks_json or [])),
-            "track_count": len({track.get("track_id") for track in (item.tracks_json or [])}),
+            "raw_detection_count": None,
+            "tracker_output_count": None,
+            "person_count": None,
+            "vehicle_count": None,
+            "track_count": None,
             "active_track_ids": sorted({track.get("track_id") for track in (item.tracks_json or []) if track.get("track_id") is not None}),
             "tracker_output_ids": [track.get("track_id") for track in (item.tracks_json or []) if track.get("track_id") is not None],
             "raw_detections": [],
@@ -516,6 +571,30 @@ async def latest_telemetry(
         }
         for item in persisted
     ]
+
+
+@router.get("/system/analysis-runs/{analysis_session_id}")
+async def analysis_run_summary(
+    analysis_session_id: str,
+    camera_id: Optional[str] = None,
+    stream_id: Optional[str] = None,
+    analysis_generation: Optional[int] = None,
+    db: Session = Depends(get_db),
+    _user=Depends(require_any_role),
+):
+    query = db.query(AnalysisRunSummary).filter(
+        AnalysisRunSummary.analysis_session_id == analysis_session_id,
+    )
+    if camera_id:
+        query = query.filter(AnalysisRunSummary.camera_id == camera_id)
+    if stream_id:
+        query = query.filter(AnalysisRunSummary.stream_id == stream_id)
+    if analysis_generation is not None:
+        query = query.filter(AnalysisRunSummary.analysis_generation == analysis_generation)
+    summary = query.one_or_none()
+    if summary is None:
+        raise HTTPException(status_code=404, detail="Run summary not recorded")
+    return {column.name: getattr(summary, column.name) for column in AnalysisRunSummary.__table__.columns}
 
 
 @router.post("/system/metrics", status_code=201)

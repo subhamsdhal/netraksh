@@ -93,6 +93,45 @@ describe('camera telemetry correctness', () => {
     }, { ...source, runState: 'UPLOADING' })).toBeNull();
   });
 
+  it('rejects an older replay generation even when the durable stream is unchanged', () => {
+    const source = {
+      sourceMode: 'durable', sourceId: 'same-upload', analysisGeneration: 2,
+      latestAnalysisSessionId: 'run-2', runState: 'ACTIVE',
+    };
+    expect(telemetryForSource({
+      camera_id: 'cam-border-01', stream_id: 'same-upload',
+      analysis_session_id: 'run-1', analysis_generation: 1,
+    }, source, 'cam-border-01')).toBeNull();
+    expect(telemetryForSource({
+      camera_id: 'cam-border-01', stream_id: 'same-upload',
+      analysis_session_id: 'run-2', analysis_generation: 2,
+    }, source, 'cam-border-01')).not.toBeNull();
+  });
+
+  it('filters current-view events by camera, stream, and authoritative run', () => {
+    const scoped = filterLiveEvents([
+      { event_id: 'old-source', camera_id: 'cam-border-01', stream_id: 'stream-a', analysis_session_id: 'run-a' },
+      { event_id: 'old-replay', camera_id: 'cam-border-01', stream_id: 'stream-b', analysis_session_id: 'run-b1' },
+      { event_id: 'current', camera_id: 'cam-border-01', stream_id: 'stream-b', analysis_session_id: 'run-b2' },
+    ], { 'cam-border-01': { streamId: 'stream-b', analysisSessionId: 'run-b2' } });
+    expect(scoped.map(event => event.event_id)).toEqual(['current']);
+  });
+
+  it('keeps explicit zero distinct from a missing frame count', () => {
+    const headers = new Headers({
+      'X-Analysis-Session': 'run', 'X-Frame-Index': '1',
+      'X-Person-Count': '0', 'X-Vehicle-Count': '0', 'X-Track-Count': '0',
+    });
+    expect(frameResponseMatchesTelemetry({
+      analysis_session_id: 'run', frame_index: 1,
+      person_count: 0, vehicle_count: 0, track_count: 0,
+    }, headers)).toBe(true);
+    expect(frameResponseMatchesTelemetry({
+      analysis_session_id: 'run', frame_index: 1,
+      person_count: null, vehicle_count: null, track_count: null,
+    }, headers)).toBe(false);
+  });
+
   it('selects and labels only the latest event from the current session', () => {
     const now = Date.parse('2026-09-24T10:00:08Z');
     const events = [

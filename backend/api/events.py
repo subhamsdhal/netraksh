@@ -17,7 +17,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status, UploadFile, Form, File
 from fastapi.responses import Response, StreamingResponse
-from sqlalchemy import desc, or_
+from sqlalchemy import and_, desc, or_
 from sqlalchemy.orm import Session
 
 from backend.api.rate_limit import limiter
@@ -192,6 +192,7 @@ async def current_correlation(
     stream_ids: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     _user: User = Depends(require_any_role),
+    analysis_session_ids: Optional[str] = Query(None),
 ):
     """Explain the current active-camera corroboration state.
 
@@ -200,21 +201,26 @@ async def current_correlation(
     the newest current-session event.
     """
     camera_ids = [value.strip() for value in (active_camera_ids or "").split(",") if value.strip()]
-    streams = {value.strip() for value in (stream_ids or "").split(",") if value.strip()}
+    stream_values = [value.strip() for value in (stream_ids or "").split(",")]
+    session_values = [value.strip() for value in (analysis_session_ids or "").split(",")]
     if len(camera_ids) < 2:
         return {"status": "SECOND_CAMERA_REQUIRED", "active_camera_ids": camera_ids}
+    if len(stream_values) != len(camera_ids) or len(session_values) != len(camera_ids) or not all(stream_values) or not all(session_values):
+        return {"status": "CURRENT_RUN_IDENTITIES_REQUIRED", "active_camera_ids": camera_ids}
+    run_scope = dict(zip(camera_ids, zip(stream_values, session_values)))
     query = db.query(Event).filter(Event.camera_id.in_(camera_ids))
-    if streams:
-        query = query.filter(Event.stream_id.in_(streams))
+    query = query.filter(or_(*[
+        and_(
+            Event.camera_id == camera_id,
+            Event.stream_id == run_scope[camera_id][0],
+            Event.analysis_session_id == run_scope[camera_id][1],
+        ) for camera_id in camera_ids
+    ]))
     latest = query.order_by(Event.timestamp.desc()).first()
     if latest is None:
         return {"status": "WAITING_FOR_SECOND_CAMERA", "active_camera_ids": camera_ids}
     from backend.services.cross_camera import find_corroboration, DEMO_CORRELATION_WINDOW_SECONDS
-    status, result = find_corroboration(latest, db)
-    if result and streams:
-        secondary_stream = db.query(Event.stream_id).filter(Event.id == result.other_event_id).scalar()
-        if secondary_stream not in streams:
-            status, result = "WAITING_FOR_SECOND_CAMERA", None
+    status, result = find_corroboration(latest, db, run_scope=run_scope)
     payload = {
         "status": status,
         "active_camera_ids": camera_ids,
@@ -229,6 +235,10 @@ async def current_correlation(
             "secondary_camera_id": result.other_camera_id,
             "secondary_event_type": db.query(Event.event_type).filter(Event.id == result.other_event_id).scalar(),
             "time_delta_seconds": result.delta_t_s,
+            "expected_time_seconds": result.t_expected_s,
+            "distance_m": result.distance_m,
+            "corroboration_score": result.tc,
+            "appearance_similarity": result.appearance_similarity,
             "correlation_method": "TEMPORAL_CAMERA_RELATION_RULE",
             "reason": "Related cameras produced compatible security events within the configured window",
         })
