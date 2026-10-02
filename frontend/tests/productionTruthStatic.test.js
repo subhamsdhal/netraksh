@@ -31,6 +31,7 @@ describe('production UI contains no retired operational claims', () => {
     expect(dashboard).toContain('latestPlateEventForSession(cameraRunEvents, cameraId, sessionId, streamId)');
     expect(dashboard).toContain('latestFaceEventForSession(cameraRunEvents, cameraId, sessionId, streamId)');
     expect(dashboard).not.toContain('const cameraEvents = displayEvents.filter');
+    expect(dashboard).not.toContain("if (eventCameraFilter !== 'ALL' && e.camera_id !== eventCameraFilter) return;");
   });
 
   it('does not present invented reliability, count, or correlation values', () => {

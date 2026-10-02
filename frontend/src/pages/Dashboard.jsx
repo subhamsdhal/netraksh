@@ -853,7 +853,6 @@ export default function Dashboard() {
   events.forEach(e => {
     if (visibleCameraSet.size && !visibleCameraSet.has(e.camera_id)) return;
     if (!visibleCameraSet.size) return;
-    if (eventCameraFilter !== 'ALL' && e.camera_id !== eventCameraFilter) return;
     // Every camera is scoped to its own current analysis session. This keeps
     // prior demo/history events out even when both fixed SIH camera IDs are in
     // view at the same time.
