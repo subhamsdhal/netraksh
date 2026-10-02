@@ -5,6 +5,12 @@ import { WS_URL, authFetch } from '../services/auth';
 import useAuth from '../hooks/useAuth';
 import TacticalMap from '../components/TacticalMap';
 import { parseUtc } from '../utils/time';
+import {
+  alertsPageSubtitle,
+  isCorroboratedAlert,
+  isCrossCommandEscalation,
+  totalRecordedAlerts,
+} from '../utils/alertTruth';
 
 // Real alert data has no free-text title/description field anywhere in the
 // data model (AlertResponse only carries severity/camera/zone/event_type/
@@ -185,7 +191,7 @@ export default function Alerts() {
         <div>
           <div className="section-title">Alerts &amp; Incidents</div>
           <div className="section-sub">
-            Cross-command escalated events{capabilities?.corroboration?.temporal_spatial ? ' · Corroboration capability available' : ''}
+            {alertsPageSubtitle(capabilities)}
           </div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
@@ -208,7 +214,7 @@ export default function Alerts() {
             {isConnected ? 'Control plane connected' : 'Control plane disconnected'}
           </div>
           <div className="badge badge-outline">
-            {realAlerts.length} Total
+            {totalRecordedAlerts(realAlerts)} Total
           </div>
         </div>
       </div>
@@ -311,12 +317,12 @@ export default function Alerts() {
                   </div>
 
                   {/* Corroboration */}
-                  {!alert.isMock && alert.escalated_via_corroboration && (
+                  {!alert.isMock && isCorroboratedAlert(alert) && (
                     <div style={{ fontSize: '0.7rem', color: 'var(--color-ok)', fontFamily: 'var(--font-body)' }}>
                       Escalated via temporal/spatial corroboration — multi-camera corroborated event.
                     </div>
                   )}
-                  {alert.crosses_jurisdiction_boundary && (
+                  {isCrossCommandEscalation(alert) && (
                     <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontFamily: 'var(--font-body)' }}>
                       Crosses jurisdiction boundary — cross-command escalation.
                     </div>

@@ -47,4 +47,13 @@ describe('production UI contains no retired operational claims', () => {
     expect(read('../src/pages/Map.jsx')).toContain('NO REGISTERED CAMERA LOCATION');
     expect(read('../src/components/TacticalMap.jsx')).toContain('NO REGISTERED CAMERA LOCATION');
   });
+
+  it('wires alert collection and per-alert labels to explicit truth helpers', () => {
+    const alerts = read('../src/pages/Alerts.jsx');
+    expect(alerts).toContain('alertsPageSubtitle(capabilities)');
+    expect(alerts).toContain('totalRecordedAlerts(realAlerts)');
+    expect(alerts).toContain('isCrossCommandEscalation(alert)');
+    expect(alerts).toContain('isCorroboratedAlert(alert)');
+    expect(alerts).not.toContain('Cross-command escalated events');
+  });
 });
