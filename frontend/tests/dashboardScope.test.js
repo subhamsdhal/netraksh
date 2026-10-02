@@ -6,6 +6,9 @@ import {
   isActiveTelemetry,
   telemetryForSource,
   analysisSessionIdForSource,
+  eventsForCameraRun,
+  latestFaceEventForSession,
+  latestPlateEventForSession,
   lifecycleStatus,
 } from '../src/utils/dashboardScope';
 
@@ -138,11 +141,91 @@ describe('camera telemetry correctness', () => {
       { camera_id: 'cam-border-01', stream_id: 'same-upload', analysis_session_id: 'old-run', event_type: 'LOITERING', timestamp: '2026-09-24T09:59:59Z' },
       { camera_id: 'cam-border-01', stream_id: 'same-upload', analysis_session_id: 'current-run', event_type: 'LINE_CROSSING', timestamp: '2026-09-24T10:00:00Z' },
     ];
-    const event = latestEventForSession(events, 'cam-border-01', 'current-run');
+    const event = latestEventForSession(events, 'cam-border-01', 'current-run', 'same-upload');
     expect(event.event_type).toBe('LINE_CROSSING');
     expect(formatLatestEvent(event, now)).toBe('LINE CROSSING · 8s ago');
-    expect(latestEventForSession(events, 'cam-border-01', 'missing')).toBeNull();
-    expect(latestEventForSession(events, 'cam-border-01', 'same-upload')).toBeNull();
+    expect(latestEventForSession(events, 'cam-border-01', 'missing', 'same-upload')).toBeNull();
+    expect(latestEventForSession(events, 'cam-border-01', 'current-run', 'other-upload')).toBeNull();
+  });
+
+  it('restores the latest event from all nine exact current-run events', () => {
+    const events = Array.from({ length: 9 }, (_, index) => ({
+      event_id: `event-${index}`,
+      camera_id: 'cam-border-01',
+      stream_id: 'stream-current',
+      analysis_session_id: 'run-current',
+      event_type: index === 8 ? 'VIRTUAL_FENCE_CROSSING' : 'LOITERING',
+      timestamp: `2026-10-02T14:${String(index).padStart(2, '0')}:00Z`,
+    }));
+    expect(latestEventForSession(events, 'cam-border-01', 'run-current', 'stream-current')?.event_id).toBe('event-8');
+  });
+
+  it('keeps card selection independent of the ten-row display limit', () => {
+    const latestCameraOne = {
+      event_id: 'camera-one-latest', camera_id: 'cam-border-01', stream_id: 'stream-1',
+      analysis_session_id: 'run-1', event_type: 'LINE_CROSSING', timestamp: '2026-10-02T14:30:00Z',
+    };
+    const authoritative = [
+      ...Array.from({ length: 11 }, (_, index) => ({
+        event_id: `camera-two-${index}`, camera_id: 'cam-checkpoint-01', stream_id: 'stream-2',
+        analysis_session_id: 'run-2', event_type: 'LOITERING', timestamp: `2026-10-02T15:${String(index).padStart(2, '0')}:00Z`,
+      })),
+      latestCameraOne,
+    ];
+    const displayEvents = authoritative.slice(0, 10);
+    expect(displayEvents).not.toContain(latestCameraOne);
+    expect(latestEventForSession(authoritative, 'cam-border-01', 'run-1', 'stream-1')).toBe(latestCameraOne);
+  });
+
+  it('keeps card selection independent of the event table camera filter', () => {
+    const authoritative = [
+      { event_id: 'cam-1', camera_id: 'cam-border-01', stream_id: 'stream-1', analysis_session_id: 'run-1', timestamp: '2026-10-02T14:00:00Z' },
+      { event_id: 'cam-2', camera_id: 'cam-checkpoint-01', stream_id: 'stream-2', analysis_session_id: 'run-2', timestamp: '2026-10-02T14:01:00Z' },
+    ];
+    const cameraTwoTable = authoritative.filter((event) => event.camera_id === 'cam-checkpoint-01');
+    expect(cameraTwoTable.some((event) => event.camera_id === 'cam-border-01')).toBe(false);
+    expect(latestEventForSession(authoritative, 'cam-border-01', 'run-1', 'stream-1')?.event_id).toBe('cam-1');
+  });
+
+  it('isolates two cameras and a replay of the same stream', () => {
+    const events = [
+      { event_id: 'cam-1-old-run', camera_id: 'cam-border-01', stream_id: 'stream-1', analysis_session_id: 'run-1', timestamp: '2026-10-02T15:00:00Z' },
+      { event_id: 'cam-1-current', camera_id: 'cam-border-01', stream_id: 'stream-1', analysis_session_id: 'run-2', timestamp: '2026-10-02T14:00:00Z' },
+      { event_id: 'cam-2-current', camera_id: 'cam-checkpoint-01', stream_id: 'stream-2', analysis_session_id: 'run-3', timestamp: '2026-10-02T16:00:00Z' },
+    ];
+    expect(latestEventForSession(events, 'cam-border-01', 'run-2', 'stream-1')?.event_id).toBe('cam-1-current');
+    expect(latestEventForSession(events, 'cam-checkpoint-01', 'run-3', 'stream-2')?.event_id).toBe('cam-2-current');
+  });
+
+  it('orders out-of-order events by timestamp, created_at, then stable id', () => {
+    const events = [
+      { event_id: 'older', camera_id: 'cam-border-01', stream_id: 'stream', analysis_session_id: 'run', timestamp: '2026-10-02T14:05:00Z' },
+      { event_id: 'tie-a', camera_id: 'cam-border-01', stream_id: 'stream', analysis_session_id: 'run', timestamp: '2026-10-02T14:10:00Z', created_at: '2026-10-02T14:10:01Z' },
+      { event_id: 'tie-b', camera_id: 'cam-border-01', stream_id: 'stream', analysis_session_id: 'run', timestamp: '2026-10-02T14:10:00Z', created_at: '2026-10-02T14:10:02Z' },
+    ];
+    expect(latestEventForSession(events, 'cam-border-01', 'run', 'stream')?.event_id).toBe('tie-b');
+  });
+
+  it('formats an unknown ABSTAIN truthfully and preserves a genuine no-event state', () => {
+    const event = {
+      event_id: 'abstain', camera_id: 'cam-border-01', stream_id: 'stream', analysis_session_id: 'run',
+      decision_state: 'ABSTAIN', event_type: 'unknown', timestamp: '2026-10-02T14:00:00Z',
+    };
+    expect(formatLatestEvent(event, Date.parse('2026-10-02T14:00:05Z'))).toBe('SYSTEM ABSTAIN · 5s ago');
+    expect(latestEventForSession([], 'cam-border-01', 'run', 'stream')).toBeNull();
+    expect(formatLatestEvent(null)).toBe('None recorded');
+  });
+
+  it('selects ANPR and face results from exact current-run events', () => {
+    const events = [
+      { event_id: 'old-plate', camera_id: 'cam-border-01', stream_id: 'stream', analysis_session_id: 'old-run', normalized_plate_text: 'OLD', timestamp: '2026-10-02T15:00:00Z' },
+      { event_id: 'plate', camera_id: 'cam-border-01', stream_id: 'stream', analysis_session_id: 'run', normalized_plate_text: 'CURRENT', timestamp: '2026-10-02T14:00:00Z' },
+      { event_id: 'face', camera_id: 'cam-border-01', stream_id: 'stream', analysis_session_id: 'run', event_type: 'FACE_DETECTED', face_match_status: 'KNOWN', timestamp: '2026-10-02T14:01:00Z' },
+      { event_id: 'other-camera', camera_id: 'cam-checkpoint-01', stream_id: 'other', analysis_session_id: 'other-run', normalized_plate_text: 'OTHER', face_match_status: 'KNOWN', timestamp: '2026-10-02T16:00:00Z' },
+    ];
+    expect(eventsForCameraRun(events, 'cam-border-01', 'run', 'stream').map((event) => event.event_id)).toEqual(['plate', 'face']);
+    expect(latestPlateEventForSession(events, 'cam-border-01', 'run', 'stream')?.event_id).toBe('plate');
+    expect(latestFaceEventForSession(events, 'cam-border-01', 'run', 'stream')?.event_id).toBe('face');
   });
 
   it('pairs an image only with matching session, frame, and counts', () => {

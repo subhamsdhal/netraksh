@@ -25,6 +25,14 @@ describe('production UI contains no retired operational claims', () => {
     expect(dashboard).not.toContain('telemetryAgeMs / 1000).toFixed(1)');
   });
 
+  it('keeps camera-card event selectors independent of table presentation state', () => {
+    const dashboard = read('../src/pages/Dashboard.jsx');
+    expect(dashboard).toContain('eventsForCameraRun(scopedRunEvents, cameraId, sessionId, streamId)');
+    expect(dashboard).toContain('latestPlateEventForSession(cameraRunEvents, cameraId, sessionId, streamId)');
+    expect(dashboard).toContain('latestFaceEventForSession(cameraRunEvents, cameraId, sessionId, streamId)');
+    expect(dashboard).not.toContain('const cameraEvents = displayEvents.filter');
+  });
+
   it('does not present invented reliability, count, or correlation values', () => {
     const dashboard = read('../src/pages/Dashboard.jsx');
     expect(dashboard).not.toContain('let threshold = 0.75');

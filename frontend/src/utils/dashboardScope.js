@@ -107,17 +107,65 @@ export function telemetryStatusAt(telemetry, now = Date.now()) {
   return age <= staleAfterMs ? 'LIVE' : age <= offlineAfterMs ? 'STALE' : 'OFFLINE';
 }
 
-export function latestEventForSession(events = [], cameraId, analysisSessionId) {
-  if (!cameraId || !analysisSessionId) return null;
-  return events.find((event) => event.camera_id === cameraId
-    && event.analysis_session_id === analysisSessionId) || null;
+function eventTimestampMs(value) {
+  if (value == null || value === '') return Number.NEGATIVE_INFINITY;
+  if (typeof value === 'number') return value < 1_000_000_000_000 ? value * 1000 : value;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
+  const raw = String(value);
+  const parsed = Date.parse(/[zZ]$|[+-]\d\d:\d\d$/.test(raw) ? raw : `${raw}Z`);
+  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+}
+
+function compareEventRecency(left, right) {
+  const timestampDelta = eventTimestampMs(left?.timestamp) - eventTimestampMs(right?.timestamp);
+  if (timestampDelta) return timestampDelta;
+  const createdDelta = eventTimestampMs(left?.created_at) - eventTimestampMs(right?.created_at);
+  if (createdDelta) return createdDelta;
+  return String(left?.event_id || left?.id || '').localeCompare(String(right?.event_id || right?.id || ''));
+}
+
+export function eventsForCameraRun(events = [], cameraId, analysisSessionId, streamId) {
+  if (!cameraId || !analysisSessionId || !streamId) return [];
+  return events.filter((event) => event.camera_id === cameraId
+    && event.stream_id === streamId
+    && event.analysis_session_id === analysisSessionId);
+}
+
+export function latestEventForSession(events = [], cameraId, analysisSessionId, streamId) {
+  const scopedEvents = eventsForCameraRun(events, cameraId, analysisSessionId, streamId);
+  return scopedEvents.reduce((latest, event) => (
+    !latest || compareEventRecency(event, latest) > 0 ? event : latest
+  ), null);
+}
+
+export function latestPlateEventForSession(events = [], cameraId, analysisSessionId, streamId) {
+  return latestEventForSession(
+    events.filter((event) => event.normalized_plate_text || event.plate_text),
+    cameraId,
+    analysisSessionId,
+    streamId,
+  );
+}
+
+export function latestFaceEventForSession(events = [], cameraId, analysisSessionId, streamId) {
+  return latestEventForSession(
+    events.filter((event) => String(event.event_type || '').toUpperCase() === 'FACE_DETECTED'
+      || event.face_match_status || event.face_match_person_id || event.recognition_state),
+    cameraId,
+    analysisSessionId,
+    streamId,
+  );
 }
 
 export function formatLatestEvent(event, now = Date.now()) {
-  if (!event?.event_type || !event?.timestamp) return 'None recorded';
-  const raw = String(event.timestamp);
-  const eventMs = Date.parse(/[zZ]$|[+-]\d\d:\d\d$/.test(raw) ? raw : `${raw}Z`);
-  const label = String(event.event_type).replace(/_/g, ' ');
+  if (!event || !event.timestamp) return 'None recorded';
+  const eventType = String(event.event_type || '').trim();
+  const decisionState = String(event.decision_state || event.decision || '').toUpperCase();
+  const label = decisionState === 'ABSTAIN' && (!eventType || eventType.toLowerCase() === 'unknown')
+    ? 'SYSTEM ABSTAIN'
+    : (eventType ? eventType.replace(/_/g, ' ') : 'EVENT TYPE NOT REPORTED');
+  const eventMs = eventTimestampMs(event.timestamp);
   if (!Number.isFinite(eventMs)) return label;
   const ageMs = Math.max(0, now - eventMs);
   if (ageMs < 60_000) return `${label} · ${Math.round(ageMs / 1000)}s ago`;

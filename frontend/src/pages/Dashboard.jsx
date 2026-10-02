@@ -9,7 +9,7 @@ import { parseUtc } from '../utils/time';
 import { MAX_VISIBLE_CAMERAS, selectCameraSlots, cameraDisplayMetadata } from '../utils/cameraSlots';
 import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState, formatTelemetryAge } from '../utils/systemTruth';
 import useStartupReadiness from '../hooks/useStartupReadiness';
-import { analysisSessionIdForSource, deriveDashboardMode, filterLiveEvents, selectReliabilityEvent, latestEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus } from '../utils/dashboardScope';
+import { analysisSessionIdForSource, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
 import { applyReplayResult, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
@@ -894,12 +894,15 @@ export default function Dashboard() {
     streamId: slotSources[cameraId]?.sourceId || null,
     analysisSessionId: analysisSessionIdForSource(scopedLiveTracks[cameraId], slotSources[cameraId]),
   }]));
-  const scopedRunEvents = filterLiveEvents(currentSessionEvents, runContexts, eventCameraFilter);
-  const displayEvents = scopedRunEvents.filter(ev =>
+  const scopedRunEvents = filterLiveEvents(currentSessionEvents, runContexts);
+  const presentationRunEvents = eventCameraFilter === 'ALL'
+    ? scopedRunEvents
+    : scopedRunEvents.filter((event) => event.camera_id === eventCameraFilter);
+  const displayEvents = presentationRunEvents.filter(ev =>
     (ev.event_type && String(ev.event_type).toLowerCase() !== 'unknown') ||
     ev.decision_state === 'ABSTAIN' || ev.decision === 'ABSTAIN'
   ).slice(0, 10);
-  const recentPlateReads = scopedRunEvents
+  const recentPlateReads = presentationRunEvents
     .filter((ev) => ev.normalized_plate_text || ev.plate_text)
     .sort((a, b) => eventTimestampMs(b.timestamp) - eventTimestampMs(a.timestamp))
     .slice(0, 8);
@@ -1029,9 +1032,11 @@ export default function Dashboard() {
           const telemetry = cameraId ? scopedLiveTracks[cameraId] : null;
           const sourceState = cameraId ? slotSources[cameraId] : null;
           const sessionId = analysisSessionIdForSource(telemetry, sourceState);
-          const cameraEvents = displayEvents.filter(event => event.camera_id === cameraId);
-          const latestCameraEvent = latestEventForSession(cameraEvents, cameraId, sessionId);
-          const latestFaceEvent = cameraEvents.find(event => String(event.event_type || '').toUpperCase() === 'FACE_DETECTED' || event.face_match_status || event.recognition_state) || null;
+          const streamId = sourceState?.sourceId || null;
+          const cameraRunEvents = eventsForCameraRun(scopedRunEvents, cameraId, sessionId, streamId);
+          const latestCameraEvent = latestEventForSession(cameraRunEvents, cameraId, sessionId, streamId);
+          const latestPlateEvent = latestPlateEventForSession(cameraRunEvents, cameraId, sessionId, streamId);
+          const latestFaceEvent = latestFaceEventForSession(cameraRunEvents, cameraId, sessionId, streamId);
           const faceStatus = latestFaceEvent?.face_match_status || (latestFaceEvent?.face_match_person_id ? 'KNOWN' : latestFaceEvent ? 'UNKNOWN' : null);
           const faceLabel = latestFaceEvent?.watchlist_label || latestFaceEvent?.face_match_person_name || null;
           const completedSummary = runSummaries[cameraId] || null;
@@ -1178,8 +1183,8 @@ export default function Dashboard() {
                 <span className="ai-context">OCR {capabilityLabel(capabilities?.anpr_ocr, 'AVAILABLE', 'UNAVAILABLE')}</span>
               </div>
               <div className="dashboard-camera-telemetry" aria-label={`ANPR result for ${cameraId || 'empty slot'}`}>
-                <span><b>ANPR OCR</b>{latestCameraEvent?.normalized_plate_text || latestCameraEvent?.plate_text || (capabilities?.anpr_ocr === false ? 'OCR UNAVAILABLE' : 'NO PLATE READ FOR THIS RUN')}</span>
-                <span><b>CONFIDENCE</b>{latestCameraEvent?.plate_confidence == null ? 'N/A' : `${Math.round(Number(latestCameraEvent.plate_confidence) * 100)}%`}</span>
+                <span><b>ANPR OCR</b>{latestPlateEvent?.normalized_plate_text || latestPlateEvent?.plate_text || (capabilities?.anpr_ocr === false ? 'OCR UNAVAILABLE' : 'NO PLATE READ FOR THIS RUN')}</span>
+                <span><b>CONFIDENCE</b>{latestPlateEvent?.plate_confidence == null ? 'N/A' : `${Math.round(Number(latestPlateEvent.plate_confidence) * 100)}%`}</span>
               </div>
               <div className="dashboard-camera-telemetry" aria-label={`Face watchlist result for ${cameraId || 'empty slot'}`}>
                 <span><b>FACE WATCHLIST</b>{faceStatus === 'KNOWN' ? `MATCH · ${faceLabel || 'SUBJECT LABEL NOT REPORTED'}` : faceStatus === 'INSUFFICIENT_QUALITY' ? 'INSUFFICIENT QUALITY' : faceStatus === 'UNKNOWN' ? 'NO WATCHLIST MATCH' : 'NO FACE RESULT FOR THIS RUN'}</span>
