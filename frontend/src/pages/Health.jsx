@@ -13,6 +13,61 @@ const tone = (status) => ['READY', 'LIVE', 'CURRENT', 'CONFIGURED'].includes(sta
       ? 'var(--color-warning)'
       : 'var(--color-danger)';
 
+const HEALTH_FRESHNESS_MS = 30_000;
+
+function formatFps(value) {
+  const fps = Number(value);
+  return Number.isFinite(fps) ? fps.toFixed(2) : null;
+}
+
+function formatSampleAge(ageMs) {
+  const seconds = Math.floor(Math.max(0, ageMs) / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function cameraHealthPresentation(camera, now = Date.now()) {
+  const hasSample = [camera.health_state, camera.health_reason, camera.fps_actual, camera.last_health_check]
+    .some((value) => value !== null && value !== undefined && value !== '');
+  if (!hasSample) {
+    return { health: 'NOT REPORTED', fps: 'N/A', reason: 'N/A', sample: 'Never', stale: false };
+  }
+
+  const measuredAt = Date.parse(camera.last_health_check);
+  const validTimestamp = Number.isFinite(measuredAt);
+  const ageMs = validTimestamp ? Math.max(0, now - measuredAt) : null;
+  const current = validTimestamp && ageMs <= HEALTH_FRESHNESS_MS;
+  const measuredHealth = camera.health_state || 'NOT REPORTED';
+  const measuredFps = formatFps(camera.fps_actual);
+  const measuredReason = camera.health_reason || 'N/A';
+
+  if (current) {
+    return {
+      health: measuredHealth,
+      fps: measuredFps ?? 'N/A',
+      reason: measuredReason,
+      sample: formatSampleAge(ageMs),
+      stale: false,
+    };
+  }
+
+  const absoluteTimestamp = validTimestamp
+    ? `${new Date(measuredAt).toISOString().replace('T', ' ').replace('.000Z', ' UTC').replace('Z', ' UTC')}`
+    : 'Invalid timestamp';
+  return {
+    health: `STALE · LAST MEASURED ${measuredHealth}`,
+    fps: 'N/A CURRENT',
+    fpsDetail: measuredFps ? `Last measured: ${measuredFps} FPS` : 'Last measured: N/A',
+    reason: `Last measured: ${measuredReason}`,
+    sample: validTimestamp ? `${formatSampleAge(ageMs)} · ${absoluteTimestamp}` : `${absoluteTimestamp} · STALE`,
+    stale: true,
+  };
+}
+
 function StatusCard({ label, value, detail, Icon = Activity }) {
   return <div className="card" style={{ minHeight: 104 }}>
     <div className="flex items-center gap-2 text-muted"><Icon size={14} /><span className="text-xs uppercase tracking-widest">{label}</span></div>
@@ -70,16 +125,19 @@ export default function Health() {
     </div>
     <div className="section-header" style={{ marginTop: 24 }}><div><div className="section-title">Camera and edge state</div><div className="section-sub">Worker process, analysis, telemetry, and camera measurements are independent</div></div></div>
     <div className="card overflow-x-auto" style={{ marginTop: 12 }}>
-      <table className="data-table w-full"><thead><tr><th>Camera</th><th>Location</th><th>Edge node</th><th>Analysis</th><th>Telemetry</th><th>Camera health</th><th>FPS measured</th><th>Reason</th></tr></thead>
+      <table className="data-table w-full"><thead><tr><th>Camera</th><th>Location</th><th>Edge node</th><th>Analysis</th><th>Telemetry</th><th>Camera health</th><th>FPS measured</th><th>Reason</th><th>Last health sample</th></tr></thead>
         <tbody>
-          {cameras.length === 0 && <tr><td colSpan="8" className="text-center text-muted">No registered cameras.</td></tr>}
+          {cameras.length === 0 && <tr><td colSpan="9" className="text-center text-muted">No registered cameras.</td></tr>}
           {cameras.map((camera) => {
             const operational = deriveCameraOperationalState({ nodeStatus: cameraNode(camera.camera_id)?.status, sourceState: null, telemetry: liveTracks[camera.camera_id] });
+            const cameraHealth = cameraHealthPresentation(camera);
             return <tr key={camera.camera_id}>
               <td>{camera.name || camera.camera_id}<div className="text-xs text-dim">{camera.camera_id}</div></td>
               <td>{camera.location || 'Location not registered'}</td>
               <td style={{ color: tone(operational.node) }}>{operational.node}</td><td style={{ color: tone(operational.analysis) }}>{operational.analysis}</td><td style={{ color: tone(operational.telemetry) }}>{operational.telemetry}</td>
-              <td>{camera.health_state || 'NOT REPORTED'}</td><td>{camera.fps_actual == null ? 'N/A' : camera.fps_actual}</td><td>{camera.health_reason || 'N/A'}</td>
+              <td style={{ color: tone(cameraHealth.stale ? 'STALE' : cameraHealth.health) }}>{cameraHealth.health}</td>
+              <td>{cameraHealth.fps}{cameraHealth.fpsDetail && <div className="text-xs text-dim">{cameraHealth.fpsDetail}</div>}</td>
+              <td>{cameraHealth.reason}</td><td>{cameraHealth.sample}</td>
             </tr>;
           })}
         </tbody>
