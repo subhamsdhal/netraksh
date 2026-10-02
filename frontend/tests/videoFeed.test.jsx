@@ -70,4 +70,34 @@ describe('per-camera authoritative analyzed frame', () => {
     expect(screen.getByText('RESTORING STORED SOURCE...')).toBeInTheDocument();
     expect(screen.queryByText('ADD VIDEO SOURCE')).not.toBeInTheDocument();
   });
+
+  it('labels persisted completed telemetry as historical rather than active', () => {
+    render(<VideoFeed
+      cameraId="cam-border-01"
+      sourceMode="durable"
+      sourceRunState="COMPLETED"
+      expectedSessionId="session-1"
+      telemetryStatus="COMPLETED"
+      liveTracksData={{ analysis_session_id: 'session-1', frame_index: 42 }}
+    />);
+    expect(screen.getByText('SOURCE STORED · ANALYSIS COMPLETED')).toBeInTheDocument();
+    expect(screen.queryByText('TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL')).not.toBeInTheDocument();
+  });
+
+  it('uses the active label only for live telemetry', () => {
+    const { rerender } = render(<VideoFeed
+      cameraId="cam-border-01"
+      telemetryStatus="LIVE"
+      liveTracksData={{ analysis_session_id: 'session-1', frame_index: 42 }}
+    />);
+    expect(screen.getByText('TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL')).toBeInTheDocument();
+
+    rerender(<VideoFeed
+      cameraId="cam-border-01"
+      telemetryStatus="STALE"
+      liveTracksData={{ analysis_session_id: 'session-1', frame_index: 42 }}
+    />);
+    expect(screen.getByText('LAST TELEMETRY AVAILABLE · NOT LIVE')).toBeInTheDocument();
+    expect(screen.queryByText('TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL')).not.toBeInTheDocument();
+  });
 });

@@ -3,7 +3,7 @@ import { Activity, AlertTriangle, Database, HardDrive, Radio, Server } from 'luc
 import useWebSocket from '../hooks/useWebSocket';
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { WS_URL, authFetch } from '../services/auth';
-import { deriveCameraOperationalState } from '../utils/systemTruth';
+import { cameraHealthPresentation, deriveCameraOperationalState } from '../utils/systemTruth';
 
 const tone = (status) => ['READY', 'LIVE', 'CURRENT', 'CONFIGURED'].includes(status)
   ? 'var(--color-ok)'
@@ -12,61 +12,6 @@ const tone = (status) => ['READY', 'LIVE', 'CURRENT', 'CONFIGURED'].includes(sta
     : ['WARMING', 'DEGRADED', 'BUFFERING', 'STALE'].includes(status)
       ? 'var(--color-warning)'
       : 'var(--color-danger)';
-
-const HEALTH_FRESHNESS_MS = 30_000;
-
-function formatFps(value) {
-  const fps = Number(value);
-  return Number.isFinite(fps) ? fps.toFixed(2) : null;
-}
-
-function formatSampleAge(ageMs) {
-  const seconds = Math.floor(Math.max(0, ageMs) / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
-}
-
-function cameraHealthPresentation(camera, now = Date.now()) {
-  const hasSample = [camera.health_state, camera.health_reason, camera.fps_actual, camera.last_health_check]
-    .some((value) => value !== null && value !== undefined && value !== '');
-  if (!hasSample) {
-    return { health: 'NOT REPORTED', fps: 'N/A', reason: 'N/A', sample: 'Never', stale: false };
-  }
-
-  const measuredAt = Date.parse(camera.last_health_check);
-  const validTimestamp = Number.isFinite(measuredAt);
-  const ageMs = validTimestamp ? Math.max(0, now - measuredAt) : null;
-  const current = validTimestamp && ageMs <= HEALTH_FRESHNESS_MS;
-  const measuredHealth = camera.health_state || 'NOT REPORTED';
-  const measuredFps = formatFps(camera.fps_actual);
-  const measuredReason = camera.health_reason || 'N/A';
-
-  if (current) {
-    return {
-      health: measuredHealth,
-      fps: measuredFps ?? 'N/A',
-      reason: measuredReason,
-      sample: formatSampleAge(ageMs),
-      stale: false,
-    };
-  }
-
-  const absoluteTimestamp = validTimestamp
-    ? `${new Date(measuredAt).toISOString().replace('T', ' ').replace('.000Z', ' UTC').replace('Z', ' UTC')}`
-    : 'Invalid timestamp';
-  return {
-    health: `STALE · LAST MEASURED ${measuredHealth}`,
-    fps: 'N/A CURRENT',
-    fpsDetail: measuredFps ? `Last measured: ${measuredFps} FPS` : 'Last measured: N/A',
-    reason: `Last measured: ${measuredReason}`,
-    sample: validTimestamp ? `${formatSampleAge(ageMs)} · ${absoluteTimestamp}` : `${absoluteTimestamp} · STALE`,
-    stale: true,
-  };
-}
 
 function StatusCard({ label, value, detail, Icon = Activity }) {
   return <div className="card" style={{ minHeight: 104 }}>

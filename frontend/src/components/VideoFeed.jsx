@@ -527,13 +527,15 @@ export default function VideoFeed({
                 ? 'PREPARING CLOUD ANALYSIS'
                 : sourceRunState === 'READY_TO_START'
                   ? 'VIDEO READY · STARTING AI WORKER'
-                  : (sourceMode === 'durable' && expectedSessionId && !liveTracksData)
-                    ? sourceRunState === 'COMPLETED'
-                      ? 'SOURCE STORED · ANALYSIS COMPLETED'
-                      : 'WAITING FOR FIRST ANALYZED FRAME'
-                    : liveTracksData
-                      ? 'TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL'
-                      : 'NO VIDEO SOURCE'}
+                  : sourceRunState === 'COMPLETED' || telemetryStatus === 'COMPLETED'
+                    ? 'SOURCE STORED · ANALYSIS COMPLETED'
+                    : telemetryStatus === 'STALE' && liveTracksData
+                      ? 'LAST TELEMETRY AVAILABLE · NOT LIVE'
+                      : (sourceMode === 'durable' && expectedSessionId && !liveTracksData)
+                        ? 'WAITING FOR FIRST ANALYZED FRAME'
+                        : telemetryStatus === 'LIVE' && liveTracksData
+                          ? 'TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL'
+                          : 'NO VIDEO SOURCE'}
           </span>
           {canUpload && !sourceRestoring && !isUploading && !(sourceMode === 'durable' && expectedSessionId) ? <div className="dashboard-video-upload" style={{
             background: 'var(--color-ok)', color: '#000',

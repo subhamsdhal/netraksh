@@ -18,6 +18,13 @@ describe('production UI contains no retired operational claims', () => {
     expect(dashboard).not.toContain('DEMO_CAMERA_LABELS');
   });
 
+  it('uses shared freshness and age truth in the command center', () => {
+    const dashboard = read('../src/pages/Dashboard.jsx');
+    expect(dashboard).toContain('cameraHealthPresentation(health[activeCameraId], now)');
+    expect(dashboard).toContain('formatTelemetryAge(telemetryAgeMs)');
+    expect(dashboard).not.toContain('telemetryAgeMs / 1000).toFixed(1)');
+  });
+
   it('names missing geolocation explicitly', () => {
     expect(read('../src/pages/Map.jsx')).toContain('NO REGISTERED CAMERA LOCATION');
     expect(read('../src/components/TacticalMap.jsx')).toContain('NO REGISTERED CAMERA LOCATION');
