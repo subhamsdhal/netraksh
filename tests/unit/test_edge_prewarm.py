@@ -22,6 +22,7 @@ def _durable(camera_id):
 def _reset_cache():
     dashboard._edge_prewarm_status.clear()
     dashboard._edge_wake_tasks.clear()
+    dashboard._startup_prewarm_tasks.clear()
 
 
 def test_prewarm_wakes_two_configured_workers_concurrently_without_control_mutation(monkeypatch):
@@ -99,6 +100,16 @@ def test_health_requires_worker_alive_and_no_error():
     assert dashboard._classify_edge_health(200, {"worker_alive": False, "last_error": None}) == "warming"
     assert dashboard._classify_edge_health(200, {"worker_alive": True, "last_error": "RuntimeError"}) == "warming"
     assert dashboard._classify_edge_health(200, {"worker_alive": True, "last_error": None}) == "ready"
+    assert dashboard._classify_edge_health(
+        200,
+        {"camera_id": CAMERAS[1], "worker_alive": True, "last_error": None},
+        CAMERAS[0],
+    ) == "warming"
+    assert dashboard._classify_edge_health(
+        200,
+        {"camera_id": CAMERAS[0], "worker_alive": True, "last_error": None},
+        CAMERAS[0],
+    ) == "ready"
 
 
 def test_status_reads_cache_without_contacting_edge(monkeypatch):
@@ -141,3 +152,96 @@ def test_bounded_prewarm_retry_becomes_explicit_terminal_timeout(monkeypatch):
     response = dashboard._prewarm_response()
     assert response["terminal"] == 1
     assert response["cameras"][CAMERAS[0]]["status"] == "timeout"
+
+
+def test_public_startup_prewarm_schedules_both_cameras_and_deduplicates(monkeypatch):
+    _reset_cache()
+    calls = []
+    release = asyncio.Event()
+    monkeypatch.setattr(dashboard, "_edge_wake_url", lambda camera_id: f"https://{camera_id}.example.test")
+
+    async def controlled_prewarm(camera_id):
+        calls.append(camera_id)
+        dashboard._cache_prewarm_status(camera_id, "warming")
+        await release.wait()
+        return dashboard._cache_prewarm_status(camera_id, "ready")
+
+    monkeypatch.setattr(dashboard, "_prewarm_one", controlled_prewarm)
+
+    async def scenario():
+        first = await dashboard.start_public_startup_prewarm()
+        await asyncio.sleep(0)
+        tasks = dict(dashboard._startup_prewarm_tasks)
+        second = await dashboard.start_public_startup_prewarm()
+        assert first["eligible"] == 2
+        assert second["warming"] == 2
+        assert calls == list(CAMERAS)
+        assert all(dashboard._startup_prewarm_tasks[camera_id] is task for camera_id, task in tasks.items())
+        release.set()
+        await asyncio.gather(*tasks.values())
+
+    asyncio.run(scenario())
+
+
+def test_public_startup_prewarm_reuses_existing_bounded_retry(monkeypatch):
+    _reset_cache()
+
+    async def scenario():
+        release = asyncio.Event()
+        retry = asyncio.create_task(release.wait())
+        dashboard._edge_wake_tasks[CAMERAS[0]] = retry
+
+        async def forbidden(_camera_id):
+            raise AssertionError("an active bounded retry must be reused")
+
+        monkeypatch.setattr(dashboard, "_prewarm_one", forbidden)
+        assert dashboard._schedule_startup_prewarm(CAMERAS[0]) is retry
+        release.set()
+        await retry
+
+    asyncio.run(scenario())
+
+
+def test_public_startup_routes_are_unauthenticated_and_status_is_safe():
+    public_paths = {
+        "/api/dashboard/startup/prewarm",
+        "/api/dashboard/startup/prewarm/status",
+    }
+    routes = {route.path: route for route in dashboard.router.routes if route.path in public_paths}
+    assert set(routes) == public_paths
+    assert all(not route.dependant.dependencies for route in routes.values())
+
+    _reset_cache()
+    dashboard._cache_prewarm_status(CAMERAS[0], "ready")
+    dashboard._cache_prewarm_status(CAMERAS[1], "warming")
+    response = asyncio.run(dashboard.get_public_startup_prewarm_status())
+    serialized = str(response).lower()
+    assert response["cameras"][CAMERAS[0]]["camera_id"] == CAMERAS[0]
+    assert not any(forbidden in serialized for forbidden in (
+        "secret", "credential", "token", "signed_url", "source_filename", "video_source",
+    ))
+
+
+def test_public_startup_prewarm_has_no_camera_control_side_effects(monkeypatch):
+    _reset_cache()
+    original_state = copy.deepcopy(dashboard._demo_state)
+    monkeypatch.setattr(dashboard, "_edge_wake_url", lambda camera_id: f"https://{camera_id}.example.test")
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("public startup prewarm must not mutate camera or analysis control")
+
+    for name in ("start_active_session", "activate_session", "update_active_session", "store_uploaded_session"):
+        monkeypatch.setattr(dashboard, name, forbidden)
+
+    async def wake(_camera_id):
+        return "ready"
+
+    monkeypatch.setattr(dashboard, "_wake_edge_service", wake)
+
+    async def scenario():
+        await dashboard.start_public_startup_prewarm()
+        tasks = list(dashboard._startup_prewarm_tasks.values())
+        await asyncio.gather(*tasks)
+
+    asyncio.run(scenario())
+    assert dashboard._demo_state == original_state

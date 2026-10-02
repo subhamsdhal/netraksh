@@ -233,6 +233,7 @@ def _selected_bundled_control(camera_id: str | None) -> dict | None:
 
 
 _edge_wake_tasks: dict[str, asyncio.Task] = {}
+_startup_prewarm_tasks: dict[str, asyncio.Task] = {}
 _edge_prewarm_status: dict[str, dict] = {}
 _PREWARM_CAMERA_IDS = ("cam-border-01", "cam-checkpoint-01")
 _PREWARM_READY_TTL_SECONDS = 10 * 60
@@ -250,7 +251,11 @@ def _edge_wake_url(camera_id: str | None) -> str:
     return os.environ.get(env_key, "").strip() if env_key else ""
 
 
-def _classify_edge_health(status_code: int, payload: object) -> str:
+def _classify_edge_health(
+    status_code: int,
+    payload: object,
+    expected_camera_id: str | None = None,
+) -> str:
     """Classify an edge response without treating a listener as an AI worker.
 
     A Render listener can answer before its background worker reaches the
@@ -260,6 +265,8 @@ def _classify_edge_health(status_code: int, payload: object) -> str:
     if not 200 <= status_code < 300:
         return "warming"
     if not isinstance(payload, dict):
+        return "warming"
+    if expected_camera_id and payload.get("camera_id") != expected_camera_id:
         return "warming"
     if payload.get("worker_alive") is True and not payload.get("last_error"):
         return "ready"
@@ -317,7 +324,7 @@ async def _probe_edge_service(camera_id: str | None) -> str:
                 payload = response.json()
             except (ValueError, json.JSONDecodeError):
                 payload = None
-            probe_status = _classify_edge_health(response.status_code, payload)
+            probe_status = _classify_edge_health(response.status_code, payload, str(camera_id or ""))
             if probe_status == "ready":
                 return "ready"
             logger.info(
@@ -398,6 +405,38 @@ async def _prewarm_one(camera_id: str) -> dict:
     return _cache_prewarm_status(camera_id, status)
 
 
+def _schedule_startup_prewarm(camera_id: str) -> asyncio.Task | None:
+    """Start one strongly referenced prewarm task per configured camera.
+
+    The task only invokes the existing process-wake path. It never reads or
+    mutates video control, analysis generations, sessions, telemetry, events,
+    or evidence. Repeated public startup requests share the same bounded work.
+    """
+    existing = _startup_prewarm_tasks.get(camera_id)
+    if existing is not None and not existing.done():
+        return existing
+    retry = _edge_wake_tasks.get(camera_id)
+    if retry is not None and not retry.done():
+        return retry
+    if _cached_prewarm_status(camera_id)["status"] == "ready":
+        return None
+
+    task = asyncio.create_task(_prewarm_one(camera_id))
+    _startup_prewarm_tasks[camera_id] = task
+
+    def discard(completed: asyncio.Task) -> None:
+        if _startup_prewarm_tasks.get(camera_id) is completed:
+            _startup_prewarm_tasks.pop(camera_id, None)
+        if not completed.cancelled():
+            try:
+                completed.exception()
+            except asyncio.CancelledError:
+                pass
+
+    task.add_done_callback(discard)
+    return task
+
+
 def _prewarm_response() -> dict:
     cameras = {camera_id: _cached_prewarm_status(camera_id) for camera_id in _PREWARM_CAMERA_IDS}
     eligible = [camera_id for camera_id, item in cameras.items() if item["status"] != "not_configured"]
@@ -430,6 +469,29 @@ async def prewarm_edge_workers(_user=Depends(require_operator_or_admin)):
 @router.get("/edge/prewarm/status")
 async def get_edge_prewarm_status(_user=Depends(require_operator_or_admin)):
     """Read the bounded in-process readiness cache; never wake an edge worker."""
+    return _prewarm_response()
+
+
+@router.post("/startup/prewarm")
+async def start_public_startup_prewarm():
+    """Schedule bounded process-only wake work and return cached readiness.
+
+    This and ``GET /startup/prewarm/status`` are the only unauthenticated
+    dashboard startup routes. Their response contains only camera identities,
+    bounded process readiness states, timestamps, and fixed safe error codes.
+    """
+    eligible = [camera_id for camera_id in _PREWARM_CAMERA_IDS if _configured_edge_worker(camera_id)]
+    ineligible = set(_PREWARM_CAMERA_IDS) - set(eligible)
+    for camera_id in ineligible:
+        _cache_prewarm_status(camera_id, "not_configured")
+    for camera_id in eligible:
+        _schedule_startup_prewarm(camera_id)
+    return _prewarm_response()
+
+
+@router.get("/startup/prewarm/status")
+async def get_public_startup_prewarm_status():
+    """Return the startup readiness cache without probing or waking workers."""
     return _prewarm_response()
 
 

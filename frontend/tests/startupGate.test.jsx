@@ -51,6 +51,20 @@ describe('StartupGate', () => {
     expect(screen.getAllByText('WARMING')).toHaveLength(2);
   });
 
+  it('renders completed readiness independently while one camera still warms', () => {
+    mocks.state = state({
+      backend: 'READY',
+      camBorder01: 'READY',
+      camCheckpoint01: 'WAKING',
+    });
+
+    render(<StartupGate><div>Protected Dashboard</div></StartupGate>);
+
+    expect(screen.getAllByText('READY')).toHaveLength(2);
+    expect(screen.getByText('WARMING')).toBeInTheDocument();
+    expect(screen.queryByText('Protected Dashboard')).not.toBeInTheDocument();
+  });
+
   it('mounts the dashboard only after all three services are ready', () => {
     mocks.state = state({
       backend: 'READY',

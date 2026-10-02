@@ -20,6 +20,11 @@ const configuredServices = {
   },
 };
 
+const configuredPrewarm = {
+  triggerUrl: backendUrl && `${backendUrl}/api/dashboard/startup/prewarm`,
+  statusUrl: backendUrl && `${backendUrl}/api/dashboard/startup/prewarm/status`,
+};
+
 const SERVICE_KEYS = Object.freeze(['backend', 'camBorder01', 'camCheckpoint01']);
 export const STARTUP_STATUS = Object.freeze({
   UNKNOWN: 'UNKNOWN',
@@ -30,7 +35,9 @@ export const STARTUP_STATUS = Object.freeze({
 
 const DEFAULT_MAX_STARTUP_MS = 305_000;
 const DEFAULT_POLL_INTERVAL_MS = 1_750;
-const DEFAULT_REQUEST_TIMEOUT_MS = 12_000;
+const DEFAULT_BACKEND_TIMEOUT_MS = 12_000;
+const DEFAULT_EDGE_TIMEOUT_MS = 5_000;
+const DEFAULT_PREWARM_TIMEOUT_MS = 8_000;
 const RESUME_AFTER_MS = 60_000;
 
 function initialSnapshot() {
@@ -73,26 +80,37 @@ export function classifyStartupResponse(service, response, payload) {
 
 export function createStartupCoordinator({
   services = configuredServices,
+  prewarm = configuredPrewarm,
   fetchImpl = (...args) => fetch(...args),
   now = () => Date.now(),
   setTimer = (...args) => setTimeout(...args),
   clearTimer = (timer) => clearTimeout(timer),
   maxStartupMs = DEFAULT_MAX_STARTUP_MS,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
-  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  requestTimeoutMs = null,
+  backendTimeoutMs = DEFAULT_BACKEND_TIMEOUT_MS,
+  edgeTimeoutMs = DEFAULT_EDGE_TIMEOUT_MS,
+  prewarmTimeoutMs = DEFAULT_PREWARM_TIMEOUT_MS,
 } = {}) {
   let snapshot = initialSnapshot();
   let activeCycle = null;
   let cycleGeneration = 0;
   const listeners = new Set();
   const timers = new Set();
+  const sleepResolvers = new Map();
+  const inFlight = new Map();
+  let prewarmAccepted = false;
 
   const publish = (updates = {}) => {
     snapshot = { ...snapshot, ...updates };
     snapshot.allReady = SERVICE_KEYS.every(
       (key) => snapshot[key].status === STARTUP_STATUS.READY,
     );
-    if (snapshot.allReady && !snapshot.readyAt) snapshot.readyAt = now();
+    if (snapshot.allReady && !snapshot.readyAt) {
+      snapshot.readyAt = now();
+      inFlight.forEach(({ controller }) => controller.abort());
+      clearAllTimers();
+    }
     listeners.forEach((listener) => listener(snapshot));
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('netraksh:startup-wake', { detail: snapshot }));
@@ -103,64 +121,147 @@ export function createStartupCoordinator({
   const updateService = (key, result) => publish({ [key]: result });
 
   const clearAllTimers = () => {
-    timers.forEach((timer) => clearTimer(timer));
+    timers.forEach((timer) => {
+      clearTimer(timer);
+      const resolve = sleepResolvers.get(timer);
+      if (resolve) resolve();
+    });
     timers.clear();
+    sleepResolvers.clear();
   };
 
   const sleep = (delay) => new Promise((resolve) => {
     const timer = setTimer(() => {
       timers.delete(timer);
+      sleepResolvers.delete(timer);
       resolve();
     }, delay);
     timers.add(timer);
+    sleepResolvers.set(timer, resolve);
   });
 
-  const probe = async (key) => {
+  const requestTimeoutFor = (service) => requestTimeoutMs
+    ?? (service.kind === 'edge' ? edgeTimeoutMs : backendTimeoutMs);
+
+  const launchProbe = (key, generation) => {
+    if (inFlight.has(key)) return inFlight.get(key).promise;
     const service = services[key];
-    if (!service?.url || service.url === '/wake') return { status: STARTUP_STATUS.WAKING, payload: null };
+    if (!service?.url || service.url === '/wake') return Promise.resolve();
 
     const controller = new AbortController();
-    const timeout = setTimer(() => controller.abort(), requestTimeoutMs);
+    const timeout = setTimer(() => controller.abort(), requestTimeoutFor(service));
     timers.add(timeout);
+    let request;
     try {
-      // fetch() is invoked synchronously before the first await. dispatch()
-      // constructs all probe promises first, preserving the three-way fanout.
-      const request = fetchImpl(service.url, {
+      request = fetchImpl(service.url, {
         cache: 'no-store',
         signal: controller.signal,
       });
-      const response = await request;
-      let payload = null;
-      try {
-        payload = await response.json();
-      } catch {
-        payload = null;
-      }
-      return { status: classifyStartupResponse(service, response, payload), payload };
     } catch {
-      return { status: STARTUP_STATUS.WAKING, payload: null };
-    } finally {
+      request = Promise.reject(new Error('startup request failed'));
+    }
+    const promise = Promise.resolve(request).then(async (response) => {
+      let payload = null;
+      try { payload = await response.json(); } catch { payload = null; }
+      return { status: classifyStartupResponse(service, response, payload), payload };
+    }).catch(() => ({ status: STARTUP_STATUS.WAKING, payload: null })).then((result) => {
+      if (generation === cycleGeneration
+        && ![STARTUP_STATUS.READY, STARTUP_STATUS.TIMEOUT].includes(snapshot[key].status)) {
+        updateService(key, result);
+      }
+      return result;
+    }).finally(() => {
       clearTimer(timeout);
       timers.delete(timeout);
-    }
+      if (inFlight.get(key)?.promise === promise) inFlight.delete(key);
+    });
+    inFlight.set(key, { controller, promise });
+    return promise;
   };
 
-  const dispatch = async (keys, generation) => {
-    // Do not insert an await between these calls. All unfinished services are
-    // triggered from the same turn and then awaited together.
-    const probes = keys.map((key) => ({ key, promise: probe(key) }));
-    const results = await Promise.allSettled(probes.map(({ promise }) => promise));
-    if (generation !== cycleGeneration) return;
-    results.forEach((result, index) => {
-      if (result.status === 'fulfilled') updateService(probes[index].key, result.value);
+  const applyBackendAuthority = (payload) => {
+    const mappings = [
+      ['camBorder01', 'cam-border-01'],
+      ['camCheckpoint01', 'cam-checkpoint-01'],
+    ];
+    mappings.forEach(([key, cameraId]) => {
+      const item = payload?.cameras?.[cameraId];
+      if (item?.camera_id === cameraId
+        && item?.status === 'ready'
+        && snapshot[key].status !== STARTUP_STATUS.TIMEOUT) {
+        updateService(key, { status: STARTUP_STATUS.READY, payload: item, authority: 'backend' });
+      }
     });
+  };
+
+  const launchPrewarmStatus = (generation) => {
+    const key = 'prewarmStatus';
+    if (!prewarm?.statusUrl || inFlight.has(key) || snapshot.allReady) return;
+    const controller = new AbortController();
+    const timeout = setTimer(() => controller.abort(), prewarmTimeoutMs);
+    timers.add(timeout);
+    let request;
+    try {
+      request = fetchImpl(prewarm.statusUrl, { cache: 'no-store', signal: controller.signal });
+    } catch {
+      request = Promise.reject(new Error('prewarm status request failed'));
+    }
+    const promise = Promise.resolve(request).then(async (response) => {
+      if (!response.ok) return null;
+      try { return await response.json(); } catch { return null; }
+    }).then((payload) => {
+      if (generation === cycleGeneration && payload) applyBackendAuthority(payload);
+    }).catch(() => {}).finally(() => {
+      clearTimer(timeout);
+      timers.delete(timeout);
+      if (inFlight.get(key)?.promise === promise) inFlight.delete(key);
+    });
+    inFlight.set(key, { controller, promise });
+  };
+
+  const launchPrewarmTrigger = (generation) => {
+    const key = 'prewarmTrigger';
+    if (!prewarm?.triggerUrl || inFlight.has(key) || prewarmAccepted) return;
+    const controller = new AbortController();
+    const timeout = setTimer(() => controller.abort(), prewarmTimeoutMs);
+    timers.add(timeout);
+    let request;
+    try {
+      request = fetchImpl(prewarm.triggerUrl, {
+        method: 'POST', cache: 'no-store', signal: controller.signal,
+      });
+    } catch {
+      request = Promise.reject(new Error('prewarm trigger request failed'));
+    }
+    const promise = Promise.resolve(request).then(async (response) => {
+      if (!response.ok) return null;
+      try { return await response.json(); } catch { return {}; }
+    }).then((payload) => {
+      if (generation !== cycleGeneration || payload === null) return;
+      prewarmAccepted = true;
+      applyBackendAuthority(payload);
+      launchPrewarmStatus(generation);
+    }).catch(() => {}).finally(() => {
+      clearTimer(timeout);
+      timers.delete(timeout);
+      if (inFlight.get(key)?.promise === promise) inFlight.delete(key);
+    });
+    inFlight.set(key, { controller, promise });
+  };
+
+  const dispatch = (keys, generation) => {
+    // Keep these calls synchronous and await-free: all direct requests plus
+    // the redundant backend prewarm leave the browser in the first turn.
+    keys.forEach((key) => launchProbe(key, generation));
+    if (prewarmAccepted) launchPrewarmStatus(generation);
+    else launchPrewarmTrigger(generation);
   };
 
   const runCycle = async (generation) => {
     const deadline = snapshot.startedAt + maxStartupMs;
     let unfinished = [...SERVICE_KEYS];
 
-    await dispatch(unfinished, generation);
+    dispatch(unfinished, generation);
     while (generation === cycleGeneration) {
       unfinished = SERVICE_KEYS.filter(
         (key) => snapshot[key].status !== STARTUP_STATUS.READY,
@@ -181,7 +282,11 @@ export function createStartupCoordinator({
 
       await sleep(Math.min(pollIntervalMs, remaining));
       if (generation !== cycleGeneration) return snapshot;
-      await dispatch(unfinished, generation);
+      unfinished = SERVICE_KEYS.filter(
+        (key) => snapshot[key].status !== STARTUP_STATUS.READY,
+      );
+      if (unfinished.length === 0) return snapshot;
+      dispatch(unfinished, generation);
     }
     return snapshot;
   };
@@ -191,6 +296,9 @@ export function createStartupCoordinator({
     if (snapshot.allReady && !force) return Promise.resolve(snapshot);
 
     clearAllTimers();
+    inFlight.forEach(({ controller }) => controller.abort());
+    inFlight.clear();
+    prewarmAccepted = false;
     const startedAt = now();
     const waking = Object.fromEntries(
       SERVICE_KEYS.map((key) => [key, { status: STARTUP_STATUS.WAKING }]),
@@ -237,6 +345,9 @@ export function createStartupCoordinator({
     cycleGeneration += 1;
     activeCycle = null;
     clearAllTimers();
+    inFlight.forEach(({ controller }) => controller.abort());
+    inFlight.clear();
+    prewarmAccepted = false;
     snapshot = initialSnapshot();
   };
 
