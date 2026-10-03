@@ -39,6 +39,11 @@ export default function StartupGate({ children }) {
           ))}
         </div>
         <p>{timedOut ? 'One or more required services did not become ready.' : 'Starting required services…'}</p>
+        {!timedOut && (
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', lineHeight: 1.5 }}>
+            Cloud services are starting. This can take up to 2 minutes on first launch. Please keep this tab open. If the screen remains here for more than 2 minutes, refresh the tab once.
+          </p>
+        )}
         {timedOut && (
           <button type="button" onClick={() => retryStartupWake()}>
             RETRY STARTUP

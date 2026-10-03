@@ -51,6 +51,7 @@ describe('StartupGate', () => {
     expect(screen.getByRole('heading', { name: 'NETRAKSH INITIALIZING' })).toBeInTheDocument();
     expect(screen.queryByText('Protected Dashboard')).not.toBeInTheDocument();
     expect(screen.getAllByText('WARMING')).toHaveLength(2);
+    expect(screen.getByText('Cloud services are starting. This can take up to 2 minutes on first launch. Please keep this tab open. If the screen remains here for more than 2 minutes, refresh the tab once.')).toBeInTheDocument();
   });
 
   it('renders completed readiness independently while one camera still warms', () => {
