@@ -37,6 +37,8 @@ from backend.security.auth import require_any_role, get_command_filter
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
+INTRUSION_EVENT_TYPES = ("ZONE_INTRUSION", "FENCE_BREACH", "LOITERING")
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -56,7 +58,7 @@ def _parse_window(since: Optional[str], until: Optional[str]) -> tuple[datetime,
     return t_since, t_until
 
 
-def _window_events(
+def _window_all_events(
     db: Session,
     since: datetime,
     until: datetime,
@@ -65,10 +67,8 @@ def _window_events(
     camera_id: Optional[str] = None,
     event_type: Optional[str] = None,
 ):
-    """Base query: events within the time window."""
+    """All persisted event records within the authorized, filtered window."""
     q = db.query(Event).filter(Event.timestamp >= since, Event.timestamp <= until)
-    # REQUIREMENT 6: exclude system heartbeat/ABSTAIN events from real analytics
-    q = q.filter(Event.decision_state != 'ABSTAIN')
     if user:
         command_filter = get_command_filter(user)
         if command_filter:
@@ -80,6 +80,20 @@ def _window_events(
     if event_type:
         q = q.filter(Event.event_type == event_type)
     return q
+
+
+def _window_analytic_events(*args, **kwargs):
+    """Window records with an analytic decision other than ABSTAIN."""
+    return _window_all_events(*args, **kwargs).filter(
+        func.upper(func.coalesce(Event.decision_state, "")) != "ABSTAIN"
+    )
+
+
+def _window_detected_events(*args, **kwargs):
+    """Window records whose authoritative decision state is DETECTED."""
+    return _window_all_events(*args, **kwargs).filter(
+        func.upper(func.coalesce(Event.decision_state, "")) == "DETECTED"
+    )
 
 
 def _window_alerts(db: Session, since: datetime, until: datetime, user: User = None):
@@ -114,21 +128,25 @@ async def analytics_summary(
     t_since, t_until = _parse_window(since, until)
 
     # --- Event totals ---
-    events = _window_events(db, t_since, t_until, _user, stream_id, camera_id, event_type)
-    total_events = events.count()
+    all_events = _window_all_events(db, t_since, t_until, _user, stream_id, camera_id, event_type)
+    analytic_events = _window_analytic_events(db, t_since, t_until, _user, stream_id, camera_id, event_type)
+    detected_events = _window_detected_events(db, t_since, t_until, _user, stream_id, camera_id, event_type)
+    raw_total = all_events.count()
+    analytic_total = analytic_events.count()
 
     # Decision state breakdown
+    decision_state = func.upper(func.coalesce(Event.decision_state, "UNKNOWN"))
     decision_rows = (
-        events
-        .with_entities(Event.decision_state, func.count(Event.id).label("n"))
-        .group_by(Event.decision_state)
+        all_events
+        .with_entities(decision_state.label("decision_state"), func.count(Event.id).label("n"))
+        .group_by(decision_state)
         .all()
     )
     by_decision = {row.decision_state: row.n for row in decision_rows}
 
     # Severity breakdown (events)
     severity_rows = (
-        events
+        detected_events
         .filter(Event.severity.isnot(None))
         .with_entities(Event.severity, func.count(Event.id).label("n"))
         .group_by(Event.severity)
@@ -138,35 +156,35 @@ async def analytics_summary(
 
     # Watchlist face-match events
     watchlist_events = (
-        events
+        detected_events
         .filter(Event.face_match_person_id.isnot(None))
         .count()
     )
 
     # ANPR events (plate_text not null)
     anpr_events = (
-        events
+        detected_events
         .filter(Event.plate_text.isnot(None))
         .count()
     )
 
-    # Intrusion events (event_type = 'zone_intrusion' or 'fence_breach')
+    # Existing product intrusion semantics, normalized for mixed-case legacy rows.
     intrusion_events = (
-        events
-        .filter(Event.event_type.in_(["zone_intrusion", "fence_breach", "loitering"]))
+        detected_events
+        .filter(func.upper(Event.event_type).in_(INTRUSION_EVENT_TYPES))
         .count()
     )
 
     # Vehicle events (detection_class = 'vehicle')
     vehicle_events = (
-        events
+        detected_events
         .filter(Event.detection_class == "vehicle")
         .count()
     )
 
     # Person events (detection_class = 'person')
     person_events = (
-        events
+        detected_events
         .filter(Event.detection_class == "person")
         .count()
     )
@@ -189,23 +207,24 @@ async def analytics_summary(
         .count()
     )
 
-    # Active cameras with events in window
-    active_cameras = (
-        events
+    # Cameras represented by event records in the selected window
+    cameras_with_events = (
+        all_events
         .with_entities(func.count(func.distinct(Event.camera_id)))
         .scalar()
     ) or 0
 
     verified_events = (
-        events.join(EvidencePackage, EvidencePackage.event_id == Event.id)
+        all_events.join(EvidencePackage, EvidencePackage.event_id == Event.id)
         .filter(EvidencePackage.verified_ok.is_(True))
         .count()
     )
     detected = by_decision.get("DETECTED", 0)
-    confidence_stats = events.with_entities(
+    abstain = by_decision.get("ABSTAIN", 0)
+    confidence_stats = detected_events.with_entities(
         func.avg(Event.confidence), func.min(Event.confidence), func.max(Event.confidence)
     ).first()
-    reliability_stats = events.with_entities(
+    reliability_stats = all_events.filter(Event.score_r.isnot(None)).with_entities(
         func.avg(Event.score_r), func.min(Event.score_r), func.max(Event.score_r)
     ).first()
 
@@ -215,7 +234,12 @@ async def analytics_summary(
             "until": t_until.isoformat(),
         },
         "events": {
-            "total": total_events,
+            "total": raw_total,
+            "raw_total": raw_total,
+            "analytic_total": analytic_total,
+            "non_abstain_total": analytic_total,
+            "detected": detected,
+            "abstain": abstain,
             "by_decision": by_decision,
             "by_severity": by_severity,
             "watchlist_matches": watchlist_events,
@@ -224,7 +248,8 @@ async def analytics_summary(
             "vehicle": vehicle_events,
             "person": person_events,
             "verified": verified_events,
-            "detection_rate_pct": round((detected / total_events) * 100, 2) if total_events else None,
+            "verified_packages": verified_events,
+            "detection_rate_pct": round((detected / raw_total) * 100, 2) if raw_total else None,
             "confidence": {
                 "average": confidence_stats[0],
                 "minimum": confidence_stats[1],
@@ -243,7 +268,8 @@ async def analytics_summary(
             "closed": closed_alerts,
         },
         "cameras": {
-            "active_in_window": active_cameras,
+            "active_in_window": cameras_with_events,
+            "with_events": cameras_with_events,
         },
         # Uptime cannot be derived from the current Event/Alert schema.
         # The edge pipeline reports per-device uptime in PipelineMetricsSnapshot,
@@ -282,7 +308,7 @@ async def analytics_timeseries(
         raise HTTPException(status_code=400, detail="bucket must be 'hour' or 'day'")
 
     t_since, t_until = _parse_window(since, until)
-    events = _window_events(db, t_since, t_until, _user, stream_id, camera_id, event_type)
+    events = _window_detected_events(db, t_since, t_until, _user, stream_id, camera_id, event_type)
 
     # Detect database dialect for time bucketing
     dialect = db.bind.dialect.name if db.bind else "sqlite"
@@ -304,7 +330,7 @@ async def analytics_timeseries(
             ).label("watchlist"),
             func.sum(
                 case(
-                    (Event.event_type.in_(["zone_intrusion", "fence_breach", "loitering"]), 1),
+                    (func.upper(Event.event_type).in_(INTRUSION_EVENT_TYPES), 1),
                     else_=0,
                 )
             ).label("intrusion"),
@@ -355,7 +381,7 @@ async def analytics_by_type(
     t_since, t_until = _parse_window(since, until)
 
     rows = (
-        _window_events(db, t_since, t_until, _user, stream_id, camera_id, event_type)
+        _window_detected_events(db, t_since, t_until, _user, stream_id, camera_id, event_type)
         .with_entities(
             func.coalesce(Event.event_type, "unknown").label("event_type"),
             func.count(Event.id).label("n"),
@@ -389,7 +415,7 @@ async def analytics_by_camera(
     t_since, t_until = _parse_window(since, until)
 
     rows = (
-        _window_events(db, t_since, t_until, _user, stream_id, camera_id, event_type)
+        _window_detected_events(db, t_since, t_until, _user, stream_id, camera_id, event_type)
         .with_entities(
             Event.camera_id,
             func.count(Event.id).label("n"),
@@ -435,7 +461,7 @@ async def analytics_by_severity(
     t_since, t_until = _parse_window(since, until)
 
     rows = (
-        _window_events(db, t_since, t_until, _user, stream_id, camera_id, event_type)
+        _window_detected_events(db, t_since, t_until, _user, stream_id, camera_id, event_type)
         .with_entities(
             func.coalesce(Event.severity, "NONE").label("severity"),
             func.count(Event.id).label("n"),

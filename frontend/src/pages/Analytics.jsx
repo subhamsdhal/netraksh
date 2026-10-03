@@ -19,6 +19,7 @@ import {
 } from 'recharts';
 import { Download, Activity, AlertTriangle, Camera, Filter, RefreshCw } from 'lucide-react';
 import { authFetch } from '../services/auth';
+import { buildAnalyticsCsv } from '../utils/analyticsCsv';
 
 // ─── Time-range presets ───────────────────────────────────────────────────────
 const PRESETS = [
@@ -78,52 +79,6 @@ function StatCard({ icon: Icon, label, value, color = 'text-main', notAvailable,
       </div>
     </div>
   );
-}
-
-// ─── CSV export ───────────────────────────────────────────────────────────────
-function buildCsv(summary, timeseries, byType, byCamera, bySeverity) {
-  const lines = ['NETRAKSH Analytics Export'];
-  lines.push(`Window: ${summary?.window?.since ?? ''} to ${summary?.window?.until ?? ''}`);
-  lines.push('');
-
-  lines.push('=== Summary ===');
-  lines.push(`Total Events,${summary?.events?.total ?? ''}`);
-  lines.push(`Total Alerts,${summary?.alerts?.total ?? ''}`);
-  lines.push(`Acknowledged,${summary?.alerts?.acknowledged ?? ''}`);
-  lines.push(`Unresolved,${summary?.alerts?.unresolved ?? ''}`);
-  lines.push(`Closed,${summary?.alerts?.closed ?? ''}`);
-  lines.push(`Watchlist Matches,${summary?.events?.watchlist_matches ?? ''}`);
-  lines.push(`ANPR Events,${summary?.events?.anpr ?? ''}`);
-  lines.push(`Intrusion Events,${summary?.events?.intrusion ?? ''}`);
-  lines.push(`Vehicle Events,${summary?.events?.vehicle ?? ''}`);
-  lines.push(`Person Events,${summary?.events?.person ?? ''}`);
-  lines.push('Uptime,Not available (see Performance page)');
-  lines.push('');
-
-  lines.push('=== Timeseries ===');
-  lines.push('Bucket,Total,Watchlist,Intrusion,Vehicle,Person');
-  (timeseries?.series ?? []).forEach(r =>
-    lines.push(`${r.bucket},${r.total},${r.watchlist},${r.intrusion},${r.vehicle},${r.person}`)
-  );
-  lines.push('');
-
-  lines.push('=== By Event Type ===');
-  lines.push('Event Type,Count');
-  (byType?.by_type ?? []).forEach(r => lines.push(`${r.event_type},${r.count}`));
-  lines.push('');
-
-  lines.push('=== By Camera ===');
-  lines.push('Camera ID,Camera Name,Count');
-  (byCamera?.by_camera ?? []).forEach(r =>
-    lines.push(`${r.camera_id},${r.camera_name},${r.count}`)
-  );
-  lines.push('');
-
-  lines.push('=== By Severity ===');
-  lines.push('Severity,Count');
-  (bySeverity?.by_severity ?? []).forEach(r => lines.push(`${r.severity},${r.count}`));
-
-  return lines.join('\n');
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
@@ -271,7 +226,7 @@ export default function Analytics() {
   // CSV export — uses exactly the fetched data, never static arrays
   const handleExport = () => {
     if (status !== 'ready') return;
-    const csv = buildCsv(summary, timeseries, byType, byCamera, bySeverity);
+    const csv = buildAnalyticsCsv(summary, timeseries, byType, byCamera, bySeverity);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -312,6 +267,7 @@ export default function Analytics() {
           <div className="section-sub">
             Real data from database · {summary ? `${summary.window.since.slice(0, 16)} → ${summary.window.until.slice(0, 16)}` : 'Loading…'}
           </div>
+          <div className="section-sub">Metrics below use the selected time window and filters.</div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {/* Time presets */}
@@ -399,7 +355,9 @@ export default function Analytics() {
         <>
           {/* Summary stat cards */}
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '0.75rem' }}>
-            <StatCard icon={Activity} label="Total Events" value={summary?.events?.total} color="text-ok" />
+            <StatCard icon={Activity} label="Total Event Records" value={summary?.events?.raw_total} color="text-ok" />
+            <StatCard label="Detected" value={summary?.events?.detected} color="text-ok" />
+            <StatCard label="ABSTAIN" value={summary?.events?.abstain} color="text-warning" />
             <StatCard icon={AlertTriangle} label="Total Alerts" value={summary?.alerts?.total} color="text-danger" />
             <StatCard icon={AlertTriangle} label="Unresolved" value={summary?.alerts?.unresolved} color="text-warning" />
             <StatCard icon={AlertTriangle} label="Watchlist Matches" value={summary?.events?.watchlist_matches} color="text-danger" />
@@ -407,11 +365,11 @@ export default function Analytics() {
             <StatCard label="Intrusions" value={summary?.events?.intrusion} />
             <StatCard label="Vehicle Events" value={summary?.events?.vehicle} />
             <StatCard label="Person Events" value={summary?.events?.person} />
-            <StatCard label="Verified Events" value={summary?.events?.verified} color="text-ok" />
+            <StatCard label="Verified Event Packages" value={summary?.events?.verified_packages} color="text-ok" />
             <StatCard label="Detection Rate" value={summary?.events?.detection_rate_pct} color="text-ok" format={fmtPercent} />
-            <StatCard label="Average Reliability" value={summary?.events?.reliability?.average} format={fmtRatio} />
-            <StatCard label="Average Confidence" value={summary?.events?.confidence?.average} format={fmtFractionPercent} />
-            <StatCard icon={Camera} label="Active Cameras" value={summary?.cameras?.active_in_window} />
+            <StatCard label="Average Reliability (Computed Rows)" value={summary?.events?.reliability?.average} format={fmtRatio} />
+            <StatCard label="Average Detection Confidence" value={summary?.events?.confidence?.average} format={fmtFractionPercent} />
+            <StatCard icon={Camera} label="Cameras With Events" value={summary?.cameras?.with_events} />
             <StatCard
               label="Fleet Uptime"
               notAvailable={summary?.uptime_not_available ?? true}
@@ -431,7 +389,7 @@ export default function Analytics() {
             {/* Timeseries */}
             <div className="card" style={{ display: 'flex', flexDirection: 'column' }}>
               <div className="card-header">
-                <span className="card-title">Temporal Incident Frequency</span>
+                <span className="card-title">Temporal Detected Incident Frequency</span>
                 <span className="badge badge-ok" style={{ fontSize: '0.5rem' }}>Real Data</span>
               </div>
               {tsData.length === 0 ? (
@@ -460,7 +418,7 @@ export default function Analytics() {
             {/* Severity pie */}
             <div className="card" style={{ display: 'flex', flexDirection: 'column' }}>
               <div className="card-header">
-                <span className="card-title">Severity Distribution</span>
+                <span className="card-title">Detected Severity Distribution</span>
                 <span className="badge badge-ok" style={{ fontSize: '0.5rem' }}>Real Data</span>
               </div>
               {severityPieData.length === 0 ? (
@@ -497,7 +455,7 @@ export default function Analytics() {
             {/* By event type */}
             <div className="card" style={{ display: 'flex', flexDirection: 'column' }}>
               <div className="card-header">
-                <span className="card-title">By Event Type</span>
+                <span className="card-title">Detected Events By Type</span>
                 <span className="badge badge-ok" style={{ fontSize: '0.5rem' }}>Real Data</span>
               </div>
               {typeBarData.length === 0 ? (
@@ -524,7 +482,7 @@ export default function Analytics() {
             {/* By camera */}
             <div className="card" style={{ display: 'flex', flexDirection: 'column' }}>
               <div className="card-header">
-                <span className="card-title">By Camera</span>
+                <span className="card-title">Detected Events By Camera</span>
                 <span className="badge badge-ok" style={{ fontSize: '0.5rem' }}>Real Data</span>
               </div>
               {(byCamera?.by_camera ?? []).length === 0 ? (
