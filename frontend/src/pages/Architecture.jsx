@@ -7,14 +7,17 @@ export default function Architecture() {
   useEffect(() => {
     authFetch('/system/capabilities').then((response) => response.ok ? response.json() : null).then(setCapabilities).catch(() => setCapabilities(null));
   }, []);
-  const simulatedLedger = capabilities?.blockchain?.simulated !== false;
+  const storageReported = capabilities?.evidence != null;
+  const blockchainReported = capabilities?.blockchain != null;
+  const simulatedLedger = capabilities?.blockchain?.simulated === true;
   const durableStorage = capabilities?.evidence?.durable_storage === true;
   const ArchNode = ({ step, title, subtitle, icon: Icon, children, isCore, glowColor }) => (
     <div 
-      className={`bg-panel border rounded flex flex-col ${isCore ? 'border-ok glow-ok' : 'border-color'}`}
+      className={`architecture-stage-card bg-panel border rounded flex flex-col ${isCore ? 'border-ok glow-ok' : 'border-color'}`}
+      data-testid="architecture-stage-card"
       style={{ 
         flex: 1,
-        minWidth: '220px',
+        minWidth: 0,
         padding: '1.25rem',
         background: 'linear-gradient(145deg, rgba(15,23,42,0.8) 0%, rgba(15,23,42,0.4) 100%)',
         boxShadow: isCore ? '0 8px 32px rgba(74,222,128,0.1)' : '0 4px 20px rgba(0,0,0,0.2)',
@@ -49,7 +52,7 @@ export default function Architecture() {
   );
 
   const Connector = () => (
-    <div className="flex items-center justify-center text-muted" style={{ padding: '0 0.5rem', opacity: 0.5 }}>
+    <div className="architecture-stage-connector flex items-center justify-center text-muted" data-testid="architecture-stage-connector" aria-hidden="true">
       <ArrowRight size={20} />
     </div>
   );
@@ -62,10 +65,33 @@ export default function Architecture() {
         <div>
           <h2 className="section-title">System Architecture</h2>
           <div className="section-sub">
-            Runtime-aware architecture view. Implemented capabilities are separated from current configuration and live operational state.
+            Architecture overview showing implemented capabilities and selected current configuration.
           </div>
         </div>
       </div>
+
+      <style>{`
+        .architecture-stage-flow {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr) 20px minmax(0, 1fr) 20px minmax(0, 1fr);
+          gap: 0.5rem;
+          align-items: stretch;
+        }
+        .architecture-stage-connector {
+          min-width: 0;
+          padding: 0;
+          opacity: 0.5;
+        }
+        @media (max-width: 980px) {
+          .architecture-stage-flow {
+            grid-template-columns: minmax(0, 1fr);
+          }
+          .architecture-stage-connector {
+            min-height: 20px;
+            transform: rotate(90deg);
+          }
+        }
+      `}</style>
 
       {/* Main Pipeline Container */}
       <div style={{
@@ -78,8 +104,8 @@ export default function Architecture() {
         gap: '2rem'
       }}>
         
-        {/* Stage 1-4 Row (Using strict Flexbox for perfect horizontal alignment) */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '1rem', alignItems: 'stretch' }}>
+        {/* Four-stage flow: one row on desktop, explicit vertical connectors when stacked. */}
+        <div className="architecture-stage-flow" data-testid="architecture-stage-flow">
           
           <ArchNode step="STAGE 01" title="Sensor Input" subtitle="Video Ingestion" icon={Camera} glowColor="rgba(56,189,248,0.5)">
             <div className="flex flex-col gap-3">
@@ -89,7 +115,7 @@ export default function Architecture() {
               </div>
               <div className="flex items-start gap-2">
                 <ShieldCheck size={14} className="mt-1 text-main opacity-80" style={{ flexShrink: 0 }} />
-                <span style={{ lineHeight: '1.4' }}>Continuous camera health monitoring (blur, exposure, sync drift).</span>
+                <span style={{ lineHeight: '1.4' }}>Camera health evaluation during active frame processing (blur, exposure, sync drift).</span>
               </div>
             </div>
           </ArchNode>
@@ -103,12 +129,12 @@ export default function Architecture() {
                 <span className="text-main font-mono bg-dark px-1.5 py-0.5 rounded border border-color">YOLOv8n + ByteTrack</span>
               </div>
               <div className="flex justify-between items-center text-xs border-b border-color pb-2">
-                <span className="opacity-70">HARDWARE</span>
-                <span className="text-main font-mono bg-dark px-1.5 py-0.5 rounded border border-color">CPU Only (No GPU)</span>
+                <span className="opacity-70">CURRENT RUNTIME</span>
+                <span className="text-main font-mono bg-dark px-1.5 py-0.5 rounded border border-color">CPU / ONNX</span>
               </div>
               <div className="flex justify-between items-center text-xs pb-1">
-                <span className="opacity-70">LATENCY</span>
-                <span className="text-main font-mono bg-dark px-1.5 py-0.5 rounded border border-color">LIVE · SEE EDGE PERFORMANCE</span>
+                <span className="opacity-70">METRICS</span>
+                <span className="text-main font-mono bg-dark px-1.5 py-0.5 rounded border border-color">SEE EDGE PERFORMANCE</span>
               </div>
             </div>
           </ArchNode>
@@ -124,18 +150,21 @@ export default function Architecture() {
                 <div className="flex items-center gap-2 text-xs font-display">
                   <div className="w-2 h-2 rounded-full bg-ok flex-shrink-0" style={{ boxShadow: '0 0 8px #4ade80' }}></div>
                   <span className="text-ok w-16 flex-shrink-0">DETECTED</span>
-                  <span className="text-muted opacity-80">R &ge; 0.75</span>
+                  <span className="text-muted opacity-80">Scored event, R &ge; 0.75</span>
                 </div>
                 <div className="flex items-center gap-2 text-xs font-display">
                   <div className="w-2 h-2 rounded-full bg-warning flex-shrink-0" style={{ boxShadow: '0 0 8px #fbbf24' }}></div>
                   <span className="text-warning w-16 flex-shrink-0">UNCERTAIN</span>
-                  <span className="text-muted opacity-80">R &lt; 0.75</span>
+                  <span className="text-muted opacity-80">Low-score / fallback event</span>
                 </div>
                 <div className="flex items-center gap-2 text-xs font-display">
                   <div className="w-2 h-2 rounded-full bg-neutral flex-shrink-0"></div>
                   <span className="text-neutral w-16 flex-shrink-0">ABSTAIN</span>
-                  <span className="text-muted opacity-80">Health Override</span>
+                  <span className="text-muted opacity-80">Failed-health override; no R</span>
                 </div>
+              </div>
+              <div className="text-[10px] text-muted opacity-80 border-t border-color pt-2">
+                Candidates may also be rejected without emitting an event.
               </div>
             </div>
           </ArchNode>
@@ -146,7 +175,7 @@ export default function Architecture() {
             <div className="flex flex-col gap-3">
               <div className="flex items-start gap-2">
                 <HardDrive size={14} className="mt-1 text-main opacity-80" style={{ flexShrink: 0 }} />
-                <span style={{ lineHeight: '1.4' }}>Local SQLite Outbox for offline resilience and event buffering.</span>
+                <span style={{ lineHeight: '1.4' }}>Local SQLite outbox buffers events and retries temporary connectivity failures. Persistence is limited to the current edge filesystem.</span>
               </div>
               <div className="flex items-start gap-2">
                 <Network size={14} className="mt-1 text-main opacity-80" style={{ flexShrink: 0 }} />
@@ -196,25 +225,30 @@ export default function Architecture() {
             <div className="flex flex-col gap-3 text-sm font-body text-muted mt-2">
               <div className="flex items-start gap-2">
                 <CheckCircle size={14} className="mt-1 text-ok opacity-80" style={{ flexShrink: 0 }} />
-                <span style={{ lineHeight: '1.5' }}>SHA-256 hashing computed per-event over real evidence bytes (bounding boxes, imagery, JSON).</span>
+                <span style={{ lineHeight: '1.5' }}><strong>Signed package hash:</strong> SHA-256 over canonical event metadata and previous-hash linkage.</span>
               </div>
               <div className="bg-dark p-3 rounded border border-color text-xs">
-                Durable object storage: {durableStorage ? 'CONFIGURED' : 'NOT CONFIGURED — local Render filesystem is ephemeral'}
+                Durable object storage: {!storageReported ? 'RUNTIME STATUS UNAVAILABLE' : durableStorage ? 'CONFIGURED' : 'NOT CONFIGURED — local Render filesystem is ephemeral'}
               </div>
               <div className="flex items-start gap-2">
                 <CheckCircle size={14} className="mt-1 text-ok opacity-80" style={{ flexShrink: 0 }} />
-                <span style={{ lineHeight: '1.5' }}>Ed25519 signing ensures immutable local tamper evidence.</span>
+                <span style={{ lineHeight: '1.5' }}><strong>Evidence content hash:</strong> SHA-256 over stored encrypted evidence bytes when binary evidence is present.</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <CheckCircle size={14} className="mt-1 text-ok opacity-80" style={{ flexShrink: 0 }} />
+                <span style={{ lineHeight: '1.5' }}>Ed25519 signatures and hash-chain linkage provide cryptographic tamper detection and evidence integrity verification.</span>
               </div>
             </div>
           </div>
 
           {/* Ledger */}
-          <div 
-            className="border border-danger rounded flex flex-col glow-danger" 
+          <div
+            className="border rounded flex flex-col"
             style={{ 
               flex: '1 1 300px', 
               padding: '1.5rem',
               background: 'linear-gradient(145deg, rgba(15,23,42,0.8) 0%, rgba(15,23,42,0.4) 100%)',
+              borderColor: 'rgba(251,191,36,0.45)',
               boxShadow: '0 4px 20px rgba(0,0,0,0.2)',
               position: 'relative',
               overflow: 'hidden',
@@ -222,26 +256,28 @@ export default function Architecture() {
             }}
             onMouseEnter={(e) => {
               e.currentTarget.style.transform = 'translateY(-4px)';
-              e.currentTarget.style.boxShadow = '0 12px 30px rgba(239,68,68,0.5)';
+              e.currentTarget.style.boxShadow = '0 12px 30px rgba(251,191,36,0.22)';
             }}
             onMouseLeave={(e) => {
               e.currentTarget.style.transform = 'translateY(0)';
               e.currentTarget.style.boxShadow = '0 4px 20px rgba(0,0,0,0.2)';
             }}
           >
-            <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '2px', background: 'rgba(239,68,68,0.5)' }}></div>
-            <div className="flex justify-between items-center gap-2 mb-4 pb-3 border-b border-color text-danger">
+            <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '2px', background: 'rgba(251,191,36,0.55)' }}></div>
+            <div className="flex justify-between items-center gap-2 mb-4 pb-3 border-b border-color text-warning">
               <div className="flex items-center gap-2">
                 <Link size={18} />
                 <span className="text-xs font-display uppercase tracking-widest">Cryptographic Ledger</span>
               </div>
-              <span className="bg-danger text-white rounded font-display tracking-widest" style={{ padding: '0.25rem 0.5rem', fontSize: '9px', boxShadow: '0 0 10px rgba(239,68,68,0.4)' }}>HIGH SEVERITY</span>
+              <span className="text-warning rounded font-display tracking-widest border border-color" style={{ padding: '0.25rem 0.5rem', fontSize: '9px', background: 'rgba(251,191,36,0.08)' }}>
+                {!blockchainReported ? 'STATUS UNAVAILABLE' : simulatedLedger ? 'MOCK MODE' : 'FABRIC MODE'}
+              </span>
             </div>
-            <h3 className="text-danger font-display mb-2 text-lg tracking-wide">{simulatedLedger ? 'Simulated Blockchain Mode' : 'Permissioned Ledger'}</h3>
+            <h3 className="text-warning font-display mb-2 text-lg tracking-wide">{!blockchainReported ? 'Ledger Mode Unavailable' : simulatedLedger ? 'Simulated Blockchain Mode' : 'Permissioned Ledger'}</h3>
             <div className="flex flex-col gap-3 text-sm font-body text-muted mt-2">
-              <span>{capabilities?.blockchain?.label || 'Runtime mode not reported.'}</span>
-              <div className="bg-dark p-3 rounded border border-danger text-xs text-muted" style={{ borderOpacity: 0.3, lineHeight: '1.5' }}>
-                {simulatedLedger ? 'MOCK / SIMULATED mode. No production blockchain confirmation is implied.' : 'Fabric mode reported by the backend runtime.'}
+              <span>{!blockchainReported ? 'Runtime mode not reported.' : simulatedLedger ? 'Fabric integration is inactive in the current deployment.' : 'Fabric integration is active in the current deployment.'}</span>
+              <div className="bg-dark p-3 rounded border border-color text-xs text-muted" style={{ lineHeight: '1.5' }}>
+                {!blockchainReported ? 'Production ledger status is unavailable.' : simulatedLedger ? 'MOCK / SIMULATED mode. No production blockchain confirmation is implied.' : 'Fabric mode reported by the backend runtime.'}
               </div>
             </div>
           </div>
