@@ -6,11 +6,10 @@ import { parseUtc } from '../utils/time';
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { telemetryStatusAt } from '../utils/dashboardScope';
 
-// Real edge performance telemetry (edge/instrumentation/metrics.py's
-// perf_counter()-measured latency/FPS/CPU/RSS) previously existed only as
-// a local JSON file on the edge device — nothing exposed it anywhere. This
-// page reads the real GET /system/metrics this session added, merged with
-// live WS pushes for whichever edge device is currently reporting.
+// Real edge performance telemetry from edge/instrumentation/metrics.py.
+// Timing, process resources, counters, and gauges retain their distinct
+// runtime provenance. This page reads GET /system/metrics and merges live
+// WS pushes for whichever edge device is currently reporting.
 const FRAME_STAGE_LABELS = {
   health_condition_ms: 'Health + Condition',
   detection_tracking_ms: 'Detection + Tracking',
@@ -45,15 +44,23 @@ function formatCounter(value) {
   return Number.isInteger(value) && value >= 0 ? value.toLocaleString() : '—';
 }
 
+function formatUtcTimestamp(value) {
+  const parsed = parseUtc(value);
+  if (!parsed || Number.isNaN(parsed.getTime())) return '—';
+  return parsed.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC');
+}
+
 export default function Performance() {
   const { metrics: wsMetrics, liveTracks } = useWebSocket(WS_URL);
   const startup = useStartupReadiness();
   const [restMetrics, setRestMetrics] = useState([]);
   const [status, setStatus] = useState('loading'); // loading | ready | auth-required | error
+  const [backgroundRefreshing, setBackgroundRefreshing] = useState(false);
   const [nowMs, setNowMs] = useState(Date.now());
 
-  const loadMetrics = useCallback(async () => {
-    setStatus('loading');
+  const loadMetrics = useCallback(async (background = false) => {
+    if (background) setBackgroundRefreshing(true);
+    else setStatus('loading');
     try {
       const res = await authFetch('/system/metrics');
       if (res.status === 403) {
@@ -68,12 +75,14 @@ export default function Performance() {
       setStatus('ready');
     } catch (_e) {
       setStatus('error');
+    } finally {
+      if (background) setBackgroundRefreshing(false);
     }
   }, []);
 
   useEffect(() => {
     loadMetrics();
-    const refresh = window.setInterval(loadMetrics, 10_000);
+    const refresh = window.setInterval(() => loadMetrics(true), 10_000);
     return () => window.clearInterval(refresh);
   }, [loadMetrics]);
 
@@ -116,7 +125,10 @@ export default function Performance() {
     const freshnessLabel = fresh ? 'CURRENT WORKER REPORT' : 'HISTORICAL REPORT';
     const staleNote = `STALE · last report ${Number.isFinite(ageSeconds) ? `${Math.floor(ageSeconds)}s ago` : 'unknown'}`;
     const liveTelemetry = liveTracks[m.edge_device_id];
-    const analysisState = telemetryStatusAt(liveTelemetry, nowMs) === 'LIVE' ? 'ACTIVE ANALYSIS' : 'ANALYSIS IDLE';
+    const telemetryStatus = telemetryStatusAt(liveTelemetry, nowMs);
+    const analysisState = telemetryStatus === 'LIVE' ? 'ACTIVE ANALYSIS'
+      : telemetryStatus === 'COMPLETED' ? 'ANALYSIS COMPLETED'
+        : telemetryStatus === 'STALE' ? 'STALE TELEMETRY' : 'NO FRESH LIVE TELEMETRY';
     const node = m.edge_device_id === 'cam-border-01' ? startup.camBorder01 : m.edge_device_id === 'cam-checkpoint-01' ? startup.camCheckpoint01 : null;
     const workerState = node?.status === 'READY' ? 'WORKER READY' : node?.status === 'TIMEOUT' ? 'WORKER UNAVAILABLE' : 'WORKER WARMING';
 
@@ -126,14 +138,13 @@ export default function Performance() {
         <div className="flex-col">
           <div className="flex items-center gap-2">
             <span className="text-lg font-display text-main uppercase tracking-widest">{m.edge_device_id}</span>
-            {/* Explicit prototype disclaimer — no Jetson/GPU/TensorRT hardware */}
-            <span className="badge badge-warning">CPU PROTOTYPE — not Jetson/GPU</span>
+            <span className="badge badge-warning">CPU PROTOTYPE — ONNX RUNTIME CPU</span>
             <span className={fresh ? 'badge badge-ok' : 'badge badge-warning'}>{freshnessLabel}</span>
             <span className={node?.status === 'READY' ? 'badge badge-ok' : 'badge badge-warning'}>{workerState}</span>
             <span className={analysisState === 'ACTIVE ANALYSIS' ? 'badge badge-ok' : 'badge badge-outline'}>{analysisState}</span>
           </div>
           <span className="font-display text-muted uppercase tracking-widest block mt-1" style={{ fontSize: '0.65rem' }}>
-            Uptime {formatUptime(m.uptime_seconds)} · Last report {m.timestamp ? parseUtc(m.timestamp).toLocaleTimeString() : '—'}
+            Report process uptime {formatUptime(m.uptime_seconds)} · Last report {formatUtcTimestamp(m.timestamp)}
           </span>
         </div>
         <Gauge size={24} className="text-muted" />
@@ -143,7 +154,7 @@ export default function Performance() {
           exist in this project's CSS (see docs/LIMITATIONS.md); auto-fill
           gives real responsive columns with no media query needed. */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '0.75rem' }}>
-        <StatTile icon={Zap} label="Measured AI FPS" value={fresh && analysisState === 'ACTIVE ANALYSIS' ? formatMetric(m.fps) : '—'} sub={analysisState === 'ACTIVE ANALYSIS' ? 'rolling current-run window' : (fresh ? 'analysis idle; worker report only' : staleNote)} />
+        <StatTile icon={Zap} label="Measured AI FPS" value={fresh && telemetryStatus === 'LIVE' ? formatMetric(m.fps) : '—'} sub={telemetryStatus === 'LIVE' ? 'rolling current-run window' : (fresh ? 'no fresh live analysis telemetry' : staleNote)} />
         {/* CPU and RSS gate independently on their own field being non-null,
             not jointly on `psutil_available` — a single end-of-run CPU%
             sample can be uncredible (see docs/PERFORMANCE_REPORT.md: "this
@@ -161,14 +172,14 @@ export default function Performance() {
           value={fresh && m.rss_mb != null ? `${m.rss_mb.toFixed(0)} MB` : '—'}
           sub={fresh ? (m.rss_mb != null ? undefined : (m.psutil_available ? 'not sampled this run' : 'psutil not installed on edge')) : staleNote}
         />
-        <StatTile icon={AlertTriangle} label="Alerts Generated" value={m.alerts_generated} sub={fresh ? "this process's lifetime" : 'final process count'} />
-        <StatTile icon={Gauge} label="Telemetry Produced" value={formatCounter(m.telemetry_produced)} sub={m.telemetry_produced == null ? 'not available for this snapshot' : (fresh ? 'current process counter' : 'final snapshot')} />
-        <StatTile icon={AlertTriangle} label="Telemetry Dropped" value={formatCounter(m.telemetry_dropped)} sub={m.telemetry_dropped == null ? 'not available for this snapshot' : (fresh ? 'current process counter' : 'final snapshot')} />
-        <StatTile icon={AlertTriangle} label="Telemetry Errors" value={formatCounter(m.telemetry_errors)} sub={m.telemetry_errors == null ? 'not available for this snapshot' : (fresh ? 'current process counter' : 'final snapshot')} />
+        <StatTile icon={AlertTriangle} label="Evidence Events Enqueued" value={formatCounter(m.alerts_generated)} sub={fresh ? "this report process's lifetime" : 'report process count'} />
+        <StatTile icon={Gauge} label="Telemetry Produced" value={formatCounter(m.telemetry_produced)} sub={m.telemetry_produced == null ? 'not available for this snapshot' : (fresh ? 'current process counter' : 'report snapshot')} />
+        <StatTile icon={AlertTriangle} label="Telemetry Dropped" value={formatCounter(m.telemetry_dropped)} sub={m.telemetry_dropped == null ? 'not available for this snapshot' : (fresh ? 'current process counter' : 'report snapshot')} />
+        <StatTile icon={AlertTriangle} label="Telemetry Errors" value={formatCounter(m.telemetry_errors)} sub={m.telemetry_errors == null ? 'not available for this snapshot' : (fresh ? 'current process counter' : 'report snapshot')} />
       </div>
 
       <div>
-        <span className="text-xs font-display text-muted uppercase tracking-widest">Per-Frame Stage Latency {fresh ? '' : '· final measured snapshot'}</span>
+        <span className="text-xs font-display text-muted uppercase tracking-widest">Per-Frame Stage Latency {fresh ? '' : '· historical measured snapshot'}</span>
         <div className="mt-2">
           {Object.entries(m.frames || {}).map(([stage, stats]) => (
             <StageRow key={stage} label={FRAME_STAGE_LABELS[stage] || stage} stats={stats} />
@@ -180,10 +191,17 @@ export default function Performance() {
         <div>
           <span className="text-xs font-display text-muted uppercase tracking-widest">Per-Event Stage Latency (evidence path)</span>
           <div className="mt-2">
-            {Object.entries(m.events || {}).map(([stage, stats]) => (
+            {Object.entries(m.events || {}).filter(([stage]) => stage !== 'queue_depth').map(([stage, stats]) => (
               <StageRow key={stage} label={EVENT_STAGE_LABELS[stage] || stage} stats={stats} />
             ))}
           </div>
+        </div>
+      )}
+
+      {m.events && Object.prototype.hasOwnProperty.call(m.events, 'queue_depth') && (
+        <div className="flex justify-between items-center text-xs font-display text-muted border-t border-color pt-3">
+          <span>Reported Queue Depth</span>
+          <span className="text-main">{formatCounter(m.events.queue_depth)} · report snapshot</span>
         </div>
       )}
 
@@ -206,10 +224,9 @@ export default function Performance() {
         <div>
           <h2 className="section-title">CPU Prototype Metrics</h2>
           <div className="section-sub">
-            Real, locally-measured pipeline latency and resource usage from this CPU-based prototype.
-            No GPU, TensorRT, or Jetson hardware — all numbers are from <code>perf_counter()</code> calls
-            in the running Python process on this machine.
-            Not simulated, not declared/configured values.
+            Current deployed inference uses ONNX Runtime CPU. Latency and FPS timings use <code>perf_counter()</code>
+            in the running CPU process; CPU and memory come from psutil process resource measurements, while operational totals
+            and queue state use runtime counters and gauges. No synthetic or configured benchmark values are shown.
           </div>
         </div>
       </div>
@@ -221,20 +238,21 @@ export default function Performance() {
         </div>
       )}
 
-      {status === 'loading' && <div className="text-muted text-sm text-center mt-8">Loading real metrics…</div>}
-      {status === 'error' && <div className="text-danger text-sm text-center mt-8">Could not reach the backend.</div>}
+      {status === 'loading' && devices.length === 0 && <div className="text-muted text-sm text-center mt-8">Loading real metrics…</div>}
+      {status === 'error' && <div className="text-danger text-sm text-center mt-2">Could not refresh performance metrics.</div>}
+      {backgroundRefreshing && devices.length > 0 && <span className="sr-only">Refreshing performance metrics</span>}
 
-      {status === 'ready' && (
-        devices.length === 0 ? (
-          <div className="text-muted text-sm text-center mt-8">
-            No edge device has reported performance metrics yet. This page fills in automatically once
-            edge/main.py's EdgePipeline is running against a real camera feed.
-          </div>
-        ) : (
-          <div className="flex flex-col gap-6 overflow-y-auto pr-2">
-            {devices.map((m) => <DeviceCard key={m.edge_device_id} m={m} />)}
-          </div>
-        )
+      {status !== 'access-denied' && devices.length > 0 && (
+        <div className="flex flex-col gap-6 overflow-y-auto pr-2">
+          {devices.map((m) => <DeviceCard key={m.edge_device_id} m={m} />)}
+        </div>
+      )}
+
+      {status === 'ready' && devices.length === 0 && (
+        <div className="text-muted text-sm text-center mt-8">
+          No edge device has reported performance metrics yet. This page fills in automatically once
+          edge/main.py's EdgePipeline is running against a real camera feed.
+        </div>
       )}
     </div>
   );
