@@ -95,7 +95,8 @@ export default function Audit() {
       </div>
 
       <div className="card" style={{ padding: 0, overflowX: 'auto', flex: 1 }}>
-        <div style={{ '--audit-columns': AUDIT_COLUMNS, minWidth: '860px' }}>
+        <div style={{ minWidth: '860px' }}>
+          <div className="flex flex-col overflow-y-auto" style={{ '--audit-columns': AUDIT_COLUMNS, maxHeight: '70vh' }}>
           <div
             data-testid="audit-header"
             className="card-header"
@@ -104,6 +105,7 @@ export default function Audit() {
               background: 'var(--bg-base)', borderRadius: 0, padding: '0.625rem 0.875rem',
               fontSize: '0.55rem', fontFamily: 'var(--font-display)', fontWeight: 700,
               letterSpacing: '0.12em', color: 'var(--text-dim)', textTransform: 'uppercase',
+              position: 'sticky', top: 0, zIndex: 1,
             }}
           >
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem' }}><Clock size={11} />Timestamp (UTC)</div>
@@ -113,7 +115,6 @@ export default function Audit() {
             <div>Status</div>
           </div>
 
-          <div className="flex flex-col overflow-y-auto" style={{ maxHeight: '70vh' }}>
           {loading ? (
             <div className="state-loading"><span>Loading audit trail…</span></div>
           ) : error ? (
