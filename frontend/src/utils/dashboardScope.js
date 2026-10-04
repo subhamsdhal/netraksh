@@ -53,7 +53,11 @@ export function restoredRunCamera(cameraIds = [], sourceStates = {}, telemetryBy
     const summary = runSummaries[cameraId];
     const telemetry = telemetryByCamera[cameraId];
     const expectedSessionId = sourceStates[cameraId]?.latestAnalysisSessionId;
-    const summaryMatches = summary?.analysis_session_id === expectedSessionId;
+    // The summary request is already scoped by camera, durable stream,
+    // generation, and requested session. Its returned camera/completion fields
+    // are the durable authority even when the source manifest's convenience
+    // latest-session pointer lags one completed run.
+    const summaryMatches = summary?.camera_id === cameraId && summary?.completed_at != null;
     const telemetryMatches = telemetry?.analysis_session_id === expectedSessionId
       && telemetryStatusAt(telemetry, now) === 'COMPLETED';
     if (!summaryMatches && !telemetryMatches) return latest;
