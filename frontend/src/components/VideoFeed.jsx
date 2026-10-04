@@ -532,7 +532,7 @@ export default function VideoFeed({
                   : sourceRunState === 'COMPLETED' || telemetryStatus === 'COMPLETED'
                     ? 'SOURCE STORED · ANALYSIS COMPLETED'
                     : hasStoredDurableSource
-                      ? telemetryStatus === 'LIVE'
+                      ? telemetryStatus === 'LIVE' || ['STARTING', 'ACTIVE', 'LIVE', 'RUNNING'].includes(String(sourceRunState || '').toUpperCase())
                         ? 'SOURCE STORED · AWAITING CURRENT-RUN ANALYZED FRAME'
                         : 'SOURCE STORED · PREVIEW UNAVAILABLE FOR RESTORED SESSION'
                     : telemetryStatus === 'STALE' && liveTracksData

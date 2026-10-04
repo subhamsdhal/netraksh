@@ -52,11 +52,23 @@ export function lifecycleStatus(sourceState, telemetry, now = Date.now()) {
   if (telemetryStatus === 'COMPLETED') return 'COMPLETED';
   const state = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
   if (state === 'WAKING') return 'WAKING';
+  if (['STARTING', 'ACTIVE', 'LIVE', 'RUNNING', 'STOPPING'].includes(state)) return 'WAITING';
   if (state === 'PAUSED' || state === 'READY') return 'PAUSED';
   if (state === 'COMPLETED') return 'COMPLETED';
   // No source is an honest idle analysis state. Node availability is rendered
   // independently and OFFLINE is reserved for a genuinely unavailable node.
   return sourceState?.sourceMode ? 'PAUSED' : 'IDLE';
+}
+
+export function currentRunEventEmptyState({ operationalIds = [], configuredIds = [], sourceStates = {}, telemetryByCamera = {}, now = Date.now() } = {}) {
+  if (operationalIds.length) return 'PROCESSING — NO VERIFIED SECURITY EVENT YET.';
+  if (configuredIds.length && configuredIds.every(
+    (cameraId) => lifecycleStatus(sourceStates[cameraId], telemetryByCamera[cameraId], now) === 'COMPLETED',
+  )) return 'ANALYSIS COMPLETED — NO VERIFIED SECURITY EVENT WAS GENERATED FOR THIS RUN.';
+  if (configuredIds.some((cameraId) => ['PAUSED', 'READY'].includes(
+    String(sourceStates[cameraId]?.runState || sourceStates[cameraId]?.analysisState).toUpperCase(),
+  ))) return 'SOURCE LOADED — ANALYSIS PAUSED. No current-run security event yet.';
+  return 'PROCESSING — NO VERIFIED SECURITY EVENT YET.';
 }
 
 export function isActiveTelemetry(telemetry, now = Date.now()) {

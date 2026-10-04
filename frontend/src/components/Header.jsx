@@ -7,7 +7,7 @@ import useAuth from '../hooks/useAuth';
 import useWebSocket from '../hooks/useWebSocket';
 import { deriveGlobalEdgeStatus, startupEdgeReadiness } from '../utils/liveMetrics';
 import useStartupSnapshot from '../hooks/useStartupSnapshot';
-import { deriveSyncState } from '../utils/systemTruth';
+import { deriveSyncState, deriveSystemStatus } from '../utils/systemTruth';
 
 const ROLE_COLORS = {
   ADMIN:    { text: 'var(--color-danger)', border: 'var(--color-danger)' },
@@ -26,6 +26,7 @@ export default function Header() {
     { fetchInitial: false },
   );
   const [timeStr, setTimeStr]           = useState('');
+  const [nowMs, setNowMs]               = useState(Date.now());
   const [showSyncPanel, setShowSyncPanel]       = useState(false);
   const [showAccountPanel, setShowAccountPanel] = useState(false);
   const [syncStatus, setSyncStatus]     = useState({ queued: 0, synced: 0, failed: 0 });
@@ -45,12 +46,14 @@ export default function Header() {
   const lastEdgeTelemetryMs = Math.max(lastTelemetryAt || 0, edgeTelemetrySignalAt || 0);
   // backendHealthy: whether GET /health returned 200 recently
   const [backendHealthy, setBackendHealthy] = useState(true);
+  const [lastBackendHealthyAt, setLastBackendHealthyAt] = useState(Date.now());
 
   // ── Live clock ──────────────────────────────────────────────────────────
   useEffect(() => {
     const timer = setInterval(() => {
       const d = new Date();
       setTimeStr(d.toISOString().substring(11, 19));
+      setNowMs(d.getTime());
     }, 1000);
     return () => clearInterval(timer);
   }, []);
@@ -77,6 +80,7 @@ export default function Header() {
           signal: AbortSignal.timeout(3000),
         });
         setBackendHealthy(res.ok);
+        if (res.ok) setLastBackendHealthyAt(Date.now());
       } catch {
         setBackendHealthy(false);
       }
@@ -163,13 +167,14 @@ export default function Header() {
   // Each signal is independent:
 
   // SYSTEM: reflects API/backend reachability + WS state
-  const systemStatus =
-    !backendHealthy  ? 'OFFLINE'     :
-    !isWsConnected   ? 'DEGRADED'    :
-                       'OPERATIONAL';
+  const systemStatus = deriveSystemStatus({
+    backendHealthy,
+    lastBackendHealthyAt,
+    isWsConnected,
+    now: nowMs,
+  });
   const systemColor =
     systemStatus === 'OPERATIONAL' ? 'var(--color-ok)'      :
-    systemStatus === 'DEGRADED'    ? 'var(--color-warning)'  :
                                      'var(--color-danger)';
 
   // EDGE: reflects analysis intent plus telemetry freshness. Worker/process

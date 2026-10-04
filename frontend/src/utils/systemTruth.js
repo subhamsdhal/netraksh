@@ -1,5 +1,16 @@
 import { parseUtc } from './time';
 
+const BACKEND_HEALTH_GRACE_MS = 30_000;
+
+export function deriveSystemStatus({ backendHealthy = false, lastBackendHealthyAt = 0, isWsConnected = false, now = Date.now() } = {}) {
+  const recentlyHealthy = Number(lastBackendHealthyAt) > 0
+    && now - Number(lastBackendHealthyAt) <= BACKEND_HEALTH_GRACE_MS;
+  // Either an open backend WebSocket or a recent successful HTTP probe is
+  // direct control-plane evidence. A single timed-out probe must not turn a
+  // demonstrably connected application into SYSTEM OFFLINE.
+  return backendHealthy || recentlyHealthy || isWsConnected ? 'OPERATIONAL' : 'OFFLINE';
+}
+
 export function deriveSyncState({ isConnected, queued = 0, failed = 0, hasActivity = false } = {}) {
   if (!isConnected) return 'DISCONNECTED';
   if (Number(failed) > 0) return 'FAILED';

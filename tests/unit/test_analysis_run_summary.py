@@ -1,7 +1,14 @@
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from backend.api.system import _completed_telemetry_view, _latest_frames, _record_run_summary
+from backend.api.system import (
+    _completed_telemetry_view,
+    _latest_frames,
+    _latest_telemetry,
+    _record_run_summary,
+    post_telemetry,
+)
 from backend.models.orm import AnalysisRunSummary, Base
 from shared.schemas import LiveTelemetryPayload
 
@@ -128,3 +135,71 @@ def test_completed_telemetry_never_hydrates_a_conflicting_run_identity():
         "person_count": None,
     }
     assert _completed_telemetry_view(db, marker) is marker
+
+
+def test_sparse_completion_keeps_the_last_exact_available_frame_pair():
+    db = _session()
+    _record_run_summary(db, _payload(frame_index=43, person_count=2, vehicle_count=0, track_count=2))
+    db.commit()
+    previous = _payload(
+        frame_index=42,
+        video_time=1.75,
+        person_count=1,
+        vehicle_count=0,
+        track_count=1,
+    ).model_dump()
+    _latest_frames["cam-border-01"] = {
+        ("run-1", 42): {"person_count": 1, "vehicle_count": 0, "track_count": 1},
+    }
+    try:
+        hydrated = _completed_telemetry_view(db, {
+            **previous,
+            "analysis_state": "COMPLETED",
+            "timestamp": 1010.0,
+            "processed_timestamp": 1010.0,
+            "sequence": 2,
+            "frame_index": None,
+            "person_count": None,
+            "vehicle_count": None,
+            "track_count": None,
+        }, previous)
+    finally:
+        _latest_frames.pop("cam-border-01", None)
+    assert hydrated["analysis_state"] == "COMPLETED"
+    assert hydrated["frame_index"] == 42
+    assert hydrated["video_time"] == 1.75
+    assert hydrated["person_count"] == 1
+    assert hydrated["track_count"] == 1
+    assert hydrated["preview_available"] is True
+
+
+@pytest.mark.asyncio
+async def test_sparse_completion_broadcast_delivers_the_real_final_sample(monkeypatch):
+    db = _session()
+    delivered = []
+
+    async def capture(telemetry):
+        delivered.append(telemetry)
+
+    monkeypatch.setattr("backend.api.system.broadcast_telemetry", capture)
+    _latest_telemetry.pop("cam-border-01", None)
+    try:
+        await post_telemetry(_payload(frame_index=42, person_count=1, vehicle_count=2, track_count=3), db, None)
+        await post_telemetry(_payload(
+            sequence=2,
+            timestamp=1010.0,
+            processed_timestamp=1010.0,
+            analysis_state="COMPLETED",
+            frame_index=None,
+            person_count=None,
+            vehicle_count=None,
+            track_count=None,
+        ), db, None)
+    finally:
+        _latest_telemetry.pop("cam-border-01", None)
+
+    assert delivered[-1]["analysis_state"] == "COMPLETED"
+    assert delivered[-1]["frame_index"] == 42
+    assert delivered[-1]["person_count"] == 1
+    assert delivered[-1]["vehicle_count"] == 2
+    assert delivered[-1]["track_count"] == 3

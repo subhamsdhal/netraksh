@@ -9,7 +9,7 @@ import { parseUtc } from '../utils/time';
 import { MAX_VISIBLE_CAMERAS, selectCameraSlots, cameraDisplayMetadata } from '../utils/cameraSlots';
 import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState, formatTelemetryAge } from '../utils/systemTruth';
 import useStartupReadiness from '../hooks/useStartupReadiness';
-import { analysisSessionIdForSource, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera } from '../utils/dashboardScope';
+import { analysisSessionIdForSource, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
 import { applyReplayResult, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
@@ -647,7 +647,7 @@ export default function Dashboard() {
     : telemetryStatusAt(scopedLiveTracks[activeCameraId], now);
   const activeProcessingFps = processingFpsForTelemetry(scopedLiveTracks[activeCameraId], now);
   const activeCameraHealth = cameraHealthPresentation(health[activeCameraId], now);
-  const activeCameraHealthLabel = ['PAUSED', 'WAKING'].includes(telemetryStatus) || (!health[activeCameraId] && activeSourceState?.sourceMode)
+  const activeCameraHealthLabel = ['PAUSED', 'WAKING', 'WAITING'].includes(telemetryStatus) || (!health[activeCameraId] && activeSourceState?.sourceMode)
     ? (telemetryStatus === 'WAKING' ? 'AWAITING CURRENT-RUN HEALTH SAMPLE' : `N/A · ANALYSIS ${telemetryStatus}`)
     : `${activeCameraHealth.health}${activeCameraHealth.health !== 'OK' && activeCameraHealth.reason !== 'N/A' ? ` · ${String(activeCameraHealth.reason).replace(/_/g, ' ')}` : ''}`;
 
@@ -1206,7 +1206,7 @@ export default function Dashboard() {
                   <VideoFeed
                     eventData={latestCameraEvent}
                     liveTracksData={telemetry}
-                    telemetryStatus={camera?.status || 'WAITING'}
+                    telemetryStatus={liveStatus}
                     cameraId={cameraId}
                     playbackEnded={Boolean(mediaState.playbackEnded)}
                     demoScenario={demoScenario}
@@ -1276,7 +1276,7 @@ export default function Dashboard() {
         </div>
         {showWhy && <div className="dashboard-events-explanation">{whyExplanation || 'No verified event is available yet. This explanation will use the backend decision factors when an event arrives.'}</div>}
         <div className="dashboard-events-table-wrap">
-          {cameraInventoryRestoring ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">RESTORING CAMERA CONFIGURATION</div></div> : configuredCameraIds.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">WAITING FOR SOURCE — ADD A VIDEO TO BEGIN ANALYSIS.</div></div> : displayEvents.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">{configuredCameraIds.every((id) => lifecycleStatus(slotSources[id], scopedLiveTracks[id], now) === 'COMPLETED') ? 'ANALYSIS COMPLETED — NO VERIFIED SECURITY EVENT WAS GENERATED FOR THIS RUN.' : configuredCameraIds.some((id) => ['PAUSED', 'READY'].includes(String(slotSources[id]?.runState || slotSources[id]?.analysisState).toUpperCase())) ? 'SOURCE LOADED — ANALYSIS PAUSED. No current-run security event yet.' : 'PROCESSING — NO VERIFIED SECURITY EVENT YET.'}</div></div> : (
+          {cameraInventoryRestoring ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">RESTORING CAMERA CONFIGURATION</div></div> : configuredCameraIds.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">WAITING FOR SOURCE — ADD A VIDEO TO BEGIN ANALYSIS.</div></div> : displayEvents.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">{currentRunEventEmptyState({ operationalIds: operationalCameraIdsNow, configuredIds: configuredCameraIds, sourceStates: slotSources, telemetryByCamera: scopedLiveTracks, now })}</div></div> : (
             <table className="dashboard-events-table">
               <thead><tr>{['TIME', 'EVENT ID', 'CAMERA', 'EVENT', 'DECISION', 'SEVERITY', 'EVIDENCE'].map(label => <th key={label}>{label}</th>)}</tr></thead>
               <tbody>{displayEvents.map((event, index) => {
@@ -1455,7 +1455,7 @@ export default function Dashboard() {
                   <span className="text-xs text-muted">{configuredCameraIds.length === 1 ? 'Load a second source to enable cross-camera event correlation.' : 'Load camera sources to enable cross-camera event correlation.'}</span>
                 </div>
               ) : activeCameraIds.length < 2 ? (
-                <div className="flex flex-col gap-1"><span className="text-warning text-sm font-display">{activeCameraIds.length === 1 ? `${cameraModels.find((camera) => camera.cameraId === activeCameraIds[0])?.friendlyName || activeCameraIds[0]} IS LIVE · SECOND ANALYSIS REQUIRED` : 'TWO SOURCES LOADED · WAITING FOR A LIVE ANALYSIS'}</span><span className="text-xs text-muted">Temporal/spatial correlation requires two simultaneous live analyses.</span></div>
+                <div className="flex flex-col gap-1"><span className="text-warning text-sm font-display">{(activeCameraIds[0] || operationalCameraIdsNow[0]) ? `${cameraModels.find((camera) => camera.cameraId === (activeCameraIds[0] || operationalCameraIdsNow[0]))?.friendlyName || (activeCameraIds[0] || operationalCameraIdsNow[0])} IS LIVE · SECOND ANALYSIS REQUIRED` : 'TWO SOURCES LOADED · WAITING FOR A LIVE ANALYSIS'}</span><span className="text-xs text-muted">Temporal/spatial correlation requires two simultaneous live analyses.</span></div>
               ) : effectiveCorrelation?.status === 'CORROBORATED' ? (
                 <div className="flex flex-col gap-1">
                   <div className="flex items-center gap-2">

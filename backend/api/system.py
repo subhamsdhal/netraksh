@@ -353,7 +353,7 @@ def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[
     return summary
 
 
-def _completed_telemetry_view(db: Session, telemetry: dict) -> dict:
+def _completed_telemetry_view(db: Session, telemetry: dict, previous: Optional[dict] = None) -> dict:
     """Restore the final real sample behind a sparse EOF lifecycle marker."""
     if str(telemetry.get("analysis_state") or "").upper() != "COMPLETED":
         return telemetry
@@ -391,9 +391,32 @@ def _completed_telemetry_view(db: Session, telemetry: dict) -> dict:
             hydrated[field] = value
     final_frame_index = hydrated.get("frame_index")
     frame_key = (analysis_session_id, int(final_frame_index)) if final_frame_index is not None else None
-    hydrated["preview_available"] = bool(
-        frame_key and frame_key in _latest_frames.get(str(telemetry.get("camera_id") or ""), {})
+    camera_frames = _latest_frames.get(str(telemetry.get("camera_id") or ""), {})
+    hydrated["preview_available"] = bool(frame_key and frame_key in camera_frames)
+    previous_frame_index = previous.get("frame_index") if previous else None
+    previous_frame_key = (
+        (analysis_session_id, int(previous_frame_index))
+        if previous_frame_index is not None else None
     )
+    previous_identity = (
+        previous.get("camera_id"),
+        previous.get("stream_id"),
+        previous.get("analysis_generation"),
+        previous.get("analysis_session_id"),
+    ) if previous else None
+    expected_identity = (*summary_identity, analysis_session_id)
+    if not hydrated["preview_available"] and previous_identity == expected_identity \
+            and previous_frame_key in camera_frames:
+        # EOF may arrive as a sparse lifecycle marker one tick after the last
+        # JPEG. Preserve that exact telemetry/image pair and apply only the
+        # terminal lifecycle fields; never label a different frame as final.
+        exact_sample = dict(previous)
+        for field in ("analysis_state", "timestamp", "processed_timestamp", "sequence"):
+            if telemetry.get(field) is not None:
+                exact_sample[field] = telemetry[field]
+        exact_sample["analysis_state"] = "COMPLETED"
+        exact_sample["preview_available"] = True
+        return exact_sample
     return hydrated
 
 
@@ -516,7 +539,6 @@ async def post_telemetry(
             payload.analysis_generation,
             payload.analysis_session_id,
         )
-    _latest_telemetry[payload.camera_id] = telemetry
     # Keep one durable latest snapshot per camera/session. This is intentionally
     # not a telemetry history table: it provides restart restoration without
     # turning high-frequency live telemetry into unbounded database growth.
@@ -549,6 +571,8 @@ async def post_telemetry(
             setattr(snapshot, key, value)
     _record_run_summary(db, payload)
     db.commit()
+    telemetry = _completed_telemetry_view(db, telemetry, current)
+    _latest_telemetry[payload.camera_id] = telemetry
     await broadcast_telemetry(telemetry)
     return {"status": "ok"}
 

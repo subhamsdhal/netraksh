@@ -3,11 +3,17 @@ import {
   cameraHealthPresentation,
   capabilityLabel,
   deriveCameraOperationalState,
+  deriveSystemStatus,
   deriveSyncState,
   formatTelemetryAge,
 } from '../src/utils/systemTruth';
 
 describe('production truth state derivation', () => {
+  it('does not call the control plane offline while HTTP or WebSocket proves availability', () => {
+    expect(deriveSystemStatus({ backendHealthy: false, lastBackendHealthyAt: 0, isWsConnected: true, now: 100_000 })).toBe('OPERATIONAL');
+    expect(deriveSystemStatus({ backendHealthy: false, lastBackendHealthyAt: 90_000, isWsConnected: false, now: 100_000 })).toBe('OPERATIONAL');
+    expect(deriveSystemStatus({ backendHealthy: false, lastBackendHealthyAt: 1, isWsConnected: false, now: 100_000 })).toBe('OFFLINE');
+  });
   it('never calls a zero-activity queue current', () => {
     expect(deriveSyncState({ isConnected: true, queued: 0, failed: 0, hasActivity: false })).toBe('IDLE');
     expect(deriveSyncState({ isConnected: true, queued: 0, failed: 0, hasActivity: true })).toBe('CURRENT');

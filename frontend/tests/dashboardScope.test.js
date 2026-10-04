@@ -14,6 +14,7 @@ import {
   preferredOperationalCamera,
   mostRecentTelemetryCamera,
   restoredRunCamera,
+  currentRunEventEmptyState,
 } from '../src/utils/dashboardScope';
 
 describe('dynamic dashboard camera scope', () => {
@@ -136,8 +137,20 @@ describe('camera telemetry correctness', () => {
     expect(lifecycleStatus({ sourceMode: 'durable', runState: 'PAUSED' }, null)).toBe('PAUSED');
     expect(lifecycleStatus({ sourceMode: 'durable', runState: 'WAKING' }, null)).toBe('WAKING');
     expect(lifecycleStatus({ sourceMode: 'durable', runState: 'COMPLETED' }, null)).toBe('COMPLETED');
+    expect(lifecycleStatus({ sourceMode: 'durable', runState: 'LIVE' }, null)).toBe('WAITING');
     expect(lifecycleStatus({ sourceMode: 'durable', runState: 'PAUSED' }, { timestamp: 1000 }, 1001)).toBe('ONLINE');
     expect(lifecycleStatus(null, null)).toBe('IDLE');
+  });
+
+  it('does not describe an active restored camera as paused while telemetry is still recovering', () => {
+    expect(currentRunEventEmptyState({
+      operationalIds: ['cam-checkpoint-01'],
+      configuredIds: ['cam-border-01', 'cam-checkpoint-01'],
+      sourceStates: {
+        'cam-border-01': { runState: 'PAUSED' },
+        'cam-checkpoint-01': { runState: 'LIVE' },
+      },
+    })).toBe('PROCESSING — NO VERIFIED SECURITY EVENT YET.');
   });
 
   it('binds durable telemetry to source stream_id, not analyzed-frame session id', () => {
