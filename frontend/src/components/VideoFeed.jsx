@@ -250,6 +250,7 @@ export default function VideoFeed({
   const [analyzedFrameUrl, setAnalyzedFrameUrl] = useState(null);
   const [analyzedFrameStatus, setAnalyzedFrameStatus] = useState('WAITING FOR NEXT ANALYZED FRAME');
   const isDurableSource = sourceMode === 'durable';
+  const hasStoredDurableSource = isDurableSource && Boolean(expectedSessionId);
   const showAnalyzedFrame = Boolean(
     analyzedFrameUrl
     && hudVisible
@@ -504,8 +505,8 @@ export default function VideoFeed({
     return (
       <div
         className="dashboard-video-feed w-full h-full flex flex-col items-center justify-center border rounded relative overflow-hidden"
-        style={{ background: 'radial-gradient(circle at 50% 50%, #0c1a13 0%, #020617 100%)', cursor: canUpload ? 'pointer' : 'default' }}
-        onClick={canUpload ? onUpload : undefined}
+        style={{ background: 'radial-gradient(circle at 50% 50%, #0c1a13 0%, #020617 100%)', cursor: canUpload && !hasStoredDurableSource ? 'pointer' : 'default' }}
+        onClick={canUpload && !hasStoredDurableSource ? onUpload : undefined}
       >
         <div className="flex flex-col items-center z-10" style={{ gap: '1rem' }}>
           <div style={{
@@ -530,6 +531,10 @@ export default function VideoFeed({
                   ? 'VIDEO READY · STARTING AI WORKER'
                   : sourceRunState === 'COMPLETED' || telemetryStatus === 'COMPLETED'
                     ? 'SOURCE STORED · ANALYSIS COMPLETED'
+                    : hasStoredDurableSource
+                      ? telemetryStatus === 'LIVE'
+                        ? 'SOURCE STORED · AWAITING CURRENT-RUN ANALYZED FRAME'
+                        : 'SOURCE STORED · PREVIEW UNAVAILABLE FOR RESTORED SESSION'
                     : telemetryStatus === 'STALE' && liveTracksData
                       ? 'LAST TELEMETRY AVAILABLE · NOT LIVE'
                       : (sourceMode === 'durable' && expectedSessionId && !liveTracksData)
@@ -538,7 +543,7 @@ export default function VideoFeed({
                           ? 'TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL'
                           : 'NO VIDEO SOURCE'}
           </span>
-          {canUpload && !sourceRestoring && !isUploading && !(sourceMode === 'durable' && expectedSessionId) ? <div className="dashboard-video-upload" style={{
+          {canUpload && !sourceRestoring && !isUploading && !hasStoredDurableSource ? <div className="dashboard-video-upload" style={{
             background: 'var(--color-ok)', color: '#000',
             fontFamily: 'var(--font-display)', fontWeight: 700,
             fontSize: '0.75rem', letterSpacing: '0.1em',

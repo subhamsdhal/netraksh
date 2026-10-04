@@ -10,6 +10,8 @@ import {
   latestFaceEventForSession,
   latestPlateEventForSession,
   lifecycleStatus,
+  operationalCameraIds,
+  preferredOperationalCamera,
 } from '../src/utils/dashboardScope';
 
 describe('dynamic dashboard camera scope', () => {
@@ -47,6 +49,43 @@ describe('dynamic dashboard camera scope', () => {
 });
 
 describe('camera telemetry correctness', () => {
+  it('keeps an authoritative running source operational while telemetry is stale', () => {
+    const now = 30_000;
+    const ids = operationalCameraIds(
+      ['cam-border-01', 'cam-checkpoint-01'],
+      {
+        'cam-border-01': { analysisState: 'COMPLETED' },
+        'cam-checkpoint-01': { analysisState: 'ACTIVE' },
+      },
+      {
+        'cam-border-01': { timestamp: now - 100 },
+        'cam-checkpoint-01': { timestamp: now - 20_000, expected_interval_ms: 2_000 },
+      },
+      now,
+    );
+    expect(ids).toEqual(['cam-checkpoint-01']);
+    expect(preferredOperationalCamera('cam-border-01', ids, ['cam-border-01', 'cam-checkpoint-01']))
+      .toBe('cam-checkpoint-01');
+  });
+
+  it('lets authoritative completion terminate a stale local ACTIVE control state', () => {
+    expect(operationalCameraIds(
+      ['cam-checkpoint-01'],
+      { 'cam-checkpoint-01': { analysisState: 'ACTIVE' } },
+      { 'cam-checkpoint-01': { timestamp: 10_000, analysis_state: 'COMPLETED' } },
+      10_100,
+    )).toEqual([]);
+  });
+
+  it('does not let completed or paused cameras override an explicit selection', () => {
+    expect(operationalCameraIds(
+      ['cam-border-01', 'cam-checkpoint-01'],
+      { 'cam-border-01': { analysisState: 'COMPLETED' }, 'cam-checkpoint-01': { analysisState: 'PAUSED' } },
+      {},
+    )).toEqual([]);
+    expect(preferredOperationalCamera('cam-checkpoint-01', [], ['cam-border-01', 'cam-checkpoint-01']))
+      .toBe('cam-checkpoint-01');
+  });
   it('rejects older frames in the same analysis session', () => {
     const current = { analysis_session_id: 's1', frame_index: 12, sequence: 4, processed_timestamp: 100 };
     expect(shouldAcceptTelemetry(current, { ...current, frame_index: 11, sequence: 5 })).toBe(false);

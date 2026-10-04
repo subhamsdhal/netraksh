@@ -3,6 +3,24 @@ export function deriveDashboardMode(activeCameraIds = []) {
   return count === 0 ? 'EMPTY' : count === 1 ? 'SINGLE' : 'DUAL';
 }
 
+export function operationalCameraIds(cameraIds = [], sourceStates = {}, telemetryByCamera = {}, now = Date.now()) {
+  return cameraIds.filter((cameraId) => {
+    const source = sourceStates[cameraId] || {};
+    const lifecycle = String(source.analysisState || source.runState || '').toUpperCase();
+    const telemetryState = telemetryStatusAt(telemetryByCamera[cameraId], now);
+    if (telemetryState === 'COMPLETED') return false;
+    if (['STARTING', 'WAKING', 'ACTIVE', 'LIVE', 'RUNNING', 'STOPPING'].includes(lifecycle)) return true;
+    if (['COMPLETED', 'FAILED', 'PAUSED', 'READY', 'IDLE'].includes(lifecycle)) return false;
+    return ['LIVE', 'STALE'].includes(telemetryState);
+  });
+}
+
+export function preferredOperationalCamera(selectedCameraId, operationalIds = [], visibleIds = []) {
+  if (operationalIds.length === 1) return operationalIds[0];
+  if (selectedCameraId && visibleIds.includes(selectedCameraId)) return selectedCameraId;
+  return operationalIds[0] || visibleIds[0] || null;
+}
+
 export function lifecycleStatus(sourceState, telemetry, now = Date.now()) {
   const telemetryStatus = telemetryStatusAt(telemetry, now);
   if (telemetryStatus === 'LIVE') return 'ONLINE';

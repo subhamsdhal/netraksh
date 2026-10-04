@@ -29,12 +29,16 @@ export function deriveGlobalEdgeStatus({ analysisStates = [], lastTelemetryAt = 
   const startupEdges = startupEdgeReadiness(startup);
   const startupReady = startupEdges.ready === startupEdges.eligible;
   const startupRequested = Boolean(startup?.requested || startupWakeRequested);
+  // Worker/service readiness is independent from analysis telemetry. Once the
+  // authoritative startup probes confirm both expected workers are reachable,
+  // alive, correctly identified, and error-free, stale or fresh frame data
+  // must not rewrite EDGE into ONLINE/STALE/OFFLINE.
+  if (startupEdges.revalidating) return 'RECHECKING';
+  if (startupReady) return 'READY';
+  if (startupEdges.hasTimeout) return 'UNAVAILABLE';
   if (!analysisStates.length) {
     if (freshTelemetry) return 'ONLINE';
     if (edgeWaking) return 'WAKING';
-    if (startupEdges.revalidating) return 'RECHECKING';
-    if (startupReady) return 'READY';
-    if (startupEdges.hasTimeout) return 'UNAVAILABLE';
     if (startupEdges.hasSnapshot && startupRequested) return 'WARMING';
     if (prewarmWarming || (startupRequested && !prewarm)) return 'WARMING';
     if (prewarmTerminal) return 'UNAVAILABLE';
@@ -46,9 +50,6 @@ export function deriveGlobalEdgeStatus({ analysisStates = [], lastTelemetryAt = 
   // must outrank a stale local wake timer or a delayed lifecycle intent.
   if (analysisStates.some((state) => state.hasFreshCurrentTelemetry)) return 'ONLINE';
   if (!anyActive && !anyWaking) {
-    if (startupEdges.revalidating) return 'RECHECKING';
-    if (startupReady) return 'READY';
-    if (startupEdges.hasTimeout) return 'UNAVAILABLE';
     if (startupEdges.hasSnapshot && startupRequested) return 'WARMING';
     if (prewarmWarming || (startupRequested && !prewarm)) return 'WARMING';
     if (prewarmTerminal) return 'UNAVAILABLE';

@@ -71,6 +71,20 @@ describe('per-camera authoritative analyzed frame', () => {
     expect(screen.queryByText('ADD VIDEO SOURCE')).not.toBeInTheDocument();
   });
 
+  it('never calls an authoritative stored source NO VIDEO SOURCE when preview transport is absent', () => {
+    render(<VideoFeed
+      cameraId="cam-checkpoint-01"
+      sourceMode="durable"
+      sourceRunState="ACTIVE"
+      expectedSessionId="stored-source"
+      telemetryStatus="STALE"
+      canUpload
+    />);
+    expect(screen.getByText('SOURCE STORED · PREVIEW UNAVAILABLE FOR RESTORED SESSION')).toBeInTheDocument();
+    expect(screen.queryByText('NO VIDEO SOURCE')).not.toBeInTheDocument();
+    expect(screen.queryByText('ADD VIDEO SOURCE')).not.toBeInTheDocument();
+  });
+
   it('labels persisted completed telemetry as historical rather than active', () => {
     render(<VideoFeed
       cameraId="cam-border-01"

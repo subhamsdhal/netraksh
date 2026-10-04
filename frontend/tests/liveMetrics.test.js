@@ -57,6 +57,26 @@ describe('live dashboard metrics', () => {
     expect(startupEdgeReadiness(startup)).toMatchObject({ eligible: 2, ready: 2 });
   });
 
+  it('keeps EDGE readiness independent from live or stale analysis telemetry', () => {
+    const startup = {
+      requested: true,
+      camBorder01: { status: 'READY' },
+      camCheckpoint01: { status: 'READY' },
+    };
+    expect(deriveGlobalEdgeStatus({
+      startup,
+      analysisStates: [{ intent: 'ACTIVE', hasFreshCurrentTelemetry: true }],
+      lastTelemetryAt: now - 100,
+      now,
+    })).toBe('READY');
+    expect(deriveGlobalEdgeStatus({
+      startup,
+      analysisStates: [{ intent: 'ACTIVE', hasFreshCurrentTelemetry: false }],
+      lastTelemetryAt: now - 60_000,
+      now,
+    })).toBe('READY');
+  });
+
   it('keeps two configured edges in the denominator while startup is warming', () => {
     const startup = {
       requested: true,

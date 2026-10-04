@@ -353,6 +353,50 @@ def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[
     return summary
 
 
+def _completed_telemetry_view(db: Session, telemetry: dict) -> dict:
+    """Restore the final real sample behind a sparse EOF lifecycle marker."""
+    if str(telemetry.get("analysis_state") or "").upper() != "COMPLETED":
+        return telemetry
+    analysis_session_id = telemetry.get("analysis_session_id")
+    if not analysis_session_id:
+        return telemetry
+    summary = db.get(AnalysisRunSummary, analysis_session_id)
+    if summary is None:
+        return telemetry
+    telemetry_identity = (
+        telemetry.get("camera_id"),
+        telemetry.get("stream_id"),
+        telemetry.get("analysis_generation"),
+    )
+    summary_identity = (summary.camera_id, summary.stream_id, summary.analysis_generation)
+    if telemetry_identity != summary_identity:
+        return telemetry
+    hydrated = dict(telemetry)
+    summary_fields = {
+        "frame_index": summary.final_frame_index,
+        "video_time": summary.final_video_time,
+        "processing_fps": summary.processing_fps,
+        "source_fps": summary.source_fps,
+        "frame_width": summary.frame_width,
+        "frame_height": summary.frame_height,
+        "person_count": summary.person_count,
+        "vehicle_count": summary.vehicle_count,
+        "track_count": summary.track_count,
+        "scene_condition": summary.scene_condition,
+        "lighting_state": summary.lighting_state,
+        "detection_method": summary.detection_method,
+    }
+    for field, value in summary_fields.items():
+        if value is not None:
+            hydrated[field] = value
+    final_frame_index = hydrated.get("frame_index")
+    frame_key = (analysis_session_id, int(final_frame_index)) if final_frame_index is not None else None
+    hydrated["preview_available"] = bool(
+        frame_key and frame_key in _latest_frames.get(str(telemetry.get("camera_id") or ""), {})
+    )
+    return hydrated
+
+
 @router.post("/system/telemetry/frame", status_code=202)
 async def post_telemetry_frame(
     payload: TelemetryFramePayload,
@@ -529,7 +573,11 @@ async def latest_telemetry(
         and (analysis_generation is None or item.get("analysis_generation") == analysis_generation)
     )]
     if in_memory:
-        return sorted(in_memory, key=lambda item: item.get("processed_timestamp") or item.get("timestamp") or 0, reverse=True)
+        return sorted(
+            (_completed_telemetry_view(db, item) for item in in_memory),
+            key=lambda item: item.get("processed_timestamp") or item.get("timestamp") or 0,
+            reverse=True,
+        )
 
     query = db.query(AnalysisTelemetrySnapshot)
     if camera_id:
@@ -542,7 +590,7 @@ async def latest_telemetry(
         query = query.filter(AnalysisTelemetrySnapshot.analysis_generation == analysis_generation)
     persisted = query.order_by(desc(AnalysisTelemetrySnapshot.timestamp)).all()
     return [
-        {
+        _completed_telemetry_view(db, {
             "camera_id": item.camera_id,
             "timestamp": item.timestamp,
             "video_time": item.video_time,
@@ -568,7 +616,7 @@ async def latest_telemetry(
             "raw_detections": [],
             "preview_available": False,
             "tracks": item.tracks_json or [],
-        }
+        })
         for item in persisted
     ]
 

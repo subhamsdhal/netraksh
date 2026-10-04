@@ -1502,7 +1502,7 @@ button {
 
 /* SIH demonstration: a bounded two-camera presentation surface. */
 .dashboard-camera-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; width: 100%; }
-.dashboard-camera-grid.camera-mode-single { grid-template-columns: minmax(0, 1fr) minmax(16rem, .38fr); }
+.dashboard-camera-grid.camera-mode-single { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .dashboard-camera-grid.camera-mode-empty { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .dashboard-source-name { color: var(--accent) !important; font-size: .62rem !important; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 20rem; }
 .dashboard-event-filters { display: flex; gap: .35rem; align-items: center; margin-left: auto; }
