@@ -104,7 +104,10 @@ describe('camera telemetry correctness', () => {
     expect(restoredRunCamera(cameraIds, sources, {
       ...cameraOneOnly,
       'cam-checkpoint-01': { analysis_session_id: 'run-2', analysis_state: 'COMPLETED', timestamp: 2000, processed_timestamp: 2000 },
-    }, 3000)).toBe('cam-checkpoint-01');
+    }, 3000, {
+      'cam-border-01': { analysis_session_id: 'run-1', completed_at: 1000 },
+      'cam-checkpoint-01': { analysis_session_id: 'run-2', completed_at: 2000 },
+    })).toBe('cam-checkpoint-01');
     expect(mostRecentTelemetryCamera(cameraIds, {
       ...cameraOneOnly,
       'cam-checkpoint-01': { processed_timestamp: 2000 },
@@ -125,6 +128,14 @@ describe('camera telemetry correctness', () => {
     };
     expect(restoredRunCamera(cameraIds, sources, telemetry, 3000, {})).toBeNull();
     expect(restoredRunCamera(cameraIds, sources, telemetry, 3000, {
+      'cam-checkpoint-01': {
+        analysis_session_id: 'run-2', completed_at: 2000,
+      },
+    })).toBeNull();
+    expect(restoredRunCamera(cameraIds, sources, telemetry, 3000, {
+      'cam-border-01': {
+        analysis_session_id: 'run-1', completed_at: 1000,
+      },
       'cam-checkpoint-01': {
         analysis_session_id: 'run-2', completed_at: 2000,
       },

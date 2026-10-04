@@ -687,7 +687,7 @@ export default function Dashboard() {
     visibleCameraIds.filter(Boolean).forEach(async (cameraId) => {
       const source = slotSources[cameraId];
       const sessionId = analysisSessionIdForSource(scopedLiveTracks[cameraId], source);
-      if (!sessionId || !source?.sourceId || lifecycleStatus(source, scopedLiveTracks[cameraId], Date.now()) !== 'COMPLETED') return;
+      if (!sessionId || !source?.sourceId || !source.latestAnalysisSessionId) return;
       setRunSummaryLoading(current => ({ ...current, [cameraId]: true }));
       const params = new URLSearchParams({ camera_id: cameraId, stream_id: source.sourceId });
       if (source.analysisGeneration != null) params.set('analysis_generation', String(source.analysisGeneration));

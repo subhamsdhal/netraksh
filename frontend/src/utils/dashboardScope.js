@@ -44,9 +44,9 @@ export function restoredRunCamera(cameraIds = [], sourceStates = {}, telemetryBy
   const restorableCameraIds = cameraIds.filter(
     (cameraId) => Boolean(sourceStates[cameraId]?.latestAnalysisSessionId),
   );
-  if (!restorableCameraIds.length || restorableCameraIds.some((cameraId) => (
-    !telemetryByCamera[cameraId] && !Object.prototype.hasOwnProperty.call(runSummaries, cameraId)
-  ))) {
+  if (!restorableCameraIds.length || restorableCameraIds.some(
+    (cameraId) => !Object.prototype.hasOwnProperty.call(runSummaries, cameraId),
+  )) {
     return null;
   }
   return restorableCameraIds.reduce((latest, cameraId) => {
