@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from shared.constants import (
     BlockchainStatus,
@@ -746,6 +746,30 @@ class CameraStatusResponse(BaseModel):
     class Config:
         use_enum_values = True
         from_attributes = True
+
+
+class CameraRegistrationRequest(BaseModel):
+    """Validated ADMIN request for creating one camera registry record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=128)
+    location: str = Field(min_length=1, max_length=256)
+    latitude: Optional[float] = Field(default=None, ge=-90.0, le=90.0, allow_inf_nan=False)
+    longitude: Optional[float] = Field(default=None, ge=-180.0, le=180.0, allow_inf_nan=False)
+
+    @field_validator("name", "location", mode="before")
+    @classmethod
+    def trim_required_text(cls, value):
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @model_validator(mode="after")
+    def require_both_coordinates_or_neither(self):
+        if (self.latitude is None) != (self.longitude is None):
+            raise ValueError("latitude and longitude must both be supplied or both be omitted")
+        return self
 
 
 class CameraLocationUpdate(BaseModel):

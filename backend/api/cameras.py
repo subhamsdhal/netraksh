@@ -12,6 +12,7 @@ PUT  /cameras/{id}/location     â€” set real lat/lon for the geospatial map
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 from datetime import datetime
 from typing import List
@@ -24,7 +25,12 @@ from backend.database.session import get_db
 from backend.models.orm import Camera, CameraHealth, CameraKey
 from backend.security.auth import require_admin, require_any_role, require_edge_auth, audit
 from backend.security.evidence_key_wrap import wrap_key
-from shared.schemas import CameraHealthReport, CameraLocationUpdate, CameraStatusResponse
+from shared.schemas import (
+    CameraHealthReport,
+    CameraLocationUpdate,
+    CameraRegistrationRequest,
+    CameraStatusResponse,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/cameras", tags=["cameras"])
@@ -112,20 +118,33 @@ async def report_camera_health(
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def register_camera(
-    payload: dict,
+    payload: CameraRegistrationRequest,
+    request: Request,
     db: Session = Depends(get_db),
     _admin = Depends(require_admin),
 ):
     cam = Camera(
-        name=payload.get("name", "Unnamed"),
-        location=payload.get("location", "Unknown"),
-        rtsp_url=payload.get("rtsp_url"),
-        owning_command_id=payload.get("owning_command_id", "COMMAND_A"),
-        latitude=payload.get("latitude"),
-        longitude=payload.get("longitude"),
+        name=payload.name,
+        location=payload.location,
+        owning_command_id="COMMAND_A",
+        latitude=payload.latitude,
+        longitude=payload.longitude,
     )
     db.add(cam)
     db.commit()
+    audit(
+        db,
+        "CAMERA_REGISTERED",
+        user_id=_admin.id,
+        resource_type="Camera",
+        resource_id=cam.id,
+        ip_address=request.client.host if request.client else "unknown",
+        detail=json.dumps({
+            "display_name": cam.name,
+            "physical_location": cam.location,
+            "coordinates_supplied": cam.latitude is not None and cam.longitude is not None,
+        }, separators=(",", ":")),
+    )
     return {"camera_id": cam.id, "name": cam.name}
 
 
@@ -353,6 +372,7 @@ async def register_edge_keys(
 async def update_camera_location(
     camera_id: str,
     payload: CameraLocationUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     _admin = Depends(require_admin),
 ):
@@ -368,6 +388,18 @@ async def update_camera_location(
     cam.latitude = payload.latitude
     cam.longitude = payload.longitude
     db.commit()
+    audit(
+        db,
+        "CAMERA_LOCATION_UPDATED",
+        user_id=_admin.id,
+        resource_type="Camera",
+        resource_id=camera_id,
+        ip_address=request.client.host if request.client else "unknown",
+        detail=json.dumps({
+            "latitude": cam.latitude,
+            "longitude": cam.longitude,
+        }, separators=(",", ":")),
+    )
     return {"status": "ok", "camera_id": camera_id, "latitude": cam.latitude, "longitude": cam.longitude}
 
 

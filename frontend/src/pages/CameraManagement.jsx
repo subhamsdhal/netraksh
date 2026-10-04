@@ -2,6 +2,46 @@ import { useState, useEffect, useCallback } from 'react';
 import { MapPin, Plus, Save, ShieldAlert } from 'lucide-react';
 import { authFetch } from '../services/auth';
 import useAuth from '../hooks/useAuth';
+import { cameraHealthPresentation } from '../utils/systemTruth';
+import { parseUtc } from '../utils/time';
+
+export function validateRegistrationCoordinates(latitudeText, longitudeText) {
+  const latitudeRaw = String(latitudeText ?? '').trim();
+  const longitudeRaw = String(longitudeText ?? '').trim();
+  if (!latitudeRaw && !longitudeRaw) return { coordinates: null, error: null };
+  if (!latitudeRaw || !longitudeRaw) {
+    return { coordinates: null, error: 'Latitude and longitude must both be supplied or both be blank.' };
+  }
+
+  const latitude = Number(latitudeRaw);
+  const longitude = Number(longitudeRaw);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return { coordinates: null, error: 'Latitude and longitude must both be finite numbers.' };
+  }
+  if (latitude < -90 || latitude > 90) {
+    return { coordinates: null, error: 'Latitude must be between -90 and 90.' };
+  }
+  if (longitude < -180 || longitude > 180) {
+    return { coordinates: null, error: 'Longitude must be between -180 and 180.' };
+  }
+  return { coordinates: { latitude, longitude }, error: null };
+}
+
+function coordinateDisplay(camera) {
+  const hasLatitude = camera.latitude != null;
+  const hasLongitude = camera.longitude != null;
+  if (hasLatitude && hasLongitude) {
+    return `${Number(camera.latitude).toFixed(4)}, ${Number(camera.longitude).toFixed(4)}`;
+  }
+  if (hasLatitude || hasLongitude) return '— incomplete coordinates —';
+  return '— not set —';
+}
+
+function healthObservedAt(value) {
+  const observed = parseUtc(value);
+  if (!observed || Number.isNaN(observed.getTime())) return 'Last observed time unavailable';
+  return `Last observed ${observed.toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC')}`;
+}
 
 // The first genuinely ADMIN-exclusive page in this app — every other page
 // is readable by any authenticated role (require_any_role on the backend).
@@ -92,20 +132,21 @@ export default function CameraManagement() {
 
   const registerCamera = async (e) => {
     e.preventDefault();
+    if (registering) return;
     if (!newName.trim() || !newLocation.trim()) {
       setRegisterError('Name and location are both required.');
+      return;
+    }
+    const { coordinates, error: coordinateError } = validateRegistrationCoordinates(newLat, newLon);
+    if (coordinateError) {
+      setRegisterError(coordinateError);
       return;
     }
     setRegistering(true);
     setRegisterError(null);
     try {
       const body = { name: newName.trim(), location: newLocation.trim() };
-      const lat = parseFloat(newLat);
-      const lon = parseFloat(newLon);
-      if (!Number.isNaN(lat) && !Number.isNaN(lon)) {
-        body.latitude = lat;
-        body.longitude = lon;
-      }
+      if (coordinates) Object.assign(body, coordinates);
       const res = await authFetch('/cameras', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -135,8 +176,7 @@ export default function CameraManagement() {
         <div>
           <h2 className="section-title">Camera Management</h2>
           <div className="section-sub">
-            Register cameras and set their real map coordinates — ADMIN role only, enforced by the
-            real backend.
+            View registered cameras and map coordinates. Configuration changes require ADMIN.
           </div>
         </div>
       </div>
@@ -174,7 +214,7 @@ export default function CameraManagement() {
                     <th style={{ padding: '1rem' }}>Camera Node</th>
                     <th style={{ padding: '1rem' }}>Location</th>
                     <th style={{ padding: '1rem' }}>Coordinates (Lat, Lon)</th>
-                    <th style={{ padding: '1rem' }}>Edge Health</th>
+                    <th style={{ padding: '1rem' }}>Last Camera Health</th>
                     {role === 'ADMIN' && <th style={{ padding: '1rem' }}>Actions</th>}
                   </tr>
                 </thead>
@@ -200,20 +240,28 @@ export default function CameraManagement() {
                           </div>
                         ) : (
                           <span className="text-muted font-mono text-xs opacity-80 group-hover:opacity-100 transition-opacity">
-                            {cam.latitude != null ? `${cam.latitude.toFixed(4)}, ${cam.longitude.toFixed(4)}` : '— not set —'}
+                            {coordinateDisplay(cam)}
                           </span>
                         )}
                       </td>
                       <td style={{ padding: '1rem' }}>
-                        <div className="flex items-center">
+                        <div className="flex flex-col items-start" style={{ gap: '0.3rem' }}>
                           <div className={`px-2 py-0.5 rounded text-[10px] font-display uppercase tracking-widest border ${
                             cam.health_state === 'OK' ? 'bg-[rgba(74,222,128,0.1)] text-ok border-ok' : 
                             cam.health_state === 'DEGRADED' ? 'bg-[rgba(251,191,36,0.1)] text-warning border-warning' : 
                             cam.health_state === 'FAILED' ? 'bg-[rgba(248,113,113,0.1)] text-danger border-danger' : 
                             'bg-[rgba(255,255,255,0.05)] text-muted border-muted'
                           }`}>
-                            {cam.health_state || 'NO DATA'}
+                            {cam.health_state
+                              ? `${cam.health_state}${cameraHealthPresentation(cam).stale ? ' · STALE' : ''}`
+                              : 'NO DATA'}
                           </div>
+                          {cam.health_state && (
+                            <div className="text-[10px] text-muted leading-relaxed">
+                              <div>{cam.health_reason || 'Reason not reported'}</div>
+                              <div>{healthObservedAt(cam.last_health_check)}</div>
+                            </div>
+                          )}
                         </div>
                       </td>
                       {role === 'ADMIN' && (
@@ -248,8 +296,8 @@ export default function CameraManagement() {
                     <Plus size={16} />
                   </div>
                   <div className="flex flex-col">
-                    <span className="card-title">Register Node</span>
-                    <span className="font-display text-muted uppercase tracking-widest" style={{ fontSize: '0.6rem' }}>Provision new camera</span>
+                    <span className="card-title">Register Camera</span>
+                    <span className="font-display text-muted uppercase tracking-widest" style={{ fontSize: '0.6rem' }}>Create camera record</span>
                   </div>
                 </div>
               </div>
@@ -259,7 +307,7 @@ export default function CameraManagement() {
                 <form onSubmit={registerCamera} className="flex flex-col" style={{ gap: '1rem' }}>
                   
                   <div className="flex flex-col" style={{ gap: '0.25rem' }}>
-                    <label className="text-[10px] font-display text-muted uppercase tracking-widest ml-1">Node Identifier</label>
+                    <label className="text-[10px] font-display text-muted uppercase tracking-widest ml-1">Camera Display Name</label>
                     <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="e.g. Border Post Gamma" className="w-full bg-dark border border-color rounded text-sm text-main focus:outline-none focus:border-ok transition-colors" style={{ padding: '0.6rem 0.75rem' }} />
                   </div>
                   
@@ -267,6 +315,10 @@ export default function CameraManagement() {
                     <label className="text-[10px] font-display text-muted uppercase tracking-widest ml-1">Physical Location</label>
                     <input value={newLocation} onChange={(e) => setNewLocation(e.target.value)} placeholder="e.g. Sector 9" className="w-full bg-dark border border-color rounded text-sm text-main focus:outline-none focus:border-ok transition-colors" style={{ padding: '0.6rem 0.75rem' }} />
                   </div>
+
+                  <p className="text-[10px] text-muted leading-relaxed">
+                    Registering a camera creates its backend record only; edge worker and stream setup are separate.
+                  </p>
                   
                   <div className="flex flex-col" style={{ gap: '0.25rem' }}>
                     <label className="text-[10px] font-display text-muted uppercase tracking-widest ml-1">Initial Coordinates (Optional)</label>
@@ -283,7 +335,7 @@ export default function CameraManagement() {
                   )}
                   
                   <button type="submit" disabled={registering} className="btn btn-primary w-full flex justify-center mt-2">
-                    {registering ? 'Provisioning...' : 'Provision Node'}
+                    {registering ? 'Registering...' : 'Register Camera'}
                   </button>
                 </form>
               </div>

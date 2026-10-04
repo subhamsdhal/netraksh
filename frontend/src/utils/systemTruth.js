@@ -1,3 +1,5 @@
+import { parseUtc } from './time';
+
 export function deriveSyncState({ isConnected, queued = 0, failed = 0, hasActivity = false } = {}) {
   if (!isConnected) return 'DISCONNECTED';
   if (Number(failed) > 0) return 'FAILED';
@@ -49,7 +51,7 @@ export function cameraHealthPresentation(camera = {}, now = Date.now()) {
     return { health: 'NOT REPORTED', fps: 'N/A', reason: 'N/A', sample: 'Never', stale: false };
   }
 
-  const measuredAt = Date.parse(camera.last_health_check);
+  const measuredAt = parseUtc(camera.last_health_check)?.getTime();
   const validTimestamp = Number.isFinite(measuredAt);
   const ageMs = validTimestamp ? Math.max(0, now - measuredAt) : null;
   const current = validTimestamp && ageMs <= HEALTH_FRESHNESS_MS;
