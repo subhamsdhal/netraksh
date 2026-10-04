@@ -15,6 +15,7 @@ import {
   mostRecentTelemetryCamera,
   restoredRunCamera,
   currentRunEventEmptyState,
+  cameraInventoryIsRestoring,
 } from '../src/utils/dashboardScope';
 
 describe('dynamic dashboard camera scope', () => {
@@ -108,6 +109,21 @@ describe('camera telemetry correctness', () => {
       ...cameraOneOnly,
       'cam-checkpoint-01': { processed_timestamp: 2000 },
     })).toBe('cam-checkpoint-01');
+  });
+
+  it('waits for every visible source response before restoring presentation scope', () => {
+    const cameraIds = ['cam-border-01', 'cam-checkpoint-01'];
+    expect(cameraInventoryIsRestoring(cameraIds, {
+      'cam-border-01': { restoring: false, latestAnalysisSessionId: 'run-1' },
+    }, true)).toBe(true);
+    expect(cameraInventoryIsRestoring(cameraIds, {
+      'cam-border-01': { restoring: false, latestAnalysisSessionId: 'run-1' },
+      'cam-checkpoint-01': { restoring: true },
+    }, true)).toBe(true);
+    expect(cameraInventoryIsRestoring(cameraIds, {
+      'cam-border-01': { restoring: false, latestAnalysisSessionId: 'run-1' },
+      'cam-checkpoint-01': { restoring: false, latestAnalysisSessionId: 'run-2' },
+    }, true)).toBe(false);
   });
   it('rejects older frames in the same analysis session', () => {
     const current = { analysis_session_id: 's1', frame_index: 12, sequence: 4, processed_timestamp: 100 };

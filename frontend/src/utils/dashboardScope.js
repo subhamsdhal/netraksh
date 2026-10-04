@@ -45,6 +45,11 @@ export function restoredRunCamera(cameraIds = [], sourceStates = {}, telemetryBy
   );
 }
 
+export function cameraInventoryIsRestoring(cameraIds = [], sourceStates = {}, backendHealthy = false) {
+  if (!backendHealthy) return true;
+  return cameraIds.filter(Boolean).some((cameraId) => sourceStates[cameraId]?.restoring !== false);
+}
+
 export function lifecycleStatus(sourceState, telemetry, now = Date.now()) {
   const telemetryStatus = telemetryStatusAt(telemetry, now);
   if (telemetryStatus === 'LIVE') return 'ONLINE';

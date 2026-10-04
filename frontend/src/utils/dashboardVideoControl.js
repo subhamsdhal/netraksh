@@ -3,6 +3,7 @@ export function sourceStateFromCurrentVideo(state) {
   const lifecycle = String(state.analysis_state || '').toUpperCase();
   const runState = lifecycle || (state.scenario === 'normal' ? 'ACTIVE' : 'PAUSED');
   const lifecycleFields = {
+    restoring: false,
     analysisState: lifecycle || runState,
     analysisGeneration: Number.isFinite(Number(state.analysis_generation)) ? Number(state.analysis_generation) : 0,
     scenario: String(state.scenario || 'paused').toLowerCase(),

@@ -13,6 +13,7 @@ describe('dashboard video control ownership', () => {
       sourceMode: 'bundled',
       sourceId: null,
       sourceName: 'BUNDLED CLOUD DEMO',
+      restoring: false,
       runState: 'PAUSED',
       analysisState: 'PAUSED',
       analysisGeneration: 0,

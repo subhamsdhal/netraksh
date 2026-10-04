@@ -9,7 +9,7 @@ import { parseUtc } from '../utils/time';
 import { MAX_VISIBLE_CAMERAS, selectCameraSlots, cameraDisplayMetadata } from '../utils/cameraSlots';
 import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState, formatTelemetryAge } from '../utils/systemTruth';
 import useStartupReadiness from '../hooks/useStartupReadiness';
-import { analysisSessionIdForSource, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState } from '../utils/dashboardScope';
+import { analysisSessionIdForSource, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
 import { applyReplayResult, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
@@ -389,8 +389,11 @@ export default function Dashboard() {
     [visibleCameraIds.join('|'), slotSources, scopedLiveTracks, now],
   );
   const configuredCameraIds = useMemo(() => visibleCameraIds.filter((id) => Boolean(slotSources[id]?.sourceMode)), [visibleCameraIds.join('|'), slotSources]);
-  const cameraInventoryRestoring = backendStatus !== 'HEALTHY'
-    || visibleCameraIds.filter(Boolean).some((cameraId) => slotSources[cameraId]?.restoring);
+  const cameraInventoryRestoring = cameraInventoryIsRestoring(
+    visibleCameraIds,
+    slotSources,
+    backendStatus === 'HEALTHY',
+  );
   useEffect(() => {
     const cameraStates = visibleCameraIds.filter(Boolean).map((cameraId) => {
       const telemetry = scopedLiveTracks[cameraId];
