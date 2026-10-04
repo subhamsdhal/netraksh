@@ -9,7 +9,7 @@ import { parseUtc } from '../utils/time';
 import { MAX_VISIBLE_CAMERAS, selectCameraSlots, cameraDisplayMetadata } from '../utils/cameraSlots';
 import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState, formatTelemetryAge } from '../utils/systemTruth';
 import useStartupReadiness from '../hooks/useStartupReadiness';
-import { analysisSessionIdForSource, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, mostRecentTelemetryCamera } from '../utils/dashboardScope';
+import { analysisSessionIdForSource, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera } from '../utils/dashboardScope';
 import { updateCameraMediaState } from '../utils/cameraMediaState';
 import { applyReplayResult, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
@@ -607,16 +607,13 @@ export default function Dashboard() {
   }, [operationalCameraIdsNow.join('|')]);
   useEffect(() => {
     if (restoredPresentationScopeRef.current || cameraInventoryRestoring || operationalCameraIdsNow.length) return;
-    const completedCameraIds = configuredCameraIds.filter(
-      (cameraId) => telemetryStatusAt(scopedLiveTracks[cameraId], now) === 'COMPLETED',
-    );
-    const cameraId = mostRecentTelemetryCamera(completedCameraIds, scopedLiveTracks);
+    const cameraId = restoredRunCamera(configuredCameraIds, slotSources, scopedLiveTracks, now);
     if (!cameraId) return;
     restoredPresentationScopeRef.current = true;
     setSelectedCameraId(cameraId);
     setReliabilityCameraId(cameraId);
     setEventCameraFilter(cameraId);
-  }, [cameraInventoryRestoring, operationalCameraIdsNow.join('|'), configuredCameraIds.join('|'), scopedLiveTracks, now]);
+  }, [cameraInventoryRestoring, operationalCameraIdsNow.join('|'), configuredCameraIds.join('|'), slotSources, scopedLiveTracks, now]);
   const selectedSessionId = selectedCameraId ? cameraMedia[selectedCameraId]?.sessionId : null;
   const reportingCameraId = selectedSessionId
     ? Object.entries(scopedLiveTracks).find(([, telemetry]) => telemetry?.stream_id === selectedSessionId)?.[0]

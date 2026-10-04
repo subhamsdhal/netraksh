@@ -13,6 +13,7 @@ import {
   operationalCameraIds,
   preferredOperationalCamera,
   mostRecentTelemetryCamera,
+  restoredRunCamera,
 } from '../src/utils/dashboardScope';
 
 describe('dynamic dashboard camera scope', () => {
@@ -89,13 +90,23 @@ describe('camera telemetry correctness', () => {
   });
 
   it('restores the presentation scope to the most recently observed completed run', () => {
-    expect(mostRecentTelemetryCamera(
-      ['cam-border-01', 'cam-checkpoint-01'],
-      {
-        'cam-border-01': { analysis_state: 'COMPLETED', processed_timestamp: 1000 },
-        'cam-checkpoint-01': { analysis_state: 'COMPLETED', processed_timestamp: 2000 },
-      },
-    )).toBe('cam-checkpoint-01');
+    const cameraIds = ['cam-border-01', 'cam-checkpoint-01'];
+    const sources = {
+      'cam-border-01': { latestAnalysisSessionId: 'run-1' },
+      'cam-checkpoint-01': { latestAnalysisSessionId: 'run-2' },
+    };
+    const cameraOneOnly = {
+      'cam-border-01': { analysis_state: 'COMPLETED', timestamp: 1000, processed_timestamp: 1000 },
+    };
+    expect(restoredRunCamera(cameraIds, sources, cameraOneOnly, 3000)).toBeNull();
+    expect(restoredRunCamera(cameraIds, sources, {
+      ...cameraOneOnly,
+      'cam-checkpoint-01': { analysis_state: 'COMPLETED', timestamp: 2000, processed_timestamp: 2000 },
+    }, 3000)).toBe('cam-checkpoint-01');
+    expect(mostRecentTelemetryCamera(cameraIds, {
+      ...cameraOneOnly,
+      'cam-checkpoint-01': { processed_timestamp: 2000 },
+    })).toBe('cam-checkpoint-01');
   });
   it('rejects older frames in the same analysis session', () => {
     const current = { analysis_session_id: 's1', frame_index: 12, sequence: 4, processed_timestamp: 100 };

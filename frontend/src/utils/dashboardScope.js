@@ -30,6 +30,21 @@ export function mostRecentTelemetryCamera(cameraIds = [], telemetryByCamera = {}
   }, null)?.cameraId || null;
 }
 
+export function restoredRunCamera(cameraIds = [], sourceStates = {}, telemetryByCamera = {}, now = Date.now()) {
+  const restorableCameraIds = cameraIds.filter(
+    (cameraId) => Boolean(sourceStates[cameraId]?.latestAnalysisSessionId),
+  );
+  if (!restorableCameraIds.length || restorableCameraIds.some((cameraId) => !telemetryByCamera[cameraId])) {
+    return null;
+  }
+  return mostRecentTelemetryCamera(
+    restorableCameraIds.filter(
+      (cameraId) => telemetryStatusAt(telemetryByCamera[cameraId], now) === 'COMPLETED',
+    ),
+    telemetryByCamera,
+  );
+}
+
 export function lifecycleStatus(sourceState, telemetry, now = Date.now()) {
   const telemetryStatus = telemetryStatusAt(telemetry, now);
   if (telemetryStatus === 'LIVE') return 'ONLINE';
