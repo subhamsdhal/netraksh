@@ -21,6 +21,15 @@ export function preferredOperationalCamera(selectedCameraId, operationalIds = []
   return operationalIds[0] || visibleIds[0] || null;
 }
 
+export function mostRecentTelemetryCamera(cameraIds = [], telemetryByCamera = {}) {
+  return cameraIds.reduce((latest, cameraId) => {
+    const telemetry = telemetryByCamera[cameraId];
+    if (!telemetry) return latest;
+    const observedAt = Number(telemetry.processed_timestamp ?? telemetry.timestamp ?? 0);
+    return !latest || observedAt > latest.observedAt ? { cameraId, observedAt } : latest;
+  }, null)?.cameraId || null;
+}
+
 export function lifecycleStatus(sourceState, telemetry, now = Date.now()) {
   const telemetryStatus = telemetryStatusAt(telemetry, now);
   if (telemetryStatus === 'LIVE') return 'ONLINE';

@@ -12,6 +12,7 @@ import {
   lifecycleStatus,
   operationalCameraIds,
   preferredOperationalCamera,
+  mostRecentTelemetryCamera,
 } from '../src/utils/dashboardScope';
 
 describe('dynamic dashboard camera scope', () => {
@@ -85,6 +86,16 @@ describe('camera telemetry correctness', () => {
     )).toEqual([]);
     expect(preferredOperationalCamera('cam-checkpoint-01', [], ['cam-border-01', 'cam-checkpoint-01']))
       .toBe('cam-checkpoint-01');
+  });
+
+  it('restores the presentation scope to the most recently observed completed run', () => {
+    expect(mostRecentTelemetryCamera(
+      ['cam-border-01', 'cam-checkpoint-01'],
+      {
+        'cam-border-01': { analysis_state: 'COMPLETED', processed_timestamp: 1000 },
+        'cam-checkpoint-01': { analysis_state: 'COMPLETED', processed_timestamp: 2000 },
+      },
+    )).toBe('cam-checkpoint-01');
   });
   it('rejects older frames in the same analysis session', () => {
     const current = { analysis_session_id: 's1', frame_index: 12, sequence: 4, processed_timestamp: 100 };
