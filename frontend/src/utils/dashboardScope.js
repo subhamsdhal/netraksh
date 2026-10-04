@@ -30,19 +30,36 @@ export function mostRecentTelemetryCamera(cameraIds = [], telemetryByCamera = {}
   }, null)?.cameraId || null;
 }
 
-export function restoredRunCamera(cameraIds = [], sourceStates = {}, telemetryByCamera = {}, now = Date.now()) {
+function completedRunObservedAt(summary, telemetry) {
+  const raw = summary?.completed_at ?? summary?.last_telemetry_at
+    ?? telemetry?.processed_timestamp ?? telemetry?.source_timestamp ?? telemetry?.timestamp;
+  if (raw == null) return -Infinity;
+  const numeric = Number(raw);
+  if (Number.isFinite(numeric)) return numeric > 1e12 ? numeric : numeric * 1000;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : -Infinity;
+}
+
+export function restoredRunCamera(cameraIds = [], sourceStates = {}, telemetryByCamera = {}, now = Date.now(), runSummaries = {}) {
   const restorableCameraIds = cameraIds.filter(
     (cameraId) => Boolean(sourceStates[cameraId]?.latestAnalysisSessionId),
   );
-  if (!restorableCameraIds.length || restorableCameraIds.some((cameraId) => !telemetryByCamera[cameraId])) {
+  if (!restorableCameraIds.length || restorableCameraIds.some((cameraId) => (
+    !telemetryByCamera[cameraId] && !Object.prototype.hasOwnProperty.call(runSummaries, cameraId)
+  ))) {
     return null;
   }
-  return mostRecentTelemetryCamera(
-    restorableCameraIds.filter(
-      (cameraId) => telemetryStatusAt(telemetryByCamera[cameraId], now) === 'COMPLETED',
-    ),
-    telemetryByCamera,
-  );
+  return restorableCameraIds.reduce((latest, cameraId) => {
+    const summary = runSummaries[cameraId];
+    const telemetry = telemetryByCamera[cameraId];
+    const expectedSessionId = sourceStates[cameraId]?.latestAnalysisSessionId;
+    const summaryMatches = summary?.analysis_session_id === expectedSessionId;
+    const telemetryMatches = telemetry?.analysis_session_id === expectedSessionId
+      && telemetryStatusAt(telemetry, now) === 'COMPLETED';
+    if (!summaryMatches && !telemetryMatches) return latest;
+    const observedAt = completedRunObservedAt(summaryMatches ? summary : null, telemetryMatches ? telemetry : null);
+    return !latest || observedAt > latest.observedAt ? { cameraId, observedAt } : latest;
+  }, null)?.cameraId || null;
 }
 
 export function cameraInventoryIsRestoring(cameraIds = [], sourceStates = {}, backendHealthy = false) {

@@ -610,13 +610,13 @@ export default function Dashboard() {
   }, [operationalCameraIdsNow.join('|')]);
   useEffect(() => {
     if (restoredPresentationScopeRef.current || cameraInventoryRestoring || operationalCameraIdsNow.length) return;
-    const cameraId = restoredRunCamera(configuredCameraIds, slotSources, scopedLiveTracks, now);
+    const cameraId = restoredRunCamera(configuredCameraIds, slotSources, scopedLiveTracks, now, runSummaries);
     if (!cameraId) return;
     restoredPresentationScopeRef.current = true;
     setSelectedCameraId(cameraId);
     setReliabilityCameraId(cameraId);
     setEventCameraFilter(cameraId);
-  }, [cameraInventoryRestoring, operationalCameraIdsNow.join('|'), configuredCameraIds.join('|'), slotSources, scopedLiveTracks, now]);
+  }, [cameraInventoryRestoring, operationalCameraIdsNow.join('|'), configuredCameraIds.join('|'), slotSources, scopedLiveTracks, runSummaries, now]);
   const selectedSessionId = selectedCameraId ? cameraMedia[selectedCameraId]?.sessionId : null;
   const reportingCameraId = selectedSessionId
     ? Object.entries(scopedLiveTracks).find(([, telemetry]) => telemetry?.stream_id === selectedSessionId)?.[0]

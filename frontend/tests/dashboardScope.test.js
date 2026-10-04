@@ -98,16 +98,36 @@ describe('camera telemetry correctness', () => {
       'cam-checkpoint-01': { latestAnalysisSessionId: 'run-2' },
     };
     const cameraOneOnly = {
-      'cam-border-01': { analysis_state: 'COMPLETED', timestamp: 1000, processed_timestamp: 1000 },
+      'cam-border-01': { analysis_session_id: 'run-1', analysis_state: 'COMPLETED', timestamp: 1000, processed_timestamp: 1000 },
     };
     expect(restoredRunCamera(cameraIds, sources, cameraOneOnly, 3000)).toBeNull();
     expect(restoredRunCamera(cameraIds, sources, {
       ...cameraOneOnly,
-      'cam-checkpoint-01': { analysis_state: 'COMPLETED', timestamp: 2000, processed_timestamp: 2000 },
+      'cam-checkpoint-01': { analysis_session_id: 'run-2', analysis_state: 'COMPLETED', timestamp: 2000, processed_timestamp: 2000 },
     }, 3000)).toBe('cam-checkpoint-01');
     expect(mostRecentTelemetryCamera(cameraIds, {
       ...cameraOneOnly,
       'cam-checkpoint-01': { processed_timestamp: 2000 },
+    })).toBe('cam-checkpoint-01');
+  });
+
+  it('uses persisted run summaries when a backend restart has no in-memory completion telemetry', () => {
+    const cameraIds = ['cam-border-01', 'cam-checkpoint-01'];
+    const sources = {
+      'cam-border-01': { latestAnalysisSessionId: 'run-1' },
+      'cam-checkpoint-01': { latestAnalysisSessionId: 'run-2' },
+    };
+    const telemetry = {
+      'cam-border-01': {
+        analysis_session_id: 'run-1', analysis_state: 'COMPLETED',
+        timestamp: 1000, processed_timestamp: 1000,
+      },
+    };
+    expect(restoredRunCamera(cameraIds, sources, telemetry, 3000, {})).toBeNull();
+    expect(restoredRunCamera(cameraIds, sources, telemetry, 3000, {
+      'cam-checkpoint-01': {
+        analysis_session_id: 'run-2', completed_at: 2000,
+      },
     })).toBe('cam-checkpoint-01');
   });
 
