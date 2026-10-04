@@ -171,7 +171,7 @@ export default function CameraManagement() {
   };
 
   return (
-    <div className="h-full flex flex-col gap-4 overflow-hidden">
+    <div className="h-full flex flex-col gap-4 overflow-y-auto overflow-x-hidden">
       <div className="section-header flex-shrink-0">
         <div>
           <h2 className="section-title">Camera Management</h2>
@@ -203,11 +203,11 @@ export default function CameraManagement() {
       {status === 'error' && <div className="text-danger text-sm text-center mt-8">Could not reach the backend.</div>}
 
       {status === 'ready' && (
-        <div className="flex h-full min-h-0" style={{ gap: '1.5rem' }}>
+        <div className="flex flex-1 min-h-0 items-start" style={{ gap: '1.5rem' }}>
           
           {/* Main Table Column */}
-          <div className="flex-grow flex flex-col border rounded overflow-hidden" style={{ background: 'rgba(15,23,42,0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255,255,255,0.05)' }}>
-            <div className="overflow-y-auto h-full relative custom-scrollbar">
+          <div className="flex-grow min-w-0 self-stretch flex flex-col border rounded overflow-hidden" style={{ background: 'rgba(15,23,42,0.6)', backdropFilter: 'blur(12px)', border: '1px solid rgba(255,255,255,0.05)' }}>
+            <div className="overflow-auto h-full relative custom-scrollbar">
               <table className="w-full text-sm font-body border-collapse">
                 <thead className="sticky top-0 z-10" style={{ background: 'rgba(10,15,13,0.95)', backdropFilter: 'blur(8px)' }}>
                   <tr className="text-left text-xs font-display text-muted uppercase border-b border-color">
@@ -288,7 +288,7 @@ export default function CameraManagement() {
 
           {/* Right Side Panel - Registration */}
           {role === 'ADMIN' && (
-            <div className="card flex-shrink-0 h-min" style={{ width: '22rem' }}>
+            <div className="card flex-shrink-0 min-w-0 h-min" style={{ width: '22rem', maxWidth: '100%', boxSizing: 'border-box' }}>
               {/* Header */}
               <div className="card-header border-b border-color" style={{ paddingBottom: '1rem' }}>
                 <div className="flex items-center gap-3">
@@ -323,8 +323,8 @@ export default function CameraManagement() {
                   <div className="flex flex-col" style={{ gap: '0.25rem' }}>
                     <label className="text-[10px] font-display text-muted uppercase tracking-widest ml-1">Initial Coordinates (Optional)</label>
                     <div className="flex" style={{ gap: '0.5rem' }}>
-                      <input value={newLat} onChange={(e) => setNewLat(e.target.value)} placeholder="Lat" className="flex-1 bg-dark border border-color rounded text-sm text-main focus:outline-none focus:border-ok transition-colors" style={{ padding: '0.6rem 0.75rem' }} />
-                      <input value={newLon} onChange={(e) => setNewLon(e.target.value)} placeholder="Lon" className="flex-1 bg-dark border border-color rounded text-sm text-main focus:outline-none focus:border-ok transition-colors" style={{ padding: '0.6rem 0.75rem' }} />
+                      <input value={newLat} onChange={(e) => setNewLat(e.target.value)} placeholder="Lat" className="flex-1 min-w-0 bg-dark border border-color rounded text-sm text-main focus:outline-none focus:border-ok transition-colors" style={{ padding: '0.6rem 0.75rem' }} />
+                      <input value={newLon} onChange={(e) => setNewLon(e.target.value)} placeholder="Lon" className="flex-1 min-w-0 bg-dark border border-color rounded text-sm text-main focus:outline-none focus:border-ok transition-colors" style={{ padding: '0.6rem 0.75rem' }} />
                     </div>
                   </div>
 
