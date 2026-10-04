@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { authFetch, getRole, getToken, getUsername, login } from '../src/services/auth';
+import { authFetch, authUpload, getRole, getToken, getUsername, login } from '../src/services/auth';
 
 describe('authentication client', () => {
   beforeEach(() => {
@@ -27,5 +27,39 @@ describe('authentication client', () => {
     fetch.mockResolvedValueOnce({ ok: false, status: 401 });
     await authFetch('/events');
     expect(getToken()).toBeNull();
+  });
+
+  it('reports real upload bytes and preserves authenticated transport', async () => {
+    localStorage.setItem('netraksh_token', 'upload-token');
+    const progress = [];
+    class FakeUploadRequest {
+      constructor() {
+        this.upload = {};
+        this.status = 200;
+        this.responseText = '{"source_state":"READY"}';
+        FakeUploadRequest.instance = this;
+      }
+      open(method, url) { this.method = method; this.url = url; }
+      setRequestHeader(name, value) { this.header = [name, value]; }
+      send(body) {
+        this.body = body;
+        this.upload.onprogress({ lengthComputable: true, loaded: 3, total: 4 });
+        this.onload();
+      }
+      abort() { this.onabort?.(); }
+    }
+    global.XMLHttpRequest = FakeUploadRequest;
+    const payload = new FormData();
+    payload.append('camera_id', 'cam-checkpoint-01');
+
+    const response = await authUpload('/api/dashboard/video/upload', payload, {
+      onProgress: (value) => progress.push(value),
+    });
+
+    expect(response.ok).toBe(true);
+    expect(await response.json()).toEqual({ source_state: 'READY' });
+    expect(progress).toEqual([75]);
+    expect(FakeUploadRequest.instance.method).toBe('POST');
+    expect(FakeUploadRequest.instance.header).toEqual(['Authorization', 'Bearer upload-token']);
   });
 });

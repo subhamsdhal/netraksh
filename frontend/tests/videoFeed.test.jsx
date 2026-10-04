@@ -85,6 +85,33 @@ describe('per-camera authoritative analyzed frame', () => {
     expect(screen.queryByText('ADD VIDEO SOURCE')).not.toBeInTheDocument();
   });
 
+  it('shows measured upload progress and never claims normalization before it is known', () => {
+    render(<VideoFeed
+      cameraId="cam-checkpoint-01"
+      isUploading
+      uploadStage="UPLOADING"
+      uploadProgress={63}
+      canUpload
+      sourceMode="durable"
+      sourceRunState="UPLOADING"
+    />);
+    expect(screen.getByText('UPLOADING 63%')).toBeInTheDocument();
+    expect(screen.queryByText(/NORMALIZING/)).not.toBeInTheDocument();
+  });
+
+  it('keeps preview availability separate from source readiness', () => {
+    render(<VideoFeed
+      cameraId="cam-checkpoint-01"
+      sourceMode="durable"
+      sourceRunState="READY"
+      expectedSessionId="ready-source"
+      telemetryStatus="WAITING"
+      canUpload
+    />);
+    expect(screen.getByText('SOURCE STORED · PREVIEW UNAVAILABLE FOR RESTORED SESSION')).toBeInTheDocument();
+    expect(screen.queryByText(/UPLOADING/)).not.toBeInTheDocument();
+  });
+
   it('names an active restored source as awaiting its current analyzed frame', () => {
     render(<VideoFeed
       cameraId="cam-checkpoint-01"

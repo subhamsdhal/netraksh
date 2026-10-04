@@ -223,6 +223,8 @@ export default function VideoFeed({
   currentFps,
   onUpload,
   isUploading,
+  uploadStage = null,
+  uploadProgress = null,
   canUpload,
   uploadError,
   onVideoEnded,
@@ -251,6 +253,11 @@ export default function VideoFeed({
   const [analyzedFrameStatus, setAnalyzedFrameStatus] = useState('WAITING FOR NEXT ANALYZED FRAME');
   const isDurableSource = sourceMode === 'durable';
   const hasStoredDurableSource = isDurableSource && Boolean(expectedSessionId);
+  const uploadLabel = uploadStage === 'UPLOADING'
+    ? `UPLOADING${Number.isFinite(uploadProgress) ? ` ${uploadProgress}%` : ''}`
+    : uploadStage === 'PREPARING'
+      ? 'VALIDATING & STORING VIDEO'
+      : 'PREPARING VIDEO';
   const showAnalyzedFrame = Boolean(
     analyzedFrameUrl
     && hudVisible
@@ -524,7 +531,7 @@ export default function VideoFeed({
             {sourceRestoring
               ? 'RESTORING STORED SOURCE...'
               : isUploading
-              ? 'UPLOADING · VALIDATING · NORMALIZING VIDEO'
+              ? uploadLabel
               : ['ACTIVATING', 'WAKING'].includes(sourceRunState)
                 ? 'PREPARING CLOUD ANALYSIS'
                 : sourceRunState === 'READY_TO_START'
@@ -915,7 +922,7 @@ export default function VideoFeed({
             fontFamily: 'var(--font-display)', fontSize: '0.8rem',
             letterSpacing: '0.1em', color: 'var(--color-ok)',
           }}>
-            TRANSMITTING TO EDGE NODE…
+            {uploadLabel}
           </span>
         </div>
       )}

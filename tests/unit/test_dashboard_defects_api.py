@@ -94,6 +94,7 @@ def test_durable_upload_stores_only_the_normalized_mp4(tmp_path, monkeypatch):
     monkeypatch.setattr(dashboard, "_ffprobe_bin", lambda: "ffprobe")
     monkeypatch.setattr(dashboard, "_probe_video", lambda *_args: {"streams": [{"codec_type": "video"}]})
     monkeypatch.setattr(dashboard, "_normalize_video", lambda _src, dst, _bin: dst.write_bytes(b"normalized-mp4"))
+    monkeypatch.setattr(dashboard, "activate_session", lambda *_args: None)
     monkeypatch.setattr(
         dashboard,
         "store_uploaded_session",
@@ -113,6 +114,62 @@ def test_durable_upload_stores_only_the_normalized_mp4(tmp_path, monkeypatch):
     assert stored[0]["preview_path"] is None
     assert stored[0]["source_bytes"] == b"normalized-mp4"
     assert list(tmp_path.iterdir()) == []
+
+
+def test_compatible_mp4_skips_normalization_and_registers_once(tmp_path, monkeypatch):
+    stored = []
+    activated = []
+    monkeypatch.setattr(dashboard, "_videos_dir", lambda: tmp_path)
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "_ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr(dashboard, "_ffprobe_bin", lambda: "ffprobe")
+    monkeypatch.setattr(dashboard, "_probe_video", lambda *_args: {
+        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+        "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p", "width": 960, "height": 540}],
+    })
+    monkeypatch.setattr(dashboard, "_normalize_video", lambda *_args: pytest.fail("compatible MP4 must not transcode"))
+    monkeypatch.setattr(dashboard, "store_uploaded_session", lambda **kwargs: stored.append({
+        **kwargs, "source_bytes": kwargs["source_path"].read_bytes(),
+    }))
+    monkeypatch.setattr(dashboard, "activate_session", lambda camera_id, session_id: activated.append((camera_id, session_id)))
+
+    result = asyncio.run(dashboard.upload_dashboard_video(
+        _video_upload("short.mp4", b"\x00\x00\x00\x18ftypmp42compatible"),
+        camera_id="cam-checkpoint-01", _user={},
+    ))
+
+    assert result["source_state"] == "READY"
+    assert result["normalization_performed"] is False
+    assert len(stored) == 1
+    assert len(activated) == 1
+    assert stored[0]["source_path"].name.startswith("incoming_")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_incompatible_mp4_uses_normalization_path(tmp_path, monkeypatch):
+    stored = []
+    monkeypatch.setattr(dashboard, "_videos_dir", lambda: tmp_path)
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "_ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr(dashboard, "_ffprobe_bin", lambda: "ffprobe")
+    monkeypatch.setattr(dashboard, "_probe_video", lambda *_args: {
+        "format": {"format_name": "mov,mp4"},
+        "streams": [{"codec_type": "video", "codec_name": "hevc", "pix_fmt": "yuv420p", "width": 1920, "height": 1080}],
+    })
+    monkeypatch.setattr(dashboard, "_normalize_video", lambda _src, dst, _bin: dst.write_bytes(b"normalized"))
+    monkeypatch.setattr(dashboard, "store_uploaded_session", lambda **kwargs: stored.append({
+        **kwargs, "source_bytes": kwargs["source_path"].read_bytes(),
+    }))
+    monkeypatch.setattr(dashboard, "activate_session", lambda *_args: None)
+
+    result = asyncio.run(dashboard.upload_dashboard_video(
+        _video_upload("hevc.mp4", b"\x00\x00\x00\x18ftypmp42incompatible"),
+        camera_id="cam-checkpoint-01", _user={},
+    ))
+
+    assert result["normalization_performed"] is True
+    assert len(stored) == 1
+    assert stored[0]["source_bytes"] == b"normalized"
 
 
 @pytest.mark.parametrize("name,payload", [

@@ -139,3 +139,38 @@ export async function authFetch(path, options = {}) {
   
   return response;
 }
+
+// XMLHttpRequest is used only for video uploads because fetch does not expose
+// browser upload progress. The response mirrors the subset used by Dashboard.
+export function authUpload(path, body, { onProgress, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', `${BACKEND_URL}${path}`);
+    const token = getToken();
+    if (token) request.setRequestHeader('Authorization', `Bearer ${token}`);
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) {
+        onProgress(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      }
+    };
+    request.onerror = () => reject(new TypeError('Failed to fetch'));
+    request.onabort = () => reject(new DOMException('Upload aborted', 'AbortError'));
+    request.onload = () => {
+      if (request.status === 401) logout();
+      const responseText = request.responseText || '';
+      resolve({
+        ok: request.status >= 200 && request.status < 300,
+        status: request.status,
+        json: async () => JSON.parse(responseText || '{}'),
+      });
+    };
+    if (signal) {
+      if (signal.aborted) {
+        request.abort();
+        return;
+      }
+      signal.addEventListener('abort', () => request.abort(), { once: true });
+    }
+    request.send(body);
+  });
+}

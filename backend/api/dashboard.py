@@ -35,6 +35,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
+from time import perf_counter
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status, Request
@@ -152,7 +153,7 @@ def _probe_video(path: Path, ffprobe: str) -> dict:
     result = subprocess.run(
         [
             ffprobe, "-v", "error", "-show_entries",
-            "format=format_name,duration:stream=codec_type,codec_name,width,height",
+            "format=format_name,duration:stream=codec_type,codec_name,width,height,pix_fmt",
             "-of", "json", str(path),
         ],
         capture_output=True,
@@ -169,6 +170,33 @@ def _probe_video(path: Path, ffprobe: str) -> dict:
     if not any(stream.get("codec_type") == "video" for stream in payload.get("streams", [])):
         raise HTTPException(status_code=400, detail="The uploaded file does not contain a video stream")
     return payload
+
+
+def _compatible_mp4_fast_path(path: Path, probe: dict) -> bool:
+    """Accept an MP4 as-is only when it already matches the analysis contract."""
+    if path.suffix.lower() != ".mp4" or path.stat().st_size >= _MAX_DURABLE_VIDEO_BYTES:
+        return False
+    format_names = {
+        name.strip().lower()
+        for name in str(probe.get("format", {}).get("format_name") or "").split(",")
+        if name.strip()
+    }
+    video = next(
+        (stream for stream in probe.get("streams", []) if stream.get("codec_type") == "video"),
+        None,
+    )
+    if not video or not ({"mp4", "mov"} & format_names):
+        return False
+    width = int(video.get("width") or 0)
+    height = int(video.get("height") or 0)
+    return (
+        video.get("codec_name") == "h264"
+        and video.get("pix_fmt") in {"yuv420p", "yuvj420p"}
+        and 0 < width <= 960
+        and 0 < height <= 720
+        and width % 2 == 0
+        and height % 2 == 0
+    )
 
 
 def _normalize_video(source: Path, destination: Path, ffmpeg: str) -> None:
@@ -1015,6 +1043,7 @@ async def upload_dashboard_video(
     _user=Depends(require_operator_or_admin),
 ):
     """Validate and normalize one upload for both browser and edge analysis."""
+    request_started = perf_counter()
     content_type = (file.content_type or "").lower()
     # Browsers on Windows sometimes omit the MIME type.  The extension, magic
     # bytes and ffprobe are authoritative; a declared non-video type is not.
@@ -1051,6 +1080,7 @@ async def upload_dashboard_video(
     ffprobe = _ffprobe_bin()
 
     try:
+        receive_started = perf_counter()
         total = 0
         with open(incoming_path, "wb") as buf:
             while True:
@@ -1061,6 +1091,7 @@ async def upload_dashboard_video(
                 if total > _MAX_VIDEO_UPLOAD_BYTES:
                     raise HTTPException(status_code=413, detail="Video upload exceeds the 200 MiB limit")
                 buf.write(chunk)
+        receive_ms = (perf_counter() - receive_started) * 1000
         if total == 0:
             raise HTTPException(status_code=400, detail="Video upload is empty")
         with open(incoming_path, "rb") as probe:
@@ -1077,26 +1108,39 @@ async def upload_dashboard_video(
         if durable and (not ffmpeg or not ffprobe):
             raise HTTPException(status_code=503, detail="Cloud video normalization is temporarily unavailable")
 
+        queue_wait_started = perf_counter()
+        probe_result = None
         async with _NORMALIZATION_SEMAPHORE:
+            queue_wait_ms = (perf_counter() - queue_wait_started) * 1000
+            validation_started = perf_counter()
             if ffprobe:
-                await asyncio.to_thread(_probe_video, incoming_path, ffprobe)
+                probe_result = await asyncio.to_thread(_probe_video, incoming_path, ffprobe)
+            validation_ms = (perf_counter() - validation_started) * 1000
 
-            if ffmpeg:
+            normalization_started = perf_counter()
+            compatible_fast_path = bool(durable and probe_result and _compatible_mp4_fast_path(incoming_path, probe_result))
+            if compatible_fast_path:
+                prepared_path = incoming_path
+            elif ffmpeg:
                 await asyncio.to_thread(_normalize_video, incoming_path, normalized_path, ffmpeg)
+                prepared_path = normalized_path
             elif ext == ".mp4":
                 # Development-only compatibility. Production durable uploads must
                 # pass through ffmpeg so browser playback and inference cannot split.
                 await asyncio.to_thread(shutil.copyfile, incoming_path, normalized_path)
+                prepared_path = normalized_path
             else:
                 raise HTTPException(status_code=503, detail="ffmpeg is required to normalize this video format")
+            normalization_ms = (perf_counter() - normalization_started) * 1000
 
-        normalized_size = normalized_path.stat().st_size
+        normalized_size = prepared_path.stat().st_size
+        storage_started = perf_counter()
         if durable:
             await asyncio.to_thread(
                 store_uploaded_session,
                 camera_id=camera_id,
                 session_id=new_session_id,
-                source_path=normalized_path,
+                source_path=prepared_path,
                 preview_path=None,
                 source_name=original_name,
                 content_type="video/mp4",
@@ -1104,22 +1148,42 @@ async def upload_dashboard_video(
             preview_url = f"/api/dashboard/video/media/{new_session_id}?camera_id={camera_id}"
         else:
             preview_url = f"/api/dashboard/video/media/{new_session_id}"
+        storage_ms = (perf_counter() - storage_started) * 1000
 
+        finalization_started = perf_counter()
+        if durable:
+            # The upload response is the authoritative READY acknowledgement.
+            # Activation selects the durable source but deliberately does not
+            # wake an edge worker or start analysis.
+            await asyncio.to_thread(activate_session, camera_id, new_session_id)
         if camera_id:
             _demo_state.setdefault("uploaded_sources", {}).setdefault(camera_id, {})[new_session_id] = {
                 "source_name": normalized_name,
                 "original_name": original_name,
                 "preview_name": None,
             }
+        finalization_ms = (perf_counter() - finalization_started) * 1000
+        total_ready_ms = (perf_counter() - request_started) * 1000
 
         logger.info(
-            "[Dashboard] Normalized upload accepted camera_id=%s session=%s bytes=%s",
+            "[DashboardUploadTiming] camera_id=%s session=%s bytes=%s receive_ms=%.1f "
+            "queue_wait_ms=%.1f validation_ms=%.1f normalization_ms=%.1f storage_ms=%.1f finalization_ms=%.1f "
+            "total_ready_ms=%.1f normalization=%s",
             camera_id,
             new_session_id[:8],
             normalized_size,
+            receive_ms,
+            queue_wait_ms,
+            validation_ms,
+            normalization_ms,
+            storage_ms,
+            finalization_ms,
+            total_ready_ms,
+            "skipped-compatible" if compatible_fast_path else "performed",
         )
         return {
             "status": "ok",
+            "source_state": "READY",
             "preview_url": preview_url,
             "session_id": new_session_id,
             "source_name": original_name,
@@ -1127,7 +1191,17 @@ async def upload_dashboard_video(
             "camera_id": camera_id,
             "ffmpeg_available": bool(ffmpeg),
             "normalized_size_bytes": normalized_size,
-            "message": "Video normalized and stored. Press START to wake analysis for this camera.",
+            "normalization_performed": not compatible_fast_path,
+            "timings_ms": {
+                "backend_receive": round(receive_ms, 1),
+                "queue_wait": round(queue_wait_ms, 1),
+                "validation": round(validation_ms, 1),
+                "normalization": round(normalization_ms, 1),
+                "storage": round(storage_ms, 1),
+                "finalization": round(finalization_ms, 1),
+                "total_ready": round(total_ready_ms, 1),
+            },
+            "message": "Video validated, stored, and ready. Press START to wake analysis for this camera.",
         }
     except HTTPException:
         raise

@@ -3,14 +3,14 @@ import { ShieldCheck, HelpCircle, ShieldAlert, CheckCircle, GitMerge } from 'luc
 import VideoFeed from '../components/VideoFeed';
 import useWebSocket from '../hooks/useWebSocket';
 import useDemoScenario from '../hooks/useDemoScenario';
-import { WS_URL, BACKEND_URL, authFetch } from '../services/auth';
+import { WS_URL, BACKEND_URL, authFetch, authUpload } from '../services/auth';
 import useAuth from '../hooks/useAuth';
 import { parseUtc } from '../utils/time';
 import { MAX_VISIBLE_CAMERAS, selectCameraSlots, cameraDisplayMetadata } from '../utils/cameraSlots';
 import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState, formatTelemetryAge } from '../utils/systemTruth';
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring } from '../utils/dashboardScope';
-import { updateCameraMediaState } from '../utils/cameraMediaState';
+import { updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
 import { applyReplayResult, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 
@@ -128,6 +128,7 @@ export default function Dashboard() {
   const [backendStatus, setBackendStatus] = useState('CHECKING');
   const [controlRequests, setControlRequests] = useState({});
   const fileInputRefs = useRef({});
+  const uploadRequestsRef = useRef({});
   const wakeTimeoutsRef = useRef({});
   // This is a request lifecycle, not a mount latch.  A cold backend must not
   // consume the only prewarm attempt before it can accept the POST.
@@ -636,7 +637,6 @@ export default function Dashboard() {
   const activeMediaState = activeCameraId ? (cameraMedia[activeCameraId] || {}) : {};
   const mediaUrl = activeMediaState.mediaUrl || null;
   const mediaType = activeMediaState.mediaType || 'video';
-  const isUploading = Boolean(activeMediaState.isUploading);
   const sessionStartTime = activeMediaState.sessionStartTime || 0;
   const videoSessionId = activeMediaState.sessionId || null;
   const uploadError = activeMediaState.uploadError || null;
@@ -645,6 +645,8 @@ export default function Dashboard() {
   const telemetryAgeMs = activeTelemetryReceivedAt == null ? null : now - activeTelemetryReceivedAt;
   const analysisState = activeCameraId ? scopedLiveTracks[activeCameraId]?.analysis_state : null;
   const activeSourceState = activeCameraId ? slotSources[activeCameraId] : null;
+  const activeUploadState = visibleUploadState(activeMediaState, activeSourceState);
+  const isUploading = activeUploadState.isUploading;
   const telemetryStatus = !isConnected ? 'DISCONNECTED'
     : telemetryAgeMs == null ? lifecycleStatus(activeSourceState, null, now)
     : telemetryStatusAt(scopedLiveTracks[activeCameraId], now);
@@ -744,6 +746,11 @@ export default function Dashboard() {
       updateCameraMedia(cameraId, { uploadError: 'Please select a supported video file.' });
       return;
     }
+    uploadRequestsRef.current[cameraId]?.controller?.abort();
+    const uploadRequestId = crypto.randomUUID();
+    const uploadController = new AbortController();
+    uploadRequestsRef.current[cameraId] = { id: uploadRequestId, controller: uploadController };
+    const requestIsCurrent = () => uploadResultIsCurrent(uploadRequestsRef.current[cameraId], uploadRequestId);
     updateCameraMedia(cameraId, { uploadError: null });
 
     setLatestEvent(null);
@@ -776,6 +783,9 @@ export default function Dashboard() {
       mediaUrl: null,
       mediaType: 'video',
       isUploading: true,
+      uploadStage: 'UPLOADING',
+      uploadProgress: 0,
+      uploadRequestId,
       sessionId: null,
       sessionStartTime: Date.now(),
       playbackEnded: false,
@@ -787,7 +797,17 @@ export default function Dashboard() {
     formData.append('camera_id', cameraId);
     let uploaded;
     try {
-      const res = await authFetch('/api/dashboard/video/upload', { method: 'POST', body: formData });
+      const res = await authUpload('/api/dashboard/video/upload', formData, {
+        signal: uploadController.signal,
+        onProgress: (progress) => {
+          if (!requestIsCurrent()) return;
+          updateCameraMedia(cameraId, {
+            uploadStage: progress >= 100 ? 'PREPARING' : 'UPLOADING',
+            uploadProgress: progress,
+          });
+        },
+      });
+      if (!requestIsCurrent()) return;
       if (!res.ok) {
         let detail = 'VIDEO UPLOAD FAILED';
         try { detail = (await res.json()).detail || detail; } catch (_) { /* keep concise fallback */ }
@@ -795,6 +815,7 @@ export default function Dashboard() {
       }
       uploaded = await res.json();
     } catch (error) {
+      if (!requestIsCurrent() || error?.name === 'AbortError') return;
       // The server may have accepted a request even when the browser loses the
       // response. Keep the replacement context visible instead of resurrecting
       // the old bundled source; the operator can retry after checking current
@@ -807,15 +828,18 @@ export default function Dashboard() {
       updateCameraMedia(cameraId, {
         mediaUrl: null,
         isUploading: false,
+        uploadStage: 'ERROR',
+        uploadProgress: null,
         uploadError: error instanceof TypeError && error.message === 'Failed to fetch'
           ? 'UPLOAD CONNECTION INTERRUPTED'
           : (error.message || 'VIDEO UPLOAD FAILED'),
       });
+      delete uploadRequestsRef.current[cameraId];
       return;
     }
 
-    // Phase 1 is durable as soon as upload returns 200. Persist this session
-    // before activation/preview so a later failure can never roll it back.
+    // The 200 response is the authoritative READY acknowledgement: durable
+    // storage and camera-scoped activation have both completed server-side.
     const sessionId = uploaded.session_id || null;
     const sourceName = uploaded.source_name || file.name;
     setSlotSources((current) => ({
@@ -824,63 +848,43 @@ export default function Dashboard() {
         sourceMode: 'durable',
         sourceId: sessionId,
         sourceName,
-        runState: sessionId ? 'ACTIVATING' : 'ERROR',
+        runState: sessionId && uploaded.source_state === 'READY' ? 'READY' : (sessionId ? 'ACTIVATING' : 'ERROR'),
       },
     }));
     updateCameraMedia(cameraId, {
       mediaUrl: null,
       sessionId,
       isUploading: false,
+      uploadStage: null,
+      uploadProgress: null,
       uploadError: sessionId ? null : 'VIDEO STORED BUT NO SESSION ID WAS RETURNED',
     });
-    if (!sessionId) return;
-
-    // Phase 2 — activate the exact uploaded session. Activation failure keeps
-    // the durable source selected and is independently retryable.
-    try {
-      const analyzeRes = await authFetch('/api/dashboard/video/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, source_name: sourceName, preview_name: null, camera_id: cameraId }),
-      });
-      if (!analyzeRes.ok) {
-        let detail = 'ANALYSIS ACTIVATION FAILED — RETRY';
-        try { detail = (await analyzeRes.json()).detail || detail; } catch (_) { /* concise fallback */ }
-        throw new Error(detail);
-      }
-      const activatedSource = {
-        sourceMode: 'durable',
-        sourceId: sessionId,
-        sourceName,
-        runState: 'WAKING',
-      };
-      setSlotSources((current) => ({ ...current, [cameraId]: activatedSource }));
-      // A successful upload should flow directly into cloud analysis. This
-      // avoids leaving the old demo worker active while the UI waits for a
-      // second manual click and makes the public-link workflow deterministic.
-      requestScenario(
-        cameraId,
-        scenarioAction(cameraId, activatedSource, 'normal', true),
-      );
-    } catch (error) {
-      console.error('Analysis activation error:', error);
-      setSlotSources((current) => ({ ...current, [cameraId]: { ...current[cameraId], runState: 'ERROR' } }));
-      updateCameraMedia(cameraId, { uploadError: error instanceof TypeError && error.message === 'Failed to fetch' ? 'ANALYSIS ACTIVATION FAILED — RETRY' : (error.message || 'ANALYSIS ACTIVATION FAILED — RETRY') });
+    if (!sessionId) {
+      delete uploadRequestsRef.current[cameraId];
+      return;
     }
 
-    // Phase 3 — preview is useful but never authoritative. A redirect/blob
+    // READY is authoritative at upload response time. Edge wake and analysis
+    // remain a separate explicit operator action.
+    setSlotSources((current) => ({
+      ...current,
+      [cameraId]: { sourceMode: 'durable', sourceId: sessionId, sourceName, runState: 'READY' },
+    }));
+
+    // Preview is useful but never authoritative. A redirect/blob
     // failure must not clear the stored session or its source identity.
     if (uploaded.preview_url) {
       try {
         const mediaRes = await authFetch(uploaded.preview_url);
         if (!mediaRes.ok) throw new Error('PREVIEW LOAD FAILED — VIDEO IS STILL STORED');
         const blobUrl = URL.createObjectURL(await mediaRes.blob());
-        updateCameraMedia(cameraId, { mediaUrl: blobUrl, uploadError: null });
+        if (requestIsCurrent()) updateCameraMedia(cameraId, { mediaUrl: blobUrl, uploadError: null });
       } catch (error) {
         console.error('Preview load error:', error);
-        updateCameraMedia(cameraId, { mediaUrl: null, uploadError: 'PREVIEW LOAD FAILED — VIDEO IS STILL STORED' });
+        if (requestIsCurrent()) updateCameraMedia(cameraId, { mediaUrl: null, uploadError: 'PREVIEW LOAD FAILED — VIDEO IS STILL STORED' });
       }
     }
+    if (requestIsCurrent()) delete uploadRequestsRef.current[cameraId];
   };
 
   const [fleetHealth, setFleetHealth] = useState([]);
@@ -1121,6 +1125,7 @@ export default function Dashboard() {
                 ? 'LIVE'
                 : lifecycle || (telemetryAvailable ? 'LIVE' : 'LOADED');
           const mediaState = cameraId ? (cameraMedia[cameraId] || {}) : {};
+          const uploadState = visibleUploadState(mediaState, sourceState);
           const isDemoReplay = Boolean(telemetry?.demo_replay || sourceState?.sourceMode === 'bundled');
           const statusLabel = status;
           const cardFps = processingFpsForTelemetry(telemetry, now);
@@ -1217,7 +1222,9 @@ export default function Dashboard() {
                     mediaType={mediaState.mediaType || 'video'}
                     currentFps={cardFps}
                     onUpload={() => triggerUpload(cameraId)}
-                    isUploading={Boolean(mediaState.isUploading)}
+                    isUploading={uploadState.isUploading}
+                    uploadStage={uploadState.stage}
+                    uploadProgress={uploadState.progress}
                     canUpload={canUpload}
                     uploadError={mediaState.uploadError || null}
                     sourceMode={sourceState?.sourceMode || null}
@@ -1342,6 +1349,8 @@ export default function Dashboard() {
               currentFps={activeProcessingFps}
               onUpload={() => triggerUpload(activeCameraId)}
               isUploading={isUploading}
+              uploadStage={activeUploadState.stage}
+              uploadProgress={activeUploadState.progress}
               canUpload={canUpload}
               uploadError={uploadError}
               sourceMode={slotSources[activeCameraId]?.sourceMode || null}
