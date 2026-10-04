@@ -206,7 +206,7 @@ def _normalize_video(source: Path, destination: Path, ffmpeg: str) -> None:
             ffmpeg, "-y", "-v", "error", "-i", str(source),
             "-map", "0:v:0",
             "-vf", "scale=w='min(960,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
             "-threads", "1",
             "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart",
             str(destination),

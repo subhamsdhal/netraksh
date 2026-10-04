@@ -172,6 +172,28 @@ def test_incompatible_mp4_uses_normalization_path(tmp_path, monkeypatch):
     assert stored[0]["source_bytes"] == b"normalized"
 
 
+def test_normalization_uses_fast_analysis_safe_encode(tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    destination = tmp_path / "prepared.mp4"
+    source.write_bytes(b"source")
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        destination.write_bytes(b"prepared")
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(dashboard.subprocess, "run", fake_run)
+
+    dashboard._normalize_video(source, destination, "ffmpeg")
+
+    command = captured["command"]
+    assert command[command.index("-preset") + 1] == "ultrafast"
+    assert command[command.index("-pix_fmt") + 1] == "yuv420p"
+    assert "-an" in command
+    assert "min(960,iw)" in command[command.index("-vf") + 1]
+
+
 @pytest.mark.parametrize("name,payload", [
     ("camera.avi", b"RIFF\x00\x00\x00\x00AVI source"),
     ("camera.webm", b"\x1a\x45\xdf\xa3webm source"),
