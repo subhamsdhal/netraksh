@@ -107,6 +107,7 @@ export default function Dashboard() {
   // Every source-specific value is keyed by camera. A single media URL or
   // session shared by both cards lets one upload overwrite the other.
   const [cameraMedia, setCameraMedia] = useState({});
+  const [presentedTelemetry, setPresentedTelemetry] = useState({});
   const cameraMediaRef = useRef(cameraMedia);
   const [selectedCameraId, setSelectedCameraId] = useState('');
   // Source/session identity is control-plane state.  Never seed it from a
@@ -766,6 +767,11 @@ export default function Dashboard() {
 
     setLatestEvent(null);
     resetCameraContext(cameraId);
+    setPresentedTelemetry(current => {
+      const next = { ...current };
+      delete next[cameraId];
+      return next;
+    });
     setRunSummaries(current => ({ ...current, [cameraId]: null }));
     setRunSummaryLoading(current => ({ ...current, [cameraId]: false }));
     const previousSource = slotSources[cameraId];
@@ -1162,16 +1168,19 @@ export default function Dashboard() {
           const mediaState = cameraId ? (cameraMedia[cameraId] || {}) : {};
           const uploadState = visibleUploadState(mediaState, sourceState);
           const analysisPresentation = analysisLifecyclePresentation(sourceState, mediaState, Boolean(controlRequests[cameraId]));
+          const presentedSample = cameraId ? (presentedTelemetry[cameraId] || null) : null;
           const isDemoReplay = Boolean(telemetry?.demo_replay || sourceState?.sourceMode === 'bundled');
           const statusLabel = analysisPresentation.badge;
-          const cardFps = processingFpsForTelemetry(telemetry, now);
-          const sourceFps = sourceFpsForTelemetry(telemetry);
+          const cardFps = processingFpsForTelemetry(presentedSample, now);
+          const sourceFps = sourceFpsForTelemetry(presentedSample);
           // Process-local telemetry is not a durable completed-run record.
           // Only display it after EOF when it belongs to the exact restored
           // analysis session; otherwise name the absence instead of implying
           // that an old global/latest value is current evidence.
           const completedTelemetry = completedRun ? completedSummary : null;
-          const updateTimestamp = completedRun ? completedSummary?.completed_at || completedSummary?.last_telemetry_at : telemetry?.timestamp;
+          const updateTimestamp = completedRun
+            ? presentedSample?.processed_timestamp || completedSummary?.completed_at || completedSummary?.last_telemetry_at
+            : presentedSample?.processed_timestamp || null;
           const normalizedUpdateTimestamp = updateTimestamp == null ? null : Number(updateTimestamp) > 1e12 ? Number(updateTimestamp) : Number(updateTimestamp) * 1000;
           const updateAge = normalizedUpdateTimestamp == null ? null : Math.max(0, now - normalizedUpdateTimestamp);
           return (
@@ -1240,6 +1249,13 @@ export default function Dashboard() {
                     expectedGeneration={sourceState?.analysisGeneration ?? null}
                     sourceRunState={displayRunState}
                     sourceRestoring={Boolean(sourceState?.restoring)}
+                    onAnalyzedSample={(sample) => setPresentedTelemetry(current => {
+                      if (current[cameraId] === sample) return current;
+                      const next = { ...current };
+                      if (sample) next[cameraId] = sample;
+                      else delete next[cameraId];
+                      return next;
+                    })}
                     onVideoEnded={() => updateCameraMedia(cameraId, { playbackEnded: true })}
                   />
                 ) : (
@@ -1270,12 +1286,14 @@ export default function Dashboard() {
               </div>
               <div className="dashboard-camera-telemetry">
                 <span><b>{completedRun ? 'FINAL AI FPS' : 'AI FPS'}</b>{completedRun
-                  ? (Number.isFinite(completedTelemetry?.processing_fps) ? Number(completedTelemetry.processing_fps).toFixed(2) : 'NOT RECORDED FOR THIS COMPLETED RUN')
+                  ? (Number.isFinite(presentedSample?.processing_fps ?? completedTelemetry?.processing_fps) ? Number(presentedSample?.processing_fps ?? completedTelemetry.processing_fps).toFixed(2) : 'NOT RECORDED FOR THIS COMPLETED RUN')
                   : (cardFps == null ? 'N/A' : cardFps.toFixed(2))}</span>
-                <span><b>SOURCE FPS</b>{completedRun ? (sourceFpsForTelemetry(completedTelemetry) == null ? 'NOT RECORDED FOR THIS COMPLETED RUN' : sourceFpsForTelemetry(completedTelemetry).toFixed(2)) : (sourceFps == null ? 'N/A' : sourceFps.toFixed(2))}</span>
-                <span><b>PERSONS</b>{completedRun ? (completedTelemetry?.person_count ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : (telemetryAvailable ? (telemetry.person_count ?? 'NOT REPORTED FOR THIS RUN') : 'N/A')}</span>
-                <span><b>VEHICLES</b>{completedRun ? (completedTelemetry?.vehicle_count ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : (telemetryAvailable ? (telemetry.vehicle_count ?? 'NOT REPORTED FOR THIS RUN') : 'N/A')}</span>
-                <span><b>TRACKS</b>{completedRun ? (completedTelemetry?.track_count ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : (telemetryAvailable ? (telemetry.track_count ?? 'NOT REPORTED FOR THIS RUN') : 'N/A')}</span>
+                <span><b>SOURCE FPS</b>{completedRun ? (sourceFpsForTelemetry(presentedSample || completedTelemetry) == null ? 'NOT RECORDED FOR THIS COMPLETED RUN' : sourceFpsForTelemetry(presentedSample || completedTelemetry).toFixed(2)) : (sourceFps == null ? 'N/A' : sourceFps.toFixed(2))}</span>
+                <span><b>PERSONS</b>{presentedSample ? (presentedSample.person_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? (completedTelemetry?.person_count ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : 'N/A'}</span>
+                <span><b>VEHICLES</b>{presentedSample ? (presentedSample.vehicle_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? (completedTelemetry?.vehicle_count ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : 'N/A'}</span>
+                <span><b>TRACKS</b>{presentedSample ? (presentedSample.track_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? (completedTelemetry?.track_count ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : 'N/A'}</span>
+                <span><b>FRAME</b>{presentedSample?.frame_index ?? (completedRun ? completedTelemetry?.final_frame_index ?? completedTelemetry?.frame_index ?? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A')}</span>
+                <span><b>SOURCE TIME</b>{Number.isFinite(Number(presentedSample?.video_time)) ? `${Number(presentedSample.video_time).toFixed(2)}s` : completedRun && Number.isFinite(Number(completedTelemetry?.final_video_time ?? completedTelemetry?.video_time)) ? `${Number(completedTelemetry.final_video_time ?? completedTelemetry.video_time).toFixed(2)}s` : 'N/A'}</span>
                 <span><b>LAST UPDATE</b>{runSummaryLoading[cameraId] ? 'LOADING RUN HISTORY...' : updateAge == null ? (completedRun ? 'NOT RECORDED FOR THIS HISTORICAL RUN' : 'Never') : liveStatus === 'COMPLETED' ? `COMPLETED ${formatTelemetryAge(updateAge)}` : liveStatus === 'OFFLINE' ? 'OFFLINE' : liveStatus === 'STALE' ? `STALE · ${formatTelemetryAge(updateAge)}` : formatTelemetryAge(updateAge)}</span>
                 <span><b>LATEST EVENT</b>{formatLatestEvent(latestCameraEvent, now)}</span>
               </div>

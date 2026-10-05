@@ -23,6 +23,7 @@ import { CameraOff, CloudFog, AlertTriangle, Upload, Play, Activity } from 'luci
 import { authFetch } from '../services/auth';
 import { frameResponseMatchesTelemetry } from '../utils/dashboardScope';
 import { formatTelemetryAge } from '../utils/systemTruth';
+import { analyzedSampleIsNewer, analyzedSampleMatchesScope, containedMediaRect } from '../utils/analyzedPlayback';
 
 // ─── Threat-aware colour palette ────────────────────────────────────────────
 //
@@ -235,6 +236,7 @@ export default function VideoFeed({
   expectedGeneration = null,
   sourceRunState,
   sourceRestoring = false,
+  onAnalyzedSample,
 }) {
   const containerRef = useRef(null);
   const videoRef = useRef(null);
@@ -251,7 +253,10 @@ export default function VideoFeed({
   const [hudVisible, setHudVisible] = useState(false);
   const [videoError, setVideoError] = useState(false);
   const [analyzedFrameUrl, setAnalyzedFrameUrl] = useState(null);
-  const [analyzedFrameStatus, setAnalyzedFrameStatus] = useState('WAITING FOR NEXT ANALYZED FRAME');
+  const [analyzedFrameStatus, setAnalyzedFrameStatus] = useState('WAITING FOR FIRST ANALYZED FRAME');
+  const [displayedSample, setDisplayedSample] = useState(null);
+  const displayedSampleRef = useRef(null);
+  const onAnalyzedSampleRef = useRef(onAnalyzedSample);
   const promotedRunRef = useRef(null);
   const manualSourceRunRef = useRef(null);
   const currentRunRef = useRef(null);
@@ -269,12 +274,16 @@ export default function VideoFeed({
     && ['LIVE', 'STALE', 'COMPLETED'].includes(telemetryStatus)
   );
 
+  useEffect(() => { onAnalyzedSampleRef.current = onAnalyzedSample; }, [onAnalyzedSample]);
+
   const sourceSessionId = liveTracksData?.stream_id || null;
   const analysisSessionId = liveTracksData?.analysis_session_id || null;
   const telemetryGeneration = liveTracksData?.analysis_generation;
-  const scopeMatches = (!liveTracksData?.camera_id || liveTracksData.camera_id === cameraId)
-    && (!expectedSessionId || !sourceSessionId || sourceSessionId === expectedSessionId)
-    && (expectedGeneration == null || telemetryGeneration == null || Number(telemetryGeneration) === Number(expectedGeneration));
+  const scopeMatches = analyzedSampleMatchesScope(liveTracksData, {
+    cameraId,
+    streamId: expectedSessionId || sourceSessionId,
+    analysisGeneration: expectedGeneration,
+  });
   const runIdentity = scopeMatches && cameraId && analysisSessionId && Number.isFinite(liveTracksData?.frame_index)
     ? `${cameraId}:${sourceSessionId || expectedSessionId || 'source'}:${analysisSessionId}:${telemetryGeneration ?? expectedGeneration ?? 'generation'}`
     : null;
@@ -284,12 +293,18 @@ export default function VideoFeed({
     manualSourceRunRef.current = null;
     currentRunRef.current = null;
     setHudVisible(false);
+    displayedSampleRef.current = null;
+    setDisplayedSample(null);
+    onAnalyzedSampleRef.current?.(null);
   }, [cameraId, sourceMode, expectedSessionId]);
 
   useEffect(() => {
     if (!runIdentity || currentRunRef.current === runIdentity) return;
     currentRunRef.current = runIdentity;
     setHudVisible(false);
+    displayedSampleRef.current = null;
+    setDisplayedSample(null);
+    onAnalyzedSampleRef.current?.(null);
   }, [runIdentity]);
 
   // Lightweight render-tick to re-evaluate live tracks freshness
@@ -316,8 +331,10 @@ export default function VideoFeed({
     const params = new URLSearchParams({
       analysis_session_id: analysisSessionId,
       frame_index: String(frameIndex),
-      hud: requestHudFrame ? 'true' : 'false',
-      cache_bust: `${analysisSessionId}:${frameIndex}:${requestHudFrame ? 1 : 0}`,
+      // The browser draws the HUD from the exact committed telemetry object.
+      // Request the clean paired frame so boxes are never drawn twice.
+      hud: 'false',
+      cache_bust: `${analysisSessionId}:${frameIndex}:clean`,
     });
     authFetch(`/system/telemetry/frame/${encodeURIComponent(cameraId)}?${params.toString()}`)
       .then((response) => response.ok && frameResponseMatchesTelemetry(liveTracksData, response.headers) ? response.blob() : null)
@@ -325,17 +342,38 @@ export default function VideoFeed({
         if (!blob || cancelled) return;
         nextUrl = URL.createObjectURL(blob);
         // Do not replace a valid FrameSnapshot until this exact response is
-        // decodable. A failed candidate keeps the prior image and its baked
-        // boxes/counts together instead of rendering a broken image.
+        // decodable. A failed candidate keeps the prior image and its paired
+        // telemetry together instead of rendering a broken image.
         const candidate = new Image();
         candidate.onload = () => {
           if (cancelled) return;
+          if (!analyzedSampleIsNewer(displayedSampleRef.current, liveTracksData)) {
+            URL.revokeObjectURL(nextUrl);
+            nextUrl = null;
+            return;
+          }
           setAnalyzedFrameUrl((previous) => {
             if (previous) URL.revokeObjectURL(previous);
             return nextUrl;
           });
+          displayedSampleRef.current = liveTracksData;
+          setDisplayedSample(liveTracksData);
+          const shouldPresentHud = runIdentity && manualSourceRunRef.current !== runIdentity;
+          onAnalyzedSampleRef.current?.(shouldPresentHud ? liveTracksData : null);
+          console.info('[VideoFeed] ANALYZED SAMPLE DISPLAYED', {
+            camera_id: liveTracksData.camera_id,
+            stream_prefix: String(liveTracksData.stream_id || '').slice(0, 8),
+            run_prefix: String(liveTracksData.analysis_session_id || '').slice(0, 8),
+            analysis_generation: liveTracksData.analysis_generation ?? null,
+            sequence: liveTracksData.sequence ?? null,
+            frame_index: liveTracksData.frame_index,
+            video_time: liveTracksData.video_time ?? null,
+            processing_fps: liveTracksData.processing_fps ?? null,
+            source_fps: liveTracksData.source_fps ?? liveTracksData.fps_declared ?? null,
+            track_count: liveTracksData.track_count ?? null,
+          });
           committed = true;
-          setAnalyzedFrameStatus('LATEST ANALYZED FRAME');
+          setAnalyzedFrameStatus('ANALYZED LIVE STREAM');
           if (
             runIdentity
             && promotedRunRef.current !== runIdentity
@@ -441,32 +479,14 @@ export default function VideoFeed({
     const ch = cr.height;
     // Prefer the authoritative browser media dimensions (what object-fit uses).
     // Fallback to telemetry dimensions only before the first frame loads.
-    const vw = media.naturalWidth || media.videoWidth || liveTracksData?.frame_width || 1280;
-    const vh = media.naturalHeight || media.videoHeight || liveTracksData?.frame_height || 720;
+    const vw = media.naturalWidth || media.videoWidth || displayedSample?.frame_width || liveTracksData?.frame_width || 1280;
+    const vh = media.naturalHeight || media.videoHeight || displayedSample?.frame_height || liveTracksData?.frame_height || 720;
 
     if (vw === 0 || vh === 0) return;
 
-    const containerRatio = cw / ch;
-    const videoRatio = vw / vh;
-
-    let renderedW, renderedH, left, top;
-
-    if (containerRatio > videoRatio) {
-      // Container wider than frame → pillarbox
-      renderedH = ch;
-      renderedW = ch * videoRatio;
-      left = (cw - renderedW) / 2;
-      top = 0;
-    } else {
-      // Container taller than frame → letterbox
-      renderedW = cw;
-      renderedH = cw / videoRatio;
-      left = 0;
-      top = (ch - renderedH) / 2;
-    }
-
-    setVideoRect({ left, top, width: renderedW, height: renderedH, cw, ch, vw, vh });
-  }, [liveTracksData?.frame_width, liveTracksData?.frame_height, showAnalyzedFrame]);
+    const rect = containedMediaRect(cw, ch, vw, vh);
+    setVideoRect({ ...rect, cw, ch, vw, vh });
+  }, [displayedSample?.frame_width, displayedSample?.frame_height, liveTracksData?.frame_width, liveTracksData?.frame_height, showAnalyzedFrame]);
 
   useEffect(() => {
     setVideoError(false);
@@ -477,7 +497,7 @@ export default function VideoFeed({
   }, [updateRect, mediaUrl]);
 
   const activeTracks = useMemo(() => {
-    if (showAnalyzedFrame && liveTracksData?.tracks) return liveTracksData.tracks;
+    if (showAnalyzedFrame && displayedSample?.tracks) return displayedSample.tracks;
     // For demo cache, prioritize rVFC exact mediaTime over the generic video.currentTime.
     // ADD +1 FRAME (1.0 / 30.0) LOOKAHEAD to compensate for the 1-frame DOM repaint delay, 
     // ensuring the SVG paints on screen exactly in sync with the video frame.
@@ -505,9 +525,9 @@ export default function VideoFeed({
     }
 
     // Never project asynchronous telemetry over an independently advancing
-    // browser clock. Production boxes are burned into the exact analyzed JPEG.
+    // browser clock. Production boxes are paired with one exact analyzed JPEG.
     return [];
-  }, [liveTracksData, demoCache, tick, mediaUrl, showAnalyzedFrame]);
+  }, [displayedSample, demoCache, tick, mediaUrl, showAnalyzedFrame]);
 
   /**
    * FIX A: Continuous Browser Playback-Time Sync
@@ -598,7 +618,8 @@ export default function VideoFeed({
     );
   }
 
-  const processedAtRaw = Number(liveTracksData?.processed_timestamp);
+  const presentationSample = showAnalyzedFrame ? displayedSample : liveTracksData;
+  const processedAtRaw = Number(presentationSample?.processed_timestamp);
   const processedAtMs = Number.isFinite(processedAtRaw)
     ? (processedAtRaw > 1e12 ? processedAtRaw : processedAtRaw * 1000)
     : null;
@@ -616,13 +637,13 @@ export default function VideoFeed({
         boxShadow: 'inset 0 0 50px rgba(0,0,0,0.8)',
       }}
     >
-      {/* Durable cloud sources always show the annotated JPEG paired with the
-          current telemetry sample. The video element is explicitly a source
-          preview while the worker is waking or no analyzed frame exists. */}
+      {/* Durable cloud analysis is an ordered stream of exact clean frames.
+          SVG boxes and card metrics use only the telemetry object committed
+          with the currently decoded frame. */}
       {showAnalyzedFrame ? <img
         ref={previewRef}
         src={analyzedFrameUrl}
-        alt={`Annotated analyzed frame for ${cameraId}`}
+        alt={`Synchronized analyzed video frame for ${cameraId}`}
         onLoad={updateRect}
         style={{
           position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 0,
@@ -707,8 +728,8 @@ export default function VideoFeed({
               return { x: track.bbox_x, y: track.bbox_y, w: track.bbox_w, h: track.bbox_h };
             }
             if (track.bbox && track.bbox.x1 != null && track.bbox.y1 != null && track.bbox.x2 != null && track.bbox.y2 != null) {
-              const fw = liveTracksData?.frame_width || 960;
-              const fh = liveTracksData?.frame_height || 720;
+              const fw = displayedSample?.frame_width || 960;
+              const fh = displayedSample?.frame_height || 720;
               return {
                 x: track.bbox.x1 / fw,
                 y: track.bbox.y1 / fh,
@@ -731,9 +752,10 @@ export default function VideoFeed({
           );
 
           // Build the label: show subject name if a WL match is known
+          const objectLabel = String(ev.class_name || ev.detection_class || 'object').toUpperCase();
           const trackLabel = ev.identity_match && ev.subject_name
             ? `${ev.subject_name} [WL]`
-            : `TRACK #${ev.track_id ?? '?'}`;
+            : `${objectLabel} · TRACK #${ev.track_id ?? '?'}`;
 
           // Map normalised [0..1] coords → container pixel coords
           const x = videoRect.left + norm.x * videoRect.width;
@@ -749,7 +771,15 @@ export default function VideoFeed({
           const labelH = labelFontSize + labelPadV * 2;
 
           return (
-            <g key={ev.track_id} data-track-id={ev.track_id ?? 'unknown'} data-track-class={ev.class_name || ev.class || 'unknown'}>
+            <g
+              key={ev.track_id}
+              data-track-id={ev.track_id ?? 'unknown'}
+              data-track-class={ev.class_name || ev.class || 'unknown'}
+              data-bbox-x={norm.x}
+              data-bbox-y={norm.y}
+              data-bbox-w={norm.w}
+              data-bbox-h={norm.h}
+            >
               {/* Main bounding rectangle */}
               <rect
                 x={x} y={y} width={w} height={h}
@@ -844,7 +874,7 @@ export default function VideoFeed({
           fontFamily: 'ui-monospace, monospace', fontSize: '0.55rem', letterSpacing: '0.07em',
           pointerEvents: 'none',
         }}>
-          {analyzedFrameStatus} · FRAME {liveTracksData?.frame_index ?? '—'} · PROCESSED {processedAgeSeconds == null ? 'RECENTLY' : formatTelemetryAge(processedAgeSeconds * 1000).toUpperCase()} · EXACT TELEMETRY SAMPLE
+          {analyzedFrameStatus} · FRAME {displayedSample?.frame_index ?? '—'} · SOURCE {Number.isFinite(displayedSample?.video_time) ? `${displayedSample.video_time.toFixed(2)}s` : '—'} · PROCESSED {processedAgeSeconds == null ? 'RECENTLY' : formatTelemetryAge(processedAgeSeconds * 1000).toUpperCase()} · EXACT TELEMETRY SAMPLE
         </div>
       )}
       {!showAnalyzedFrame && mediaUrl && isDurableSource && (
@@ -870,6 +900,7 @@ export default function VideoFeed({
           setHudVisible((visible) => {
             const nextVisible = !visible;
             if (!nextVisible && runIdentity) manualSourceRunRef.current = runIdentity;
+            onAnalyzedSampleRef.current?.(nextVisible ? displayedSampleRef.current : null);
             return nextVisible;
           });
         }}
@@ -898,7 +929,7 @@ export default function VideoFeed({
       <DebugHud
         visible={hudVisible}
         videoRect={videoRect}
-        liveTracksData={liveTracksData}
+        liveTracksData={showAnalyzedFrame ? displayedSample : liveTracksData}
         videoRef={videoRef}
         analyzedFrame={showAnalyzedFrame}
       />

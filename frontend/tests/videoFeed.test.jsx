@@ -30,6 +30,7 @@ describe('per-camera authoritative analyzed frame', () => {
       expectedSessionId="session-1"
       telemetryStatus="LIVE"
       liveTracksData={{
+        camera_id: 'cam-border-01',
         stream_id: 'session-1',
         analysis_session_id: 'session-1', frame_index: 42, preview_available: true,
         person_count: 1, vehicle_count: 1, track_count: 2, tracks: [],
@@ -38,10 +39,10 @@ describe('per-camera authoritative analyzed frame', () => {
     />);
 
     await waitFor(() => expect(authFetch).toHaveBeenCalled());
-    expect(authFetch.mock.calls[0][0]).toContain('hud=true');
+    expect(authFetch.mock.calls[0][0]).toContain('hud=false');
     await waitFor(() => expect(screen.getByTitle('Show source preview')).toHaveAttribute('aria-pressed', 'true'));
-    await waitFor(() => expect(screen.getByAltText('Annotated analyzed frame for cam-border-01')).toBeInTheDocument());
-    expect(screen.getByText(/LATEST ANALYZED FRAME · FRAME 42/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByAltText('Synchronized analyzed video frame for cam-border-01')).toBeInTheDocument());
+    expect(screen.getByText(/ANALYZED LIVE STREAM · FRAME 42/)).toBeInTheDocument();
     screen.getByTitle('Show source preview').click();
     await waitFor(() => expect(screen.getByText(/SOURCE PREVIEW · AI SAMPLE AVAILABLE · FRAME 42/)).toBeInTheDocument());
     expect(authFetch.mock.calls.every(([url]) => !url.includes('demo-telemetry'))).toBe(true);
@@ -248,6 +249,45 @@ describe('per-camera authoritative analyzed frame', () => {
     expect(screen.getByText((content) => content.includes('PERSONS 1') && content.includes('VEHICLES 1') && content.includes('TRACKS 2'))).toBeInTheDocument();
   });
 
+  it('moves a box only when the next exact authoritative frame commits', async () => {
+    const onAnalyzedSample = vi.fn();
+    authFetch.mockImplementation(async (url) => {
+      const params = new URL(url, 'https://example.test').searchParams;
+      return {
+        ok: true,
+        headers: new Headers({
+          'X-Analysis-Session': params.get('analysis_session_id'),
+          'X-Frame-Index': params.get('frame_index'),
+          'X-Person-Count': '1', 'X-Vehicle-Count': '0', 'X-Track-Count': '1',
+        }),
+        blob: async () => new Blob(['jpeg']),
+      };
+    });
+    const frame = (frameIndex, bboxX) => ({
+      camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'run-1',
+      analysis_generation: 1, sequence: frameIndex, frame_index: frameIndex,
+      video_time: frameIndex / 24, preview_available: true,
+      person_count: 1, vehicle_count: 0, track_count: 1,
+      tracks: [{ track_id: 7, class_name: 'person', bbox_x: bboxX, bbox_y: 0.1, bbox_w: 0.2, bbox_h: 0.4 }],
+      frame_width: 960, frame_height: 540,
+    });
+    const { container, rerender } = render(<VideoFeed
+      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
+      expectedSessionId="source-1" expectedGeneration={1} telemetryStatus="LIVE"
+      liveTracksData={frame(10, 0.1)} onAnalyzedSample={onAnalyzedSample}
+    />);
+    await waitFor(() => expect(container.querySelector('[data-track-id="7"]')).toHaveAttribute('data-bbox-x', '0.1'));
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 10 })));
+
+    rerender(<VideoFeed
+      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
+      expectedSessionId="source-1" expectedGeneration={1} telemetryStatus="LIVE"
+      liveTracksData={frame(11, 0.35)} onAnalyzedSample={onAnalyzedSample}
+    />);
+    await waitFor(() => expect(container.querySelector('[data-track-id="7"]')).toHaveAttribute('data-bbox-x', '0.35'));
+    expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 11, video_time: 11 / 24 }));
+  });
+
   it('keeps the final exact analyzed result selected at completion', async () => {
     const telemetry = {
       camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'session-1',
@@ -265,7 +305,7 @@ describe('per-camera authoritative analyzed frame', () => {
       telemetryStatus="COMPLETED" liveTracksData={telemetry}
     />);
     expect(screen.getByTitle('Show source preview')).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByAltText('Annotated analyzed frame for cam-checkpoint-01')).toBeInTheDocument();
+    expect(screen.getByAltText('Synchronized analyzed video frame for cam-checkpoint-01')).toBeInTheDocument();
   });
 
   it('uses the active label only for live telemetry', () => {
