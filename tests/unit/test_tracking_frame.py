@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 
-from backend.api.system import _latest_tracking_sequence, post_tracking_frame
+from backend.api.system import _latest_tracking_sequence, _tracking_timelines, post_tracking_frame
 from shared.schemas import TrackingFramePayload
 
 
@@ -58,22 +58,28 @@ def test_tracking_frame_rejects_a_different_authenticated_edge_identity():
     assert exc_info.value.status_code == 403
 
 
-def test_tracking_frame_ignores_out_of_order_packet_from_same_run():
+def test_tracking_frame_keeps_out_of_order_packet_for_replay_without_rebroadcast():
     newest = _payload().model_copy(update={"sequence": 9, "frame_index": 27})
     delayed = _payload().model_copy(update={"sequence": 8, "frame_index": 24})
     _latest_tracking_sequence.clear()
 
-    with patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock) as broadcast:
-        accepted = asyncio.run(post_tracking_frame(
-            newest, SimpleNamespace(edge_id="cam-checkpoint-01")
-        ))
-        ignored = asyncio.run(post_tracking_frame(
-            delayed, SimpleNamespace(edge_id="cam-checkpoint-01")
-        ))
+    identity = ("cam-checkpoint-01", "source-1", "run-1", 2)
+    _tracking_timelines.pop(identity, None)
+    try:
+        with patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock) as broadcast:
+            accepted = asyncio.run(post_tracking_frame(
+                newest, SimpleNamespace(edge_id="cam-checkpoint-01")
+            ))
+            delayed_result = asyncio.run(post_tracking_frame(
+                delayed, SimpleNamespace(edge_id="cam-checkpoint-01")
+            ))
 
-    assert accepted == {"status": "ok"}
-    assert ignored == {"status": "stale_ignored"}
-    broadcast.assert_awaited_once()
+        assert accepted == {"status": "ok"}
+        assert delayed_result == {"status": "accepted_for_replay", "live_broadcast": False}
+        assert {item["frame_index"] for item in _tracking_timelines[identity]} == {24, 27}
+        broadcast.assert_awaited_once()
+    finally:
+        _tracking_timelines.pop(identity, None)
 
 
 def test_tracking_frame_accepts_sequence_reset_for_new_run():

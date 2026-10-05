@@ -13,6 +13,7 @@ import { analysisSessionIdForSource, deriveDashboardMode, eventsForCameraRun, fi
 import { updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
 import { analysisLifecyclePresentation, applyReplayResult, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
+import { replayTimelineAssessment } from '../utils/trackingTimeline';
 
 // Reads structured scores from the event instead of string-parsing the reason.
 function parseDecisionReason(ev) {
@@ -1127,7 +1128,7 @@ export default function Dashboard() {
         <div><span>AI FPS</span><strong>{activeProcessingFps == null ? 'N/A' : activeProcessingFps.toFixed(2)}</strong></div>
         <div><span>LIVE TRACKS</span><strong>{telemetryStatus === 'LIVE' ? (scopedLiveTracks[activeCameraId]?.track_count ?? 'NOT REPORTED') : 'N/A'}</strong></div>
         <div><span>FRAME</span><strong>{telemetryStatus === 'LIVE' && scopedLiveTracks[activeCameraId]?.frame_width != null && scopedLiveTracks[activeCameraId]?.frame_height != null ? `${scopedLiveTracks[activeCameraId].frame_width}×${scopedLiveTracks[activeCameraId].frame_height}` : 'N/A'}</strong></div>
-        <div><span>LAST TELEMETRY</span><strong>{activeSourceState?.restoring || runSummaryLoading[activeCameraId] ? 'LOADING RUN HISTORY...' : telemetryAgeMs == null ? (telemetryStatus === 'PAUSED' ? 'N/A · PAUSED' : telemetryStatus === 'WAKING' ? 'WAITING FOR FIRST CURRENT-RUN TELEMETRY' : 'Never') : formatTelemetryAge(telemetryAgeMs)}</strong></div>
+        <div><span>LAST TELEMETRY</span><strong>{activeSourceState?.restoring || runSummaryLoading[activeCameraId] ? 'LOADING RUN HISTORY...' : telemetryStatus === 'COMPLETED' ? 'RUN COMPLETED · HISTORICAL TELEMETRY' : telemetryAgeMs == null ? (telemetryStatus === 'PAUSED' ? 'N/A · PAUSED' : telemetryStatus === 'WAKING' ? 'WAITING FOR FIRST CURRENT-RUN TELEMETRY' : 'Never') : formatTelemetryAge(telemetryAgeMs)}</strong></div>
       </div>
 
       <section className={`dashboard-camera-grid camera-mode-${dashboardMode.toLowerCase()}`} aria-label="Camera source slots">
@@ -1145,6 +1146,10 @@ export default function Dashboard() {
           const faceStatus = latestFaceEvent?.face_match_status || (latestFaceEvent?.face_match_person_id ? 'KNOWN' : latestFaceEvent ? 'UNKNOWN' : null);
           const faceLabel = latestFaceEvent?.watchlist_label || latestFaceEvent?.face_match_person_name || null;
           const completedSummary = runSummaries[cameraId] || null;
+          const replayAssessment = replayTimelineAssessment(
+            completedSummary?.tracking_timeline_json || [],
+            completedSummary || {},
+          );
           const lightingState = latestCameraEvent?.lighting_state || telemetry?.lighting_state || completedSummary?.lighting_state || 'AWAITING CURRENT-RUN SAMPLE';
           const sceneState = latestCameraEvent?.scene_condition || telemetry?.scene_condition || completedSummary?.scene_condition || 'AWAITING CURRENT-RUN SAMPLE';
           const analyticsMethod = latestCameraEvent?.detection_method || telemetry?.detection_method || completedSummary?.detection_method || 'AWAITING CURRENT-RUN SAMPLE';
@@ -1185,7 +1190,12 @@ export default function Dashboard() {
           // a timeline sample selected near source time 0 for replay. The
           // completed run summary is the durable authority for final metrics
           // and must win for the card's final-frame fields.
-          const metricsSample = completedRun ? completedTelemetry : presentedSample;
+          const replayMetricsSample = completedRun
+            && replayAssessment.ready
+            && presentedSample?.analysis_session_id === completedSummary?.analysis_session_id
+            ? presentedSample
+            : null;
+          const metricsSample = completedRun ? (replayMetricsSample || completedTelemetry) : presentedSample;
           const updateTimestamp = completedRun
             ? presentedSample?.processed_timestamp || completedSummary?.completed_at || completedSummary?.last_telemetry_at
             : presentedSample?.processed_timestamp || null;
@@ -1257,6 +1267,8 @@ export default function Dashboard() {
                     expectedGeneration={sourceState?.analysisGeneration ?? null}
                     expectedSourceGeneration={sourceState?.sourceGeneration ?? null}
                     completedTimeline={completedSummary?.tracking_timeline_json || []}
+                    completedSummary={completedSummary}
+                    completedSummaryLoading={Boolean(runSummaryLoading[cameraId])}
                     sourceRunState={displayRunState}
                     sourceRestoring={Boolean(sourceState?.restoring)}
                     onAnalyzedSample={(sample) => setPresentedTelemetry(current => {
@@ -1282,7 +1294,7 @@ export default function Dashboard() {
                 <span className="ai-context">NODE {operational.node}</span>
                 <span className="ai-context">SOURCE {operational.source}</span>
                 <span className="ai-context">ANALYSIS {operational.analysis}</span>
-                <span className="ai-context">TELEMETRY {operational.telemetry}</span>
+                <span className="ai-context">TELEMETRY {completedRun ? 'HISTORICAL' : operational.telemetry}</span>
                 <span className="ai-context">ANPR {capabilityLabel(capabilities?.anpr_localization, 'LOCALIZATION AVAILABLE')}</span>
                 <span className="ai-context">OCR {capabilityLabel(capabilities?.anpr_ocr, 'AVAILABLE', 'UNAVAILABLE')}</span>
               </div>
@@ -1296,13 +1308,13 @@ export default function Dashboard() {
               </div>
               <div className="dashboard-camera-telemetry">
                 <span><b>DETECTOR FPS</b>{Number.isFinite(Number(metricsSample?.detector_fps)) ? Number(metricsSample.detector_fps).toFixed(2) : 'N/A'}</span>
-                <span><b>HUD / TRACKING FPS</b>{Number.isFinite(Number(metricsSample?.hud_fps)) ? Number(metricsSample.hud_fps).toFixed(2) : (completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : (cardFps == null ? 'N/A' : cardFps.toFixed(2)))}</span>
+                <span><b>{completedRun ? 'REPLAY HUD SAMPLE FPS' : 'LIVE HUD / TRACKING FPS'}</b>{completedRun ? (replayAssessment.cadenceHz == null ? 'UNAVAILABLE' : replayAssessment.cadenceHz.toFixed(2)) : (Number.isFinite(Number(metricsSample?.hud_fps)) ? Number(metricsSample.hud_fps).toFixed(2) : (cardFps == null ? 'N/A' : cardFps.toFixed(2)))}</span>
                 <span><b>SOURCE FPS</b>{completedRun ? (sourceFpsForTelemetry(metricsSample) == null ? 'NOT RECORDED FOR THIS COMPLETED RUN' : sourceFpsForTelemetry(metricsSample).toFixed(2)) : (sourceFps == null ? 'N/A' : sourceFps.toFixed(2))}</span>
-                <span><b>{completedRun ? 'FINAL FRAME PERSONS' : 'PERSONS'}</b>{metricsSample ? (metricsSample.person_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A'}</span>
-                <span><b>{completedRun ? 'FINAL FRAME VEHICLES' : 'VEHICLES'}</b>{metricsSample ? (metricsSample.vehicle_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A'}</span>
-                <span><b>{completedRun ? 'FINAL FRAME TRACKS' : 'TRACKS'}</b>{metricsSample ? (metricsSample.track_count ?? 'NOT REPORTED FOR THIS COMPLETED RUN') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A'}</span>
-                <span><b>FRAME</b>{completedRun ? (metricsSample?.final_frame_index ?? metricsSample?.frame_index ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : (metricsSample?.frame_index ?? 'N/A')}</span>
-                <span><b>SOURCE TIME</b>{Number.isFinite(Number(metricsSample?.final_video_time ?? metricsSample?.video_time)) ? `${Number(metricsSample.final_video_time ?? metricsSample.video_time).toFixed(2)}s` : 'N/A'}</span>
+                <span><b>{completedRun ? (replayMetricsSample ? 'REPLAY PERSONS' : 'FINAL FRAME PERSONS') : 'PERSONS'}</b>{metricsSample ? (metricsSample.person_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A'}</span>
+                <span><b>{completedRun ? (replayMetricsSample ? 'REPLAY VEHICLES' : 'FINAL FRAME VEHICLES') : 'VEHICLES'}</b>{metricsSample ? (metricsSample.vehicle_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A'}</span>
+                <span><b>{completedRun ? (replayMetricsSample ? 'REPLAY TRACKS' : 'FINAL FRAME TRACKS') : 'TRACKS'}</b>{metricsSample ? (metricsSample.track_count ?? 'NOT REPORTED FOR THIS COMPLETED RUN') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A'}</span>
+                <span><b>{replayMetricsSample ? 'REPLAY FRAME' : 'FRAME'}</b>{completedRun ? (metricsSample?.final_frame_index ?? metricsSample?.frame_index ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : (metricsSample?.frame_index ?? 'N/A')}</span>
+                <span><b>{replayMetricsSample ? 'REPLAY SOURCE TIME' : 'SOURCE TIME'}</b>{Number.isFinite(Number(metricsSample?.final_video_time ?? metricsSample?.video_time)) ? `${Number(metricsSample.final_video_time ?? metricsSample.video_time).toFixed(2)}s` : 'N/A'}</span>
                 <span><b>LAST UPDATE</b>{runSummaryLoading[cameraId] ? 'LOADING RUN HISTORY...' : updateAge == null ? (completedRun ? 'NOT RECORDED FOR THIS HISTORICAL RUN' : 'Never') : liveStatus === 'COMPLETED' ? `COMPLETED ${formatTelemetryAge(updateAge)}` : liveStatus === 'OFFLINE' ? 'OFFLINE' : liveStatus === 'STALE' ? `STALE · ${formatTelemetryAge(updateAge)}` : formatTelemetryAge(updateAge)}</span>
                 <span><b>LATEST EVENT</b>{formatLatestEvent(latestCameraEvent, now)}</span>
               </div>
@@ -1394,6 +1406,8 @@ export default function Dashboard() {
               expectedGeneration={slotSources[activeCameraId]?.analysisGeneration ?? null}
               expectedSourceGeneration={slotSources[activeCameraId]?.sourceGeneration ?? null}
               completedTimeline={runSummaries[activeCameraId]?.tracking_timeline_json || []}
+              completedSummary={runSummaries[activeCameraId] || null}
+              completedSummaryLoading={Boolean(runSummaryLoading[activeCameraId])}
               sourceRunState={slotSources[activeCameraId]?.runState || null}
               onVideoEnded={() => updateCameraMedia(activeCameraId, { playbackEnded: true })}
             />

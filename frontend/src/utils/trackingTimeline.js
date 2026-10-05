@@ -1,5 +1,6 @@
 export const TRACKING_TIMELINE_LIMIT = 180;
 export const TRACKING_SAMPLE_TOLERANCE_SECONDS = 0.16;
+export const REPLAY_COVERAGE_TOLERANCE_SECONDS = 0.5;
 
 export function trackingSampleMatchesScope(sample, scope) {
   if (!sample || !scope?.cameraId || sample.camera_id !== scope.cameraId) return false;
@@ -48,4 +49,44 @@ export function trackingIntervalsMs(timeline) {
   return timeline.slice(1).map((sample, index) => (
     (Number(sample.video_time) - Number(timeline[index].video_time)) * 1000
   )).filter(value => Number.isFinite(value) && value >= 0);
+}
+
+export function replayTimelineAssessment(timeline, summary = {}) {
+  if (!Array.isArray(timeline) || timeline.length === 0) {
+    return { ready: false, reason: 'empty', sampleCount: 0, cadenceHz: null };
+  }
+  const expected = {
+    cameraId: summary.camera_id,
+    streamId: summary.stream_id,
+    analysisSessionId: summary.analysis_session_id,
+    analysisGeneration: summary.analysis_generation,
+    sourceGeneration: summary.source_generation,
+  };
+  const accepted = timeline
+    .filter(sample => trackingSampleMatchesScope(sample, expected))
+    .sort((left, right) => Number(left.video_time) - Number(right.video_time));
+  if (accepted.length !== timeline.length || accepted.length === 0) {
+    return { ready: false, reason: 'identity_mismatch', sampleCount: accepted.length, cadenceHz: null };
+  }
+  const earliest = Number(accepted[0].video_time);
+  const latest = Number(accepted[accepted.length - 1].video_time);
+  const finalVideoTime = Number(summary.final_video_time);
+  const duration = latest - earliest;
+  const cadenceHz = accepted.length > 1 && duration > 0
+    ? (accepted.length - 1) / duration
+    : null;
+  if (Number.isFinite(finalVideoTime) && (
+    earliest > REPLAY_COVERAGE_TOLERANCE_SECONDS
+    || latest < finalVideoTime - REPLAY_COVERAGE_TOLERANCE_SECONDS
+  )) {
+    return {
+      ready: false, reason: 'incomplete_coverage', sampleCount: accepted.length,
+      earliest, latest, finalVideoTime, cadenceHz,
+    };
+  }
+  return {
+    ready: true, reason: null, sampleCount: accepted.length,
+    earliest, latest, finalVideoTime: Number.isFinite(finalVideoTime) ? finalVideoTime : null,
+    cadenceHz,
+  };
 }

@@ -26,6 +26,7 @@ import { formatTelemetryAge } from '../utils/systemTruth';
 import { analyzedSampleIsNewer, analyzedSampleMatchesScope, containedMediaRect } from '../utils/analyzedPlayback';
 import {
   appendTrackingSample,
+  replayTimelineAssessment,
   selectTrackingSample,
   TRACKING_SAMPLE_TOLERANCE_SECONDS,
 } from '../utils/trackingTimeline';
@@ -241,6 +242,8 @@ export default function VideoFeed({
   expectedGeneration = null,
   expectedSourceGeneration = null,
   completedTimeline = [],
+  completedSummary = null,
+  completedSummaryLoading = false,
   sourceRunState,
   sourceRestoring = false,
   onAnalyzedSample,
@@ -274,8 +277,13 @@ export default function VideoFeed({
   const currentRunRef = useRef(null);
   const isDurableSource = sourceMode === 'durable';
   const trackingCapable = isDurableSource && Boolean(mediaUrl);
-  const useLiveTimeline = trackingCapable && trackingModeActive;
-  const requestHudFrame = !useLiveTimeline && (isDurableSource || hudVisible);
+  const completedRun = String(sourceRunState || '').toUpperCase() === 'COMPLETED';
+  const replayAssessment = useMemo(
+    () => replayTimelineAssessment(completedTimeline, completedSummary || {}),
+    [completedTimeline, completedSummary],
+  );
+  const useTrackingTimeline = trackingCapable && trackingModeActive;
+  const requestHudFrame = !useTrackingTimeline && (isDurableSource || hudVisible);
   const hasStoredDurableSource = isDurableSource && Boolean(expectedSessionId);
   const uploadLabel = uploadStage === 'UPLOADING'
     ? `UPLOADING${Number.isFinite(uploadProgress) ? ` ${uploadProgress}%` : ''}`
@@ -285,9 +293,33 @@ export default function VideoFeed({
   const showAnalyzedFrame = Boolean(
     analyzedFrameUrl
     && hudVisible
-    && !useLiveTimeline
+    && !useTrackingTimeline
     && ['LIVE', 'STALE', 'COMPLETED'].includes(telemetryStatus)
   );
+
+  const viewState = !mediaUrl && !analyzedFrameUrl
+    ? 'NO_SOURCE'
+    : isUploading
+      ? 'UPLOADING'
+      : completedRun
+        ? completedSummaryLoading
+          ? 'COMPLETED_REPLAY_LOADING'
+          : replayAssessment.ready
+            ? 'COMPLETED_REPLAY_READY'
+            : 'COMPLETED_REPLAY_UNAVAILABLE'
+        : useTrackingTimeline && hudVisible
+          ? 'LIVE_HUD'
+          : telemetryStatus === 'LIVE' || ['ACTIVE', 'LIVE', 'RUNNING', 'WAKING', 'STARTING'].includes(String(sourceRunState || '').toUpperCase())
+            ? 'WAITING_FOR_FIRST_HUD_SAMPLE'
+            : 'SOURCE_PREVIEW';
+  const viewBadge = {
+    COMPLETED_REPLAY_LOADING: 'LOADING HUD',
+    COMPLETED_REPLAY_READY: 'ANALYZED REPLAY',
+    COMPLETED_REPLAY_UNAVAILABLE: 'HUD UNAVAILABLE',
+    LIVE_HUD: 'LIVE HUD',
+    WAITING_FOR_FIRST_HUD_SAMPLE: 'WAITING FOR HUD',
+    SOURCE_PREVIEW: 'SOURCE PREVIEW',
+  }[viewState] || null;
 
   useEffect(() => { onAnalyzedSampleRef.current = onAnalyzedSample; }, [onAnalyzedSample]);
 
@@ -315,11 +347,18 @@ export default function VideoFeed({
     displayedSampleRef.current = null;
     setDisplayedSample(null);
     onAnalyzedSampleRef.current?.(null);
-  }, [cameraId, sourceMode, expectedSessionId, expectedSourceGeneration]);
+  }, [cameraId, sourceMode, expectedSessionId, expectedGeneration, expectedSourceGeneration]);
 
   useEffect(() => {
-    if (String(sourceRunState || '').toUpperCase() !== 'COMPLETED') return;
-    if (!Array.isArray(completedTimeline) || completedTimeline.length === 0) return;
+    if (!completedRun || !replayAssessment.ready) {
+      if (completedRun && !completedSummaryLoading) {
+        trackingRunRef.current = null;
+        trackingTimelineRef.current = [];
+        setTrackingModeActive(false);
+        setHudVisible(false);
+      }
+      return;
+    }
     const first = completedTimeline[0];
     const scope = {
       cameraId,
@@ -337,7 +376,7 @@ export default function VideoFeed({
     trackingTimelineRef.current = restored;
     setTrackingModeActive(true);
     setHudVisible(true);
-  }, [cameraId, completedTimeline, expectedGeneration, expectedSessionId, expectedSourceGeneration, sourceRunState]);
+  }, [cameraId, completedRun, completedSummaryLoading, completedTimeline, expectedGeneration, expectedSessionId, expectedSourceGeneration, replayAssessment.ready]);
 
   useEffect(() => {
     if (!runIdentity || currentRunRef.current === runIdentity) return;
@@ -628,7 +667,7 @@ export default function VideoFeed({
   }, []);
 
   useEffect(() => {
-    if (!useLiveTimeline) return undefined;
+    if (!useTrackingTimeline) return undefined;
     const video = videoRef.current;
     if (!video) return undefined;
     let handle = null;
@@ -674,7 +713,7 @@ export default function VideoFeed({
       cancelAnimationFrame(handle);
       drawTrackingCanvas(null);
     };
-  }, [drawTrackingCanvas, mediaUrl, useLiveTimeline]);
+  }, [drawTrackingCanvas, mediaUrl, useTrackingTimeline]);
 
   useEffect(() => {
     setVideoError(false);
@@ -889,7 +928,7 @@ export default function VideoFeed({
         ref={canvasRef}
         aria-label="Current source-frame tracking overlay"
         style={{
-          display: useLiveTimeline && hudVisible ? 'block' : 'none',
+          display: useTrackingTimeline && hudVisible ? 'block' : 'none',
           position: 'absolute', inset: 0, width: '100%', height: '100%',
           zIndex: 10, pointerEvents: 'none',
         }}
@@ -1078,7 +1117,7 @@ export default function VideoFeed({
           {analyzedFrameStatus} · FRAME {displayedSample?.frame_index ?? '—'} · SOURCE {Number.isFinite(displayedSample?.video_time) ? `${displayedSample.video_time.toFixed(2)}s` : '—'} · PROCESSED {processedAgeSeconds == null ? 'RECENTLY' : formatTelemetryAge(processedAgeSeconds * 1000).toUpperCase()} · EXACT TELEMETRY SAMPLE
         </div>
       )}
-      {useLiveTimeline && hudVisible && (
+      {useTrackingTimeline && hudVisible && (
         <div style={{
           position: 'absolute', left: '0.45rem', bottom: '0.45rem', zIndex: 20,
           padding: '0.25rem 0.45rem', border: '1px solid rgba(74,222,128,0.55)',
@@ -1091,7 +1130,7 @@ export default function VideoFeed({
             : 'ANALYZED LIVE HUD · SOURCE PLAYBACK 1.0× · IMAGE-GROUNDED BOXES · STALE BOXES HIDDEN'}
         </div>
       )}
-      {!showAnalyzedFrame && !useLiveTimeline && mediaUrl && isDurableSource && (
+      {!showAnalyzedFrame && !useTrackingTimeline && mediaUrl && isDurableSource && (
         <div style={{
           position: 'absolute', left: '0.45rem', bottom: '0.45rem', zIndex: 20,
           padding: '0.25rem 0.45rem', border: '1px solid rgba(56,189,248,0.55)',
@@ -1101,10 +1140,12 @@ export default function VideoFeed({
         }}>
           {analyzedFrameUrl
             ? `SOURCE PREVIEW · AI SAMPLE AVAILABLE · FRAME ${liveTracksData?.frame_index ?? '—'} · SOURCE TIME ${Number.isFinite(liveTracksData?.video_time) ? `${liveTracksData.video_time.toFixed(2)}s` : '—'} · PROCESSED ${processedAgeSeconds == null ? 'RECENTLY' : formatTelemetryAge(processedAgeSeconds * 1000).toUpperCase()}`
-            : telemetryStatus === 'COMPLETED' || sourceRunState === 'COMPLETED'
-              ? (Array.isArray(completedTimeline) && completedTimeline.length
-                ? 'SOURCE PREVIEW · COMPLETED RUN · ANALYZED REPLAY AVAILABLE'
-                : 'SOURCE PREVIEW · COMPLETED RUN · ANALYZED TIMELINE UNAVAILABLE')
+            : completedRun
+              ? (completedSummaryLoading
+                ? 'SOURCE REPLAY · LOADING ANALYZED HUD'
+                : replayAssessment.ready
+                  ? 'SOURCE PREVIEW · COMPLETED RUN · ANALYZED REPLAY AVAILABLE'
+                  : 'SOURCE REPLAY · HUD NOT AVAILABLE FOR THIS HISTORICAL RUN')
               : 'SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME'}
         </div>
       )}
@@ -1121,24 +1162,25 @@ export default function VideoFeed({
           });
         }}
         disabled={!analyzedFrameUrl && !trackingTimelineRef.current.length}
-        title={(analyzedFrameUrl || trackingTimelineRef.current.length) ? (hudVisible ? 'Show source preview' : 'Show analyzed HUD') : 'Analyzed view will appear after the first current-run frame'}
+        title={(analyzedFrameUrl || trackingTimelineRef.current.length) ? (hudVisible ? 'Show source preview' : 'Show analyzed HUD') : viewBadge || 'Analyzed view unavailable'}
+        data-view-state={viewState}
         aria-pressed={hudVisible}
         style={{
           position: 'absolute', top: '0.4rem', right: '0.4rem',
           zIndex: 20,
-          background: hudVisible ? 'rgba(74,222,128,0.2)' : 'rgba(0,0,0,0.5)',
-          border: `1px solid ${hudVisible ? 'rgba(74,222,128,0.6)' : 'rgba(255,255,255,0.15)'}`,
+          background: viewState === 'COMPLETED_REPLAY_UNAVAILABLE' ? 'rgba(69,26,3,0.96)' : hudVisible ? 'rgba(6,78,59,0.96)' : 'rgba(2,6,23,0.96)',
+          border: `1px solid ${viewState === 'COMPLETED_REPLAY_UNAVAILABLE' ? '#f59e0b' : hudVisible ? '#4ade80' : '#64748b'}`,
           borderRadius: '0.2rem',
-          padding: '0.15rem 0.4rem',
+          padding: '0.22rem 0.45rem',
           fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
           fontSize: '0.5rem', letterSpacing: '0.08em',
-          color: hudVisible ? '#4ade80' : 'rgba(255,255,255,0.4)',
+          color: viewState === 'COMPLETED_REPLAY_UNAVAILABLE' ? '#fbbf24' : hudVisible ? '#4ade80' : '#e2e8f0',
           cursor: 'pointer',
           lineHeight: '1.4',
           display: 'flex', alignItems: 'center', gap: '0.25rem',
         }}
       >
-        <Activity size={8} /> {hudVisible && analyzedFrameUrl ? 'ANALYZED' : analyzedFrameUrl ? 'SOURCE' : 'ANALYZED VIEW PENDING'}
+        <Activity size={8} /> {viewBadge}
       </button>
 
       {/* ── Toggleable debug HUD (replaces removed [SUPER DEBUG OVERLAY]) ── */}

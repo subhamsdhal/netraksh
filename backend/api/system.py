@@ -421,9 +421,18 @@ def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[
     if str(payload.analysis_state or "").upper() == "COMPLETED":
         summary.completed_at = observed_at
         identity = _tracking_identity(payload)
-        timeline = list(_tracking_timelines.get(identity, [])) if identity else []
+        timeline = sorted(
+            list(_tracking_timelines.get(identity, [])) if identity else [],
+            key=lambda item: (float(item.get("video_time") or 0), int(item.get("sequence") or 0)),
+        )
         summary.tracking_timeline_json = timeline
         summary.tracking_sample_count = len(timeline)
+        if len(timeline) > 1:
+            duration = float(timeline[-1].get("video_time") or 0) - float(timeline[0].get("video_time") or 0)
+            if duration > 0:
+                # On a completed run this field names the durable replay
+                # sample density, not the unrelated diagnostic JPEG cadence.
+                summary.hud_fps = (len(timeline) - 1) / duration
     return summary
 
 
@@ -669,22 +678,30 @@ async def post_tracking_frame(
     """
     if edge_identity and edge_identity.edge_id != payload.camera_id:
         raise HTTPException(status_code=403, detail="Authenticated edge identity does not match camera_id")
-    current = _latest_tracking_sequence.get(payload.camera_id)
-    run_id = payload.analysis_session_id
-    if current is not None and current[0] == run_id and payload.sequence <= current[1]:
-        return {"status": "stale_ignored"}
-    _latest_tracking_sequence[payload.camera_id] = (run_id, payload.sequence)
     received_at = __import__("time").time()
     identity = _tracking_identity(payload)
     if identity is not None:
         timeline = _tracking_timelines.setdefault(identity, [])
-        timeline.append(_compact_tracking_sample(payload, received_at))
+        # Multiple transport workers can complete HTTPS requests out of order.
+        # Preserve every unique source frame for durable replay even when it is
+        # older than the newest sequence already broadcast to live clients.
+        if not any(
+            int(item.get("sequence") or -1) == int(payload.sequence)
+            and int(item.get("frame_index") or -1) == int(payload.frame_index)
+            for item in timeline
+        ):
+            timeline.append(_compact_tracking_sample(payload, received_at))
         if len(timeline) > _MAX_TRACKING_SAMPLES_PER_RUN:
             del timeline[:-_MAX_TRACKING_SAMPLES_PER_RUN]
         # Keep at most four completed/in-flight run buffers per camera.
         camera_keys = [key for key in _tracking_timelines if key[0] == payload.camera_id]
         for stale_key in camera_keys[:-4]:
             _tracking_timelines.pop(stale_key, None)
+    current = _latest_tracking_sequence.get(payload.camera_id)
+    run_id = payload.analysis_session_id
+    if current is not None and current[0] == run_id and payload.sequence <= current[1]:
+        return {"status": "accepted_for_replay", "live_broadcast": False}
+    _latest_tracking_sequence[payload.camera_id] = (run_id, payload.sequence)
     telemetry = payload.model_dump()
     telemetry["backend_received_timestamp"] = received_at
     await broadcast_telemetry(telemetry)

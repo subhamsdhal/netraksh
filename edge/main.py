@@ -477,12 +477,24 @@ class EdgePipeline:
             # Stop producers first, discard lossy visualization snapshots,
             # and wait for any in-flight request before publishing the final
             # lifecycle record synchronously.
+            if completed:
+                # The adapter has stopped producing by this point. Keep the
+                # workers alive until every accepted HUD/snapshot item has
+                # reached the backend, then publish COMPLETED.
+                self._hud_frame_queue.join()
+                self.tracking_queue.join()
+                self.telemetry_queue.join()
             self._running = False
-            self._clear_live_queues()
-            telemetry_thread.join(timeout=12.0)
+            if not completed:
+                self._clear_live_queues()
+            # A completed finite-file run must drain its exact HUD samples
+            # before the terminal telemetry snapshot freezes the replay
+            # timeline. Discarding these queues here produced a misleading
+            # "analyzed replay" containing only the first seconds and no boxes.
             hud_thread.join(timeout=5.0)
             for tracking_thread in tracking_threads:
                 tracking_thread.join(timeout=5.0)
+            telemetry_thread.join(timeout=12.0)
             if completed:
                 self._flush_event_outbox()
                 # Publish one final metrics snapshot after the drain so the
@@ -502,7 +514,11 @@ class EdgePipeline:
 
     def _clear_live_queues(self) -> None:
         """Discard lossy live packets before a replay/terminal transition."""
-        for live_queue in (self.telemetry_queue, self.tracking_queue, self._hud_frame_queue):
+        for live_queue in filter(None, (
+            getattr(self, "telemetry_queue", None),
+            getattr(self, "tracking_queue", None),
+            getattr(self, "_hud_frame_queue", None),
+        )):
             while not live_queue.empty():
                 try:
                     live_queue.get_nowait()
@@ -538,7 +554,7 @@ class EdgePipeline:
             cert=self.sync_client._client_cert
         )
         telemetry_url = f"{self._backend_url}/system/telemetry"
-        while self._running:
+        while self._running or not self.telemetry_queue.empty():
             try:
                 payload = self.telemetry_queue.get(timeout=0.5)
                 try:
@@ -603,7 +619,7 @@ class EdgePipeline:
 
     def _run_hud_loop(self) -> None:
         """Track every decoded image independently of heavy event analysis."""
-        while self._running:
+        while self._running or not self._hud_frame_queue.empty():
             try:
                 frame, meta = self._hud_frame_queue.get(timeout=0.25)
             except Empty:
@@ -691,7 +707,7 @@ class EdgePipeline:
             cert=self.sync_client._client_cert,
         )
         url = f"{self._backend_url}/system/tracking-frame"
-        while self._running:
+        while self._running or not self.tracking_queue.empty():
             try:
                 payload = self.tracking_queue.get(timeout=0.25)
                 try:

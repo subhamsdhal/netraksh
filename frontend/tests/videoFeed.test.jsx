@@ -68,7 +68,7 @@ describe('per-camera authoritative analyzed frame', () => {
     expect(authFetch).not.toHaveBeenCalled();
     expect(screen.getByText(/SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME/)).toBeInTheDocument();
     expect(screen.queryByText(/ANALYZED FRAME UNAVAILABLE/i)).not.toBeInTheDocument();
-    expect(screen.getByTitle('Analyzed view will appear after the first current-run frame')).toBeDisabled();
+    expect(screen.getByTitle('WAITING FOR HUD')).toBeDisabled();
   });
 
   it('does not offer an add-source action while durable authority is restoring', () => {
@@ -159,10 +159,26 @@ describe('per-camera authoritative analyzed frame', () => {
       telemetryStatus="COMPLETED"
       liveTracksData={{ stream_id: 'source-1', analysis_session_id: 'run-1', frame_index: 42, preview_available: false }}
     />);
-    expect(screen.getByText('SOURCE PREVIEW · COMPLETED RUN · ANALYZED TIMELINE UNAVAILABLE')).toBeInTheDocument();
+    expect(screen.getByText('SOURCE REPLAY · HUD NOT AVAILABLE FOR THIS HISTORICAL RUN')).toBeInTheDocument();
     expect(screen.queryByText('SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME')).not.toBeInTheDocument();
     expect(screen.queryByText(/ANALYZED FRAME UNAVAILABLE/i)).not.toBeInTheDocument();
-    expect(screen.getByTitle('Analyzed view will appear after the first current-run frame')).toBeDisabled();
+    expect(screen.getByText('HUD UNAVAILABLE')).toBeDisabled();
+  });
+
+  it('settles completed replay loading to an explicit unavailable state', () => {
+    const props = {
+      cameraId: 'cam-border-01', mediaUrl: 'blob:video', sourceMode: 'durable',
+      sourceRunState: 'COMPLETED', expectedSessionId: 'source-1', telemetryStatus: 'COMPLETED',
+      completedSummary: {
+        camera_id: 'cam-border-01', stream_id: 'source-1', analysis_session_id: 'run-1',
+        analysis_generation: 1, final_video_time: 10,
+      },
+    };
+    const { rerender } = render(<VideoFeed {...props} completedSummaryLoading />);
+    expect(screen.getByText('LOADING HUD')).toBeInTheDocument();
+    rerender(<VideoFeed {...props} completedSummaryLoading={false} completedTimeline={[]} />);
+    expect(screen.getByText('HUD UNAVAILABLE')).toBeInTheDocument();
+    expect(screen.queryByText('ANALYZED VIEW PENDING')).not.toBeInTheDocument();
   });
 
   it('restores a completed analyzed timeline for replay without starting a new analysis', async () => {
@@ -182,8 +198,13 @@ describe('per-camera authoritative analyzed frame', () => {
       expectedSourceGeneration={9}
       telemetryStatus="COMPLETED"
       completedTimeline={completedTimeline}
+      completedSummary={{
+        camera_id: 'cam-checkpoint-01', stream_id: 'source-2', analysis_session_id: 'run-2',
+        analysis_generation: 1, source_generation: 9, final_video_time: 0.5,
+      }}
     />);
     await waitFor(() => expect(screen.getByText(/COMPLETED RUN · ANALYZED REPLAY/)).toBeInTheDocument());
+    expect(screen.getByText('ANALYZED REPLAY')).toBeInTheDocument();
     expect(screen.getByLabelText('Current source-frame tracking overlay')).toHaveStyle({ display: 'block' });
   });
 
@@ -255,7 +276,7 @@ describe('per-camera authoritative analyzed frame', () => {
       }}
     />);
     expect(authFetch).not.toHaveBeenCalled();
-    expect(screen.getByText('ANALYZED VIEW PENDING')).toBeInTheDocument();
+    expect(screen.getByText('WAITING FOR HUD')).toBeInTheDocument();
   });
 
   it('renders authoritative person and vehicle boxes with the same-frame counts', async () => {
@@ -318,7 +339,7 @@ describe('per-camera authoritative analyzed frame', () => {
     expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 11, video_time: 11 / 24 }));
   });
 
-  it('keeps the final exact analyzed result selected at completion', async () => {
+  it('does not mislabel one final analyzed frame as a completed replay timeline', async () => {
     const telemetry = {
       camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'session-1',
       analysis_generation: 1, frame_index: 42, preview_available: true,
@@ -334,8 +355,8 @@ describe('per-camera authoritative analyzed frame', () => {
       expectedSessionId="source-1" expectedGeneration={1} sourceRunState="COMPLETED"
       telemetryStatus="COMPLETED" liveTracksData={telemetry}
     />);
-    expect(screen.getByTitle('Show source preview')).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByAltText('Synchronized analyzed video frame for cam-checkpoint-01')).toBeInTheDocument();
+    expect(screen.getByText('HUD UNAVAILABLE')).toHaveAttribute('data-view-state', 'COMPLETED_REPLAY_UNAVAILABLE');
+    expect(screen.queryByAltText('Synchronized analyzed video frame for cam-checkpoint-01')).not.toBeInTheDocument();
   });
 
   it('uses the active label only for live telemetry', () => {

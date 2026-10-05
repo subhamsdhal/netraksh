@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendTrackingSample,
+  replayTimelineAssessment,
   selectTrackingSample,
   trackingIntervalsMs,
   TRACKING_TIMELINE_LIMIT,
@@ -55,5 +56,26 @@ describe('tracking timeline', () => {
     expect(timeline[1].tracks[0].track_id).toBe(7);
     expect(timeline[1].tracks[0].bbox_x).toBeGreaterThan(timeline[0].tracks[0].bbox_x);
     expect(trackingIntervalsMs(timeline)).toEqual([125]);
+  });
+
+  it('accepts only an exact-identity timeline covering the completed source duration', () => {
+    const timeline = [
+      sample(0, 0, { source_generation: 4 }),
+      sample(24, 1, { source_generation: 4 }),
+      sample(48, 2, { source_generation: 4 }),
+    ];
+    const summary = {
+      camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'run-1',
+      analysis_generation: 2, source_generation: 4, final_video_time: 2,
+    };
+    expect(replayTimelineAssessment(timeline, summary)).toMatchObject({
+      ready: true, sampleCount: 3, cadenceHz: 1,
+    });
+    expect(replayTimelineAssessment(timeline.slice(0, 2), summary)).toMatchObject({
+      ready: false, reason: 'incomplete_coverage',
+    });
+    expect(replayTimelineAssessment([
+      { ...timeline[0], analysis_session_id: 'old-run' }, ...timeline.slice(1),
+    ], summary)).toMatchObject({ ready: false, reason: 'identity_mismatch' });
   });
 });
