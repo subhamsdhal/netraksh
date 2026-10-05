@@ -200,6 +200,7 @@ class DetectionTracker:
         self._numpy_tracker: _NumpyByteTracker | None = None
         self.last_raw_detections = []
         self.last_tracker_output_count = 0
+        self.last_tracker_ms = 0.0
 
     def load(self) -> None:
         """Load detector runtime and initialize tracker. Called once at startup."""
@@ -257,7 +258,9 @@ class DetectionTracker:
         self.last_raw_detections = list(detections)
 
         if self._numpy_tracker is not None:
+            tracker_started = time.perf_counter()
             tracked_objects = self._numpy_tracker.update(detections)
+            self.last_tracker_ms = (time.perf_counter() - tracker_started) * 1000.0
             self.last_tracker_output_count = len(tracked_objects)
             tracks = []
             for tracked in tracked_objects:

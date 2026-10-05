@@ -24,6 +24,11 @@ import { authFetch } from '../services/auth';
 import { frameResponseMatchesTelemetry } from '../utils/dashboardScope';
 import { formatTelemetryAge } from '../utils/systemTruth';
 import { analyzedSampleIsNewer, analyzedSampleMatchesScope, containedMediaRect } from '../utils/analyzedPlayback';
+import {
+  appendTrackingSample,
+  selectTrackingSample,
+  TRACKING_SAMPLE_TOLERANCE_SECONDS,
+} from '../utils/trackingTimeline';
 
 // ─── Threat-aware colour palette ────────────────────────────────────────────
 //
@@ -242,6 +247,10 @@ export default function VideoFeed({
   const videoRef = useRef(null);
   const previewRef = useRef(null);
   const svgRef = useRef(null);
+  const canvasRef = useRef(null);
+  const trackingTimelineRef = useRef([]);
+  const trackingRunRef = useRef(null);
+  const lastPresentedAtRef = useRef(0);
 
   // Measured geometry of the letterboxed video frame within its container.
   const [videoRect, setVideoRect] = useState({
@@ -251,6 +260,7 @@ export default function VideoFeed({
   // Source preview remains truthful while a run is starting. The first exact,
   // decodable frame for each new run promotes the view to analyzed/HUD once.
   const [hudVisible, setHudVisible] = useState(false);
+  const [trackingModeActive, setTrackingModeActive] = useState(false);
   const [videoError, setVideoError] = useState(false);
   const [analyzedFrameUrl, setAnalyzedFrameUrl] = useState(null);
   const [analyzedFrameStatus, setAnalyzedFrameStatus] = useState('WAITING FOR FIRST ANALYZED FRAME');
@@ -261,7 +271,9 @@ export default function VideoFeed({
   const manualSourceRunRef = useRef(null);
   const currentRunRef = useRef(null);
   const isDurableSource = sourceMode === 'durable';
-  const requestHudFrame = isDurableSource || hudVisible;
+  const trackingCapable = isDurableSource && Boolean(mediaUrl);
+  const useLiveTimeline = trackingCapable && trackingModeActive;
+  const requestHudFrame = !useLiveTimeline && (isDurableSource || hudVisible);
   const hasStoredDurableSource = isDurableSource && Boolean(expectedSessionId);
   const uploadLabel = uploadStage === 'UPLOADING'
     ? `UPLOADING${Number.isFinite(uploadProgress) ? ` ${uploadProgress}%` : ''}`
@@ -271,6 +283,7 @@ export default function VideoFeed({
   const showAnalyzedFrame = Boolean(
     analyzedFrameUrl
     && hudVisible
+    && !useLiveTimeline
     && ['LIVE', 'STALE', 'COMPLETED'].includes(telemetryStatus)
   );
 
@@ -292,7 +305,10 @@ export default function VideoFeed({
     promotedRunRef.current = null;
     manualSourceRunRef.current = null;
     currentRunRef.current = null;
+    trackingRunRef.current = null;
+    trackingTimelineRef.current = [];
     setHudVisible(false);
+    setTrackingModeActive(false);
     displayedSampleRef.current = null;
     setDisplayedSample(null);
     onAnalyzedSampleRef.current?.(null);
@@ -306,6 +322,47 @@ export default function VideoFeed({
     setDisplayedSample(null);
     onAnalyzedSampleRef.current?.(null);
   }, [runIdentity]);
+
+  useEffect(() => {
+    if (!trackingCapable) return undefined;
+    const receive = (event) => {
+      const sample = event.detail;
+      if (!sample || sample.camera_id !== cameraId) return;
+      if (expectedSessionId && sample.stream_id !== expectedSessionId) return;
+      if (expectedGeneration != null
+        && Number(sample.analysis_generation) !== Number(expectedGeneration)) return;
+      const incomingRun = sample.analysis_session_id || null;
+      if (!incomingRun) return;
+      if (trackingRunRef.current && trackingRunRef.current !== incomingRun) return;
+      if (!trackingRunRef.current) {
+        trackingRunRef.current = incomingRun;
+        trackingTimelineRef.current = [];
+        setHudVisible(true);
+        setTrackingModeActive(true);
+        const video = videoRef.current;
+        if (video) {
+          video.playbackRate = 1.0;
+          const bufferedStart = Math.max(0, Number(sample.video_time || 0) - 0.5);
+          if (Math.abs(video.currentTime - bufferedStart) > 0.75) video.currentTime = bufferedStart;
+          video.play().catch(() => {});
+        }
+      }
+      trackingTimelineRef.current = appendTrackingSample(
+        trackingTimelineRef.current,
+        sample,
+        {
+          cameraId,
+          streamId: expectedSessionId || sample.stream_id,
+          analysisSessionId: trackingRunRef.current,
+          analysisGeneration: expectedGeneration,
+        },
+      );
+      setHudVisible(true);
+      setTrackingModeActive(true);
+    };
+    window.addEventListener('netraksh-tracking-frame', receive);
+    return () => window.removeEventListener('netraksh-tracking-frame', receive);
+  }, [cameraId, expectedSessionId, expectedGeneration, trackingCapable]);
 
   // Lightweight render-tick to re-evaluate live tracks freshness
   const [tick, setTick] = useState(0);
@@ -488,6 +545,104 @@ export default function VideoFeed({
     setVideoRect({ ...rect, cw, ch, vw, vh });
   }, [displayedSample?.frame_width, displayedSample?.frame_height, liveTracksData?.frame_width, liveTracksData?.frame_height, showAnalyzedFrame]);
 
+  const drawTrackingCanvas = useCallback((sample) => {
+    const canvas = canvasRef.current;
+    const container = containerRef.current;
+    const video = videoRef.current;
+    if (!canvas || !container || !video) return;
+    const bounds = container.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const pixelWidth = Math.max(1, Math.round(bounds.width * dpr));
+    const pixelHeight = Math.max(1, Math.round(bounds.height * dpr));
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth;
+      canvas.height = pixelHeight;
+    }
+    const context = canvas.getContext('2d');
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.clearRect(0, 0, bounds.width, bounds.height);
+    canvas.dataset.frameIndex = sample?.frame_index == null ? '' : String(sample.frame_index);
+    canvas.dataset.trackCount = sample?.track_count == null ? '0' : String(sample.track_count);
+    if (!sample || !Array.isArray(sample.tracks)) return;
+    const rect = containedMediaRect(
+      bounds.width,
+      bounds.height,
+      video.videoWidth || sample.frame_width || 1280,
+      video.videoHeight || sample.frame_height || 720,
+    );
+    sample.tracks.forEach((track) => {
+      if (![track.bbox_x, track.bbox_y, track.bbox_w, track.bbox_h].every(Number.isFinite)) return;
+      const palette = getThreatPalette(track, track.track_id);
+      const x = rect.left + track.bbox_x * rect.width;
+      const y = rect.top + track.bbox_y * rect.height;
+      const width = track.bbox_w * rect.width;
+      const height = track.bbox_h * rect.height;
+      if (width <= 0 || height <= 0) return;
+      context.fillStyle = palette.fill;
+      context.strokeStyle = palette.stroke;
+      context.lineWidth = palette.strokeWidth || 1.5;
+      context.fillRect(x, y, width, height);
+      context.strokeRect(x, y, width, height);
+      const objectLabel = String(track.class_name || track.detection_class || 'object').toUpperCase();
+      const provenance = track.detector_confirmed ? 'DET' : 'FLOW';
+      const label = `${objectLabel} · #${track.track_id ?? '?'} · ${provenance}`;
+      context.font = '700 10px ui-monospace, monospace';
+      const labelWidth = context.measureText(label).width + 10;
+      context.fillStyle = palette.labelFill;
+      context.fillRect(x, Math.max(0, y - 16), labelWidth, 16);
+      context.fillStyle = palette.labelText;
+      context.fillText(label, x + 5, Math.max(11, y - 4));
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!useLiveTimeline) return undefined;
+    const video = videoRef.current;
+    if (!video) return undefined;
+    let handle = null;
+    let stopped = false;
+    const renderAt = (mediaTime) => {
+      const sample = selectTrackingSample(
+        trackingTimelineRef.current,
+        mediaTime,
+        TRACKING_SAMPLE_TOLERANCE_SECONDS,
+      );
+      drawTrackingCanvas(sample);
+      const now = performance.now();
+      if (sample && now - lastPresentedAtRef.current >= 250) {
+        lastPresentedAtRef.current = now;
+        displayedSampleRef.current = sample;
+        onAnalyzedSampleRef.current?.(sample);
+      }
+    };
+    const callback = (_now, metadata) => {
+      if (stopped) return;
+      video.playbackRate = 1.0;
+      renderAt(Number(metadata?.mediaTime ?? video.currentTime));
+      handle = video.requestVideoFrameCallback(callback);
+    };
+    if ('requestVideoFrameCallback' in video) {
+      handle = video.requestVideoFrameCallback(callback);
+      return () => {
+        stopped = true;
+        if (handle != null) video.cancelVideoFrameCallback(handle);
+        drawTrackingCanvas(null);
+      };
+    }
+    const raf = () => {
+      if (stopped) return;
+      video.playbackRate = 1.0;
+      renderAt(video.currentTime);
+      handle = requestAnimationFrame(raf);
+    };
+    handle = requestAnimationFrame(raf);
+    return () => {
+      stopped = true;
+      cancelAnimationFrame(handle);
+      drawTrackingCanvas(null);
+    };
+  }, [drawTrackingCanvas, mediaUrl, useLiveTimeline]);
+
   useEffect(() => {
     setVideoError(false);
     updateRect();
@@ -657,6 +812,7 @@ export default function VideoFeed({
         playsInline
         preload="metadata"
         onLoadedMetadata={(e) => {
+          e.target.playbackRate = 1.0;
           updateRect();
           if (e.target.paused && !e.target.ended) onPauseAnalysis?.(e.target.currentTime);
         }}
@@ -671,6 +827,9 @@ export default function VideoFeed({
           }
         }}
         onSeeked={(e) => onStartAnalysis?.(e.target.currentTime)}
+        onRateChange={(e) => {
+          if (e.target.playbackRate !== 1.0) e.target.playbackRate = 1.0;
+        }}
         onEnded={(e) => {
           setIsVideoPlaying(false);
           onVideoEnded?.(e);
@@ -693,6 +852,15 @@ export default function VideoFeed({
         onLoad={updateRect}
         style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 0 }}
       /> : null}
+      <canvas
+        ref={canvasRef}
+        aria-label="Current source-frame tracking overlay"
+        style={{
+          display: useLiveTimeline && hudVisible ? 'block' : 'none',
+          position: 'absolute', inset: 0, width: '100%', height: '100%',
+          zIndex: 10, pointerEvents: 'none',
+        }}
+      />
       {videoError && mediaUrl && !showAnalyzedFrame && (
         <div className="absolute inset-0 z-25 flex items-center justify-center bg-black/80 text-danger text-sm text-center px-4" role="alert">
           Unable to play this video in the browser.
@@ -875,6 +1043,17 @@ export default function VideoFeed({
           pointerEvents: 'none',
         }}>
           {analyzedFrameStatus} · FRAME {displayedSample?.frame_index ?? '—'} · SOURCE {Number.isFinite(displayedSample?.video_time) ? `${displayedSample.video_time.toFixed(2)}s` : '—'} · PROCESSED {processedAgeSeconds == null ? 'RECENTLY' : formatTelemetryAge(processedAgeSeconds * 1000).toUpperCase()} · EXACT TELEMETRY SAMPLE
+        </div>
+      )}
+      {useLiveTimeline && hudVisible && (
+        <div style={{
+          position: 'absolute', left: '0.45rem', bottom: '0.45rem', zIndex: 20,
+          padding: '0.25rem 0.45rem', border: '1px solid rgba(74,222,128,0.55)',
+          background: 'rgba(2,6,23,0.86)', color: '#4ade80', borderRadius: '0.2rem',
+          fontFamily: 'ui-monospace, monospace', fontSize: '0.55rem', letterSpacing: '0.07em',
+          pointerEvents: 'none',
+        }}>
+          ANALYZED LIVE HUD · SOURCE PLAYBACK 1.0× · IMAGE-GROUNDED BOXES · STALE BOXES HIDDEN
         </div>
       )}
       {!showAnalyzedFrame && mediaUrl && isDurableSource && (

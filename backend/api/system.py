@@ -29,7 +29,13 @@ from backend.models.orm import (
 from backend.security.auth import require_edge_auth
 from backend.security.auth import require_any_role
 from backend.services.video_storage import promote_active_session
-from shared.schemas import PipelineMetricsReport, PipelineMetricsResponse, LiveTelemetryPayload, TelemetryFramePayload
+from shared.schemas import (
+    LiveTelemetryPayload,
+    PipelineMetricsReport,
+    PipelineMetricsResponse,
+    TelemetryFramePayload,
+    TrackingFramePayload,
+)
 from backend.api.websocket import broadcast_telemetry
 
 logger = logging.getLogger(__name__)
@@ -574,6 +580,23 @@ async def post_telemetry(
     telemetry = _completed_telemetry_view(db, telemetry, current)
     _latest_telemetry[payload.camera_id] = telemetry
     await broadcast_telemetry(telemetry)
+    return {"status": "ok"}
+
+
+@router.post("/system/tracking-frame", status_code=202)
+async def post_tracking_frame(
+    payload: TrackingFramePayload,
+    edge_identity=Depends(require_edge_auth),
+):
+    """Broadcast one lossy live-HUD sample without a database write.
+
+    This endpoint is deliberately separate from event/evidence ingestion and
+    the durable latest telemetry snapshot.  Slow consumers receive only the
+    newest frame through the existing bounded WebSocket batcher.
+    """
+    if edge_identity and edge_identity.edge_id != payload.camera_id:
+        raise HTTPException(status_code=403, detail="Authenticated edge identity does not match camera_id")
+    await broadcast_telemetry(payload.model_dump())
     return {"status": "ok"}
 
 

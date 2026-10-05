@@ -31,6 +31,9 @@ class SnapshotObject:
     bbox: Tuple[float, float, float, float]
     tracker_state: str = "TRACKED_CURRENT_FRAME"
     matched_current_frame: bool = True
+    detector_confirmed: bool = True
+    confidence_semantics: str = "DETECTOR_CURRENT_FRAME"
+    last_detection_confidence: Optional[float] = None
 
     def to_live_track(self, frame_width: int, frame_height: int) -> dict:
         x1, y1, x2, y2 = self.bbox
@@ -42,6 +45,9 @@ class SnapshotObject:
             "tracker_state": self.tracker_state,
             "matched_current_frame": self.matched_current_frame,
             "confidence": self.confidence,
+            "detector_confirmed": self.detector_confirmed,
+            "confidence_semantics": self.confidence_semantics,
+            "last_detection_confidence": self.last_detection_confidence,
             "bbox_x": x1 / frame_width if frame_width else 0.0,
             "bbox_y": y1 / frame_height if frame_height else 0.0,
             "bbox_w": (x2 - x1) / frame_width if frame_width else 0.0,
@@ -110,6 +116,13 @@ def build_frame_snapshot(
             bbox=(float(track.bbox.x1), float(track.bbox.y1), float(track.bbox.x2), float(track.bbox.y2)),
             tracker_state=str(getattr(track, "tracker_state", "TRACKED_CURRENT_FRAME")),
             matched_current_frame=True,
+            detector_confirmed=bool(getattr(track, "detector_confirmed", True)),
+            confidence_semantics=str(getattr(track, "confidence_semantics", "DETECTOR_CURRENT_FRAME")),
+            last_detection_confidence=(
+                float(getattr(track, "last_detection_confidence"))
+                if getattr(track, "last_detection_confidence", None) is not None
+                else float(track.confidence)
+            ),
         )
         current = by_id.get(track_id)
         if current is None or obj.confidence > current.confidence:

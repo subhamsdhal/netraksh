@@ -15,6 +15,12 @@ describe('per-camera authoritative analyzed frame', () => {
     global.Image = class {
       set src(_value) { queueMicrotask(() => this.onload?.()); }
     };
+    HTMLMediaElement.prototype.play = vi.fn().mockResolvedValue(undefined);
+    HTMLMediaElement.prototype.pause = vi.fn();
+    HTMLCanvasElement.prototype.getContext = vi.fn(() => ({
+      setTransform: vi.fn(), clearRect: vi.fn(), fillRect: vi.fn(), strokeRect: vi.fn(),
+      fillText: vi.fn(), measureText: vi.fn(() => ({ width: 40 })),
+    }));
     const headers = new Headers({
       'X-Analysis-Session': 'session-1', 'X-Frame-Index': '42',
       'X-Person-Count': '1', 'X-Vehicle-Count': '1', 'X-Track-Count': '2',
@@ -22,8 +28,8 @@ describe('per-camera authoritative analyzed frame', () => {
     authFetch.mockResolvedValue({ ok: true, headers, blob: async () => new Blob(['jpeg']) });
   });
 
-  it('defaults durable uploads to the authoritative analyzed frame and can switch to source preview', async () => {
-    render(<VideoFeed
+  it('plays durable uploads at 1.0x and promotes the image-grounded tracking canvas', async () => {
+    const { container } = render(<VideoFeed
       cameraId="cam-border-01"
       mediaUrl="blob:video"
       sourceMode="durable"
@@ -38,14 +44,16 @@ describe('per-camera authoritative analyzed frame', () => {
       }}
     />);
 
-    await waitFor(() => expect(authFetch).toHaveBeenCalled());
-    expect(authFetch.mock.calls[0][0]).toContain('hud=false');
-    await waitFor(() => expect(screen.getByTitle('Show source preview')).toHaveAttribute('aria-pressed', 'true'));
-    await waitFor(() => expect(screen.getByAltText('Synchronized analyzed video frame for cam-border-01')).toBeInTheDocument());
-    expect(screen.getByText(/ANALYZED LIVE STREAM · FRAME 42/)).toBeInTheDocument();
-    screen.getByTitle('Show source preview').click();
-    await waitFor(() => expect(screen.getByText(/SOURCE PREVIEW · AI SAMPLE AVAILABLE · FRAME 42/)).toBeInTheDocument());
-    expect(authFetch.mock.calls.every(([url]) => !url.includes('demo-telemetry'))).toBe(true);
+    const video = container.querySelector('video');
+    expect(video).toBeInTheDocument();
+    Object.defineProperty(video, 'playbackRate', { value: 1, writable: true });
+    window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: {
+      camera_id: 'cam-border-01', stream_id: 'session-1', analysis_session_id: 'run-1',
+      analysis_generation: null, frame_index: 42, video_time: 0.5, tracks: [],
+    } }));
+    await waitFor(() => expect(screen.getByLabelText('Current source-frame tracking overlay')).toHaveStyle({ display: 'block' }));
+    expect(video.playbackRate).toBe(1);
+    expect(screen.getByText(/SOURCE PLAYBACK 1.0×/)).toBeInTheDocument();
   });
 
   it('does not fetch a frame for a stale session', async () => {

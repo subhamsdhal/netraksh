@@ -53,6 +53,7 @@ from edge.temporal.track_features import TrackFeatureTracker
 from edge.telemetry import build_frame_snapshot, render_snapshot
 from edge.tracking.continuity_guard import TrackContinuityGuard
 from edge.tracking.continuity_guard import compute_histogram as compute_track_histogram
+from edge.tracking.hybrid_tracker import AsyncDetectorWorker, DetectorJob, OpticalFlowBoxTracker
 from edge.runtime_diagnostics import log_runtime_checkpoint
 from shared.constants import (
     ABSTAIN_SNAPSHOT_INTERVAL_SECONDS,
@@ -182,7 +183,7 @@ class EdgePipeline:
         # Telemetry
         self.telemetry_fps = int(os.environ.get("TELEMETRY_FPS", 10))
         self.telemetry_interval = 1.0 / self.telemetry_fps if self.telemetry_fps > 0 else 0
-        self._last_telemetry_time = 0.0
+        self._last_tracking_video_time: Optional[float] = None
         self._telemetry_sequence = 0
         self._last_video_time = None
         self._last_frame_width = None
@@ -190,7 +191,14 @@ class EdgePipeline:
         # We need a small bounded queue so if the backend goes down or network
         # is durable/offline-capable. Telemetry is explicitly lossy.
         self.telemetry_queue = Queue(maxsize=2)
+        self.tracking_queue = Queue(maxsize=2)
         self._telemetry_metrics = {"produced": 0, "dropped": 0, "errors": 0}
+        self._tracking_metrics = {"produced": 0, "dropped": 0, "errors": 0}
+        self.snapshot_telemetry_fps = float(os.environ.get("SNAPSHOT_TELEMETRY_FPS", "1"))
+        self.snapshot_telemetry_interval = (
+            1.0 / self.snapshot_telemetry_fps if self.snapshot_telemetry_fps > 0 else 0
+        )
+        self._last_snapshot_telemetry_time = 0.0
 
         # Layer 2: Health + Condition
         self.health_monitor = CameraHealthMonitor(
@@ -198,6 +206,12 @@ class EdgePipeline:
             fps_declared=config.get("fps_declared", 25.0),
         )
         self.condition_classifier = SceneConditionClassifier(camera_id=self.camera_id)
+        # Scene statistics are detector-keyframe context, not a prerequisite
+        # for every optical-flow visualization sample.  Cache the most recent
+        # report and refresh it immediately before each detector submission.
+        # This preserves detector/event semantics while removing a redundant
+        # full-frame grayscale/histogram pass from intermediate frames.
+        self._last_condition = None
         self.condition_router = ConditionRouter()
 
         # Layer 3: Detection + calibration
@@ -208,6 +222,18 @@ class EdgePipeline:
             model_size=self.yolo_model_path,
             device=config.get("device", "cpu"),
         )
+        self.detector_worker = AsyncDetectorWorker(self.detector)
+        self.visual_tracker = OpticalFlowBoxTracker(
+            max_width=int(os.environ.get("IMAGE_TRACKER_MAX_WIDTH", "480")),
+            history_frames=int(os.environ.get("TRACKING_HISTORY_FRAMES", "180")),
+            max_detector_age_frames=int(os.environ.get("TRACK_MAX_DETECTOR_AGE_FRAMES", "144")),
+        )
+        self._last_detector_source_time: Optional[float] = None
+        self._last_detector_completed_at: Optional[float] = None
+        self._last_detector_frame_index: Optional[int] = None
+        self._last_detector_latency_ms: Optional[float] = None
+        self._last_tracker_latency_ms: Optional[float] = None
+        self._detector_refresh_interval_ms: Optional[float] = None
         log_runtime_checkpoint("pipeline_constructed_before_detector_load")
         self.adaptive_gate = AdaptiveComputeGate()
 
@@ -369,6 +395,7 @@ class EdgePipeline:
         """
         logger.info("[Pipeline] Loading YOLO model...")
         self.detector.load()
+        self.detector_worker.start()
         log_runtime_checkpoint("onnx_detector_and_tracker_loaded")
 
         # Start sync in background thread
@@ -390,6 +417,14 @@ class EdgePipeline:
         )
         telemetry_thread.start()
         logger.info("[Pipeline] Telemetry thread started")
+
+        tracking_thread = threading.Thread(
+            target=self._run_tracking_loop,
+            daemon=True,
+            name=f"tracking-{self.camera_id}",
+        )
+        tracking_thread.start()
+        logger.info("[Pipeline] Lightweight tracking transport started")
 
         try:
             self._run_frame_loop()
@@ -413,12 +448,15 @@ class EdgePipeline:
                     pass
             self.adapter.stop()
             self.adapter.join()
+            self.detector_worker.stop()
             telemetry_thread.join(timeout=2.0)
+            tracking_thread.join(timeout=2.0)
 
     def stop(self) -> None:
         """Gracefully stop the pipeline."""
         logger.info(f"[Pipeline] Stopping frame loop for camera {self.camera_id}")
         self._running = False
+        self.detector_worker.stop()
         if hasattr(self, 'sync_client') and self.sync_client:
             try:
                 self.sync_client.stop()
@@ -493,6 +531,43 @@ class EdgePipeline:
                 self._telemetry_metrics["errors"] += 1
                 logger.error("[Telemetry] Unexpected worker error: %s: %s", type(e).__name__, e)
         client.close()
+
+    def _run_tracking_loop(self) -> None:
+        """Push small current-frame box metadata without persistence/JPEGs."""
+        import httpx
+        verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
+        client = httpx.Client(
+            timeout=httpx.Timeout(connect=3.0, read=3.0, write=3.0, pool=3.0),
+            verify=verify,
+            cert=self.sync_client._client_cert,
+        )
+        url = f"{self._backend_url}/system/tracking-frame"
+        while self._running:
+            try:
+                payload = self.tracking_queue.get(timeout=0.25)
+                try:
+                    response = client.post(url, json=payload, headers=self._edge_auth_headers())
+                    if response.status_code != 202:
+                        self._record_tracking_transport_error(status_code=response.status_code)
+                except httpx.RequestError as exc:
+                    self._record_tracking_transport_error(exception=exc)
+                finally:
+                    self.tracking_queue.task_done()
+            except Empty:
+                continue
+            except Exception as exc:
+                self._tracking_metrics["errors"] += 1
+                logger.warning("[Tracking] Unexpected transport error: %s", type(exc).__name__)
+        client.close()
+
+    def _record_tracking_transport_error(
+        self, *, status_code: Optional[int] = None, exception: Optional[Exception] = None,
+    ) -> None:
+        self._tracking_metrics["errors"] += 1
+        if status_code is not None:
+            logger.warning("[Tracking] metadata rejected: HTTP %s", status_code)
+        elif exception is not None:
+            logger.warning("[Tracking] metadata transport error: %s", type(exception).__name__)
 
     def _record_telemetry_transport_error(
         self,
@@ -589,12 +664,24 @@ class EdgePipeline:
             self.packager.stream_id = self.source_stream_id
             self.packager.analysis_session_id = self.stream_id
         self._telemetry_sequence = 0
-        self._last_telemetry_time = 0.0
+        self._last_tracking_video_time = None
+        self._last_snapshot_telemetry_time = 0.0
+        self._last_detector_source_time = None
+        self._last_detector_completed_at = None
+        self._last_detector_frame_index = None
+        self._last_condition = None
+        self.visual_tracker.reset()
         telemetry_queue = getattr(self, "telemetry_queue", None)
         while telemetry_queue is not None and not telemetry_queue.empty():
             try:
                 telemetry_queue.get_nowait()
                 telemetry_queue.task_done()
+            except Empty:
+                break
+        while not self.tracking_queue.empty():
+            try:
+                self.tracking_queue.get_nowait()
+                self.tracking_queue.task_done()
             except Empty:
                 break
 
@@ -676,7 +763,6 @@ class EdgePipeline:
     def _process_frame(self, frame, meta) -> None:
         """Process a single frame through the full pipeline."""
         log_runtime_checkpoint("active_inference", active=True)
-        self._verify_tick += 1
         self._last_video_time = meta.video_time_seconds
         self._last_frame_width = meta.width
         self._last_frame_height = meta.height
@@ -696,8 +782,22 @@ class EdgePipeline:
         health = self.health_monitor.update(frame, meta.timestamp, self.adapter.state)
         self._last_health = health
 
+        # The compute gate depends only on health/motion and existing runtime
+        # state, so decide whether a detector keyframe is eligible before
+        # paying for scene classification.
+        run_inference = self.adaptive_gate.should_run_inference(
+            frame_variance=health.frame_variance,
+            has_active_tracks=bool(self._trajectories),
+            has_pending_candidates=self.event_verifier.get_pending_count() > 0,
+        )
+
         # === Layer 2: Gate 2 — Scene Condition ===
-        condition = self.condition_classifier.classify(frame)
+        if (
+            self._last_condition is None
+            or (run_inference and not self.detector_worker.busy)
+        ):
+            self._last_condition = self.condition_classifier.classify(frame)
+        condition = self._last_condition
 
         t_health_condition = time.perf_counter()
 
@@ -736,105 +836,100 @@ class EdgePipeline:
             )
             return
 
-        # === Layer 2.5: Adaptive Compute Gate (architecture v4 §6) ===
-        # Skip full YOLO inference on genuinely idle frames (no motion, no
-        # active track, no pending candidate) to save compute — reuses Gate
-        # 1's own frame-difference variance, no new per-frame cost. Never
-        # skips a frame that already has something being tracked (see
-        # edge/detection/adaptive_gate.py's module docstring for why that's
-        # what makes this safe for ByteTrack's continuity).
-        run_inference = self.adaptive_gate.should_run_inference(
-            frame_variance=health.frame_variance,
-            has_active_tracks=bool(self._trajectories),
-            has_pending_candidates=self.event_verifier.get_pending_count() > 0,
-        )
-
-        # === Layer 3: Gate 3 — YOLO + ByteTrack ===
+        # === Layer 3: asynchronous YOLO keyframes + image-grounded tracking ===
         calibrated_threshold = self.calibration.get_threshold(condition.condition)
         detection_frame = frame
         enhancement_applied = False
+        # Optical flow consumes every actual decoded frame.  It is independent
+        # of detector latency and never blocks on the detector worker.
+        tracks = self.visual_tracker.observe(frame, meta.frame_index)
+        detector_packet = self.detector_worker.poll_latest()
+        detector_tracks = None
+        if detector_packet is not None:
+            if detector_packet.error is None:
+                detector_tracks = self._apply_continuity_guard(
+                    detector_packet.tracks, detector_packet.job.frame,
+                )
+                tracks = self.visual_tracker.reanchor(
+                    detector_tracks,
+                    detector_packet.job.frame_index,
+                    detector_packet.job.frame,
+                )
+                self._verify_tick += 1
+                for expired_id in self.continuity_guard.expire_stale(time.time()):
+                    self.track_feature_tracker.forget(expired_id)
+                for track in detector_tracks:
+                    self._trajectories[track.track_id] = track.trajectory
+                    self._track_last_snapshot[track.track_id] = {
+                        "histogram": compute_track_histogram(detector_packet.job.frame, track.bbox),
+                        "centroid": track.bbox.centroid,
+                    }
+                    self.track_feature_tracker.observe(track.track_id, time.time())
+                active_ids = {track.track_id for track in detector_tracks}
+                stale = [key for key in self._trajectories if key not in active_ids]
+                for key in stale[:20]:
+                    snapshot = self._track_last_snapshot.get(key)
+                    if snapshot is not None and snapshot["histogram"] is not None:
+                        self.continuity_guard.remember_lost(
+                            key, snapshot["histogram"], snapshot["centroid"],
+                            self._trajectories.get(key, []), time.time(),
+                        )
+                    else:
+                        self.track_feature_tracker.forget(key)
+                    self._trajectories.pop(key, None)
+                    self._known_track_ids.discard(key)
+                    for native_id in [n for n, canonical in self._track_id_map.items() if canonical == key]:
+                        self._track_id_map.pop(native_id, None)
+                    self._track_last_snapshot.pop(key, None)
 
-        if run_inference:
-            # CLAHE preprocessing (architecture v4 §3): a SEPARATE enhanced
-            # copy for LOW_LIGHT_NIGHT/FOG_RAIN, detector input only — health,
-            # condition, evidence snapshots, and ANPR/face crops all keep
-            # using the original `frame` so their measurements stay honest.
+                completed_at = detector_packet.completed_at
+                if self._last_detector_completed_at is not None:
+                    self._detector_refresh_interval_ms = (
+                        completed_at - self._last_detector_completed_at
+                    ) * 1000.0
+                self._last_detector_completed_at = completed_at
+                self._last_detector_frame_index = detector_packet.job.frame_index
+                self._last_detector_latency_ms = detector_packet.detector_ms
+                self._last_tracker_latency_ms = self.visual_tracker.last_update_ms
+
+        if run_inference and not self.detector_worker.busy:
             policy = self.condition_router.route(condition.condition)
             detection_frame = enhance_for_detection(frame, policy)
             enhancement_applied = detection_frame is not frame
-            try:
-                tracks = self.detector.detect_and_track(
-                    detection_frame, condition.condition, calibrated_threshold,
-                    existing_trajectories=self._trajectories,
-                )
-            except Exception as exc:
-                logger.error(f"[Pipeline] Detector error: {exc}")
-                tracks = []
-        else:
-            tracks = []
+            source_copy = frame.copy()
+            detector_copy = detection_frame.copy() if enhancement_applied else source_copy
+            submitted = self.detector_worker.submit(DetectorJob(
+                frame=source_copy,
+                detector_frame=detector_copy,
+                frame_index=int(meta.frame_index),
+                meta=meta,
+                health=health,
+                condition=condition,
+                confidence_threshold=calibrated_threshold,
+                enhancement_applied=enhancement_applied,
+                submitted_at=time.time(),
+            ))
+            if submitted:
+                self._last_detector_source_time = float(meta.video_time_seconds)
 
         t_detection_tracking = time.perf_counter()
 
-        # === Layer 3.5: Track Continuity Guard (architecture v4 §4) ===
-        # Re-associates a brand-new ByteTrack ID with a recently-lost one via
-        # color-histogram + spatial proximity — classical CV, no learned
-        # Re-ID — BEFORE anything else (trajectory, T-feature age, task
-        # modules) sees the track. Every downstream consumer keyed by
-        # track_id therefore resumes its prior state automatically once a
-        # re-association happens, with no further changes needed.
-        tracks = self._apply_continuity_guard(tracks, frame)
-        for expired_id in self.continuity_guard.expire_stale(time.time()):
-            self.track_feature_tracker.forget(expired_id)
-
-        # Update trajectory state + snapshot each active track's appearance
-        # (histogram + centroid) so the Continuity Guard has something to
-        # match against the moment this track is later lost.
-        #
-        # track_feature_tracker.observe() is called here UNCONDITIONALLY for
-        # every active track, every frame — a real, measured bug fix (see
-        # edge/temporal/track_features.py's class docstring and
-        # docs/PERFORMANCE_REPORT.md's "Reliability Engine behavior" section):
-        # this class's `_first_seen` bookkeeping must be registered as soon
-        # as a track is first observed, not only when some task module
-        # module later happens to fire an event for it (temporal_score_for()
-        # below only calls `compute()` inside those event-triggered
-        # branches) — a fence-crossing event, which by its nature usually
-        # fires exactly once per track at the crossing transition, would
-        # otherwise ALWAYS see age_seconds=0.0 on that one call, regardless
-        # of how long the track had genuinely already been tracked.
-        for t in tracks:
-            self._trajectories[t.track_id] = t.trajectory
-            self._track_last_snapshot[t.track_id] = {
-                "histogram": compute_track_histogram(frame, t.bbox),
-                "centroid": t.bbox.centroid,
-            }
-            self.track_feature_tracker.observe(t.track_id, time.time())
-
-        # Clean up stale trajectories — hand off to the Continuity Guard's
-        # lost pool (with a grace window) instead of forgetting immediately.
-        active_ids = {t.track_id for t in tracks}
-        stale = [k for k in self._trajectories if k not in active_ids]
-        for k in stale[:20]:  # Cap cleanup per frame
-            snapshot = self._track_last_snapshot.get(k)
-            if snapshot is not None and snapshot["histogram"] is not None:
-                self.continuity_guard.remember_lost(
-                    k, snapshot["histogram"], snapshot["centroid"],
-                    self._trajectories.get(k, []), time.time(),
-                )
-            else:
-                # Nothing usable to re-match against later — forget now
-                # rather than leak state waiting for a match that can't happen.
-                self.track_feature_tracker.forget(k)
-            del self._trajectories[k]
-            self._known_track_ids.discard(k)
-            native_to_remove = [n_id for n_id, c_id in self._track_id_map.items() if c_id == k]
-            for n_id in native_to_remove:
-                del self._track_id_map[n_id]
-            self._track_last_snapshot.pop(k, None)
-
         # === Live Telemetry (architecture v4 §16) ===
-        if self.telemetry_fps > 0 and (time.time() - self._last_telemetry_time) >= self.telemetry_interval:
-            self._last_telemetry_time = time.time()
+        tracking_video_time = float(meta.video_time_seconds)
+        tracking_due = (
+            self.telemetry_fps > 0
+            and (
+                self._last_tracking_video_time is None
+                or tracking_video_time < self._last_tracking_video_time
+                or (tracking_video_time - self._last_tracking_video_time) >= self.telemetry_interval
+            )
+        )
+        # Cadence is keyed to source media time, not wall time.  A fast local
+        # processor therefore cannot race through the file while emitting only
+        # a handful of widely spaced source samples; a constrained processor
+        # still emits every actual frame it can process.
+        if tracking_due:
+            self._last_tracking_video_time = tracking_video_time
             self._telemetry_sequence += 1
             frame_h, frame_w = frame.shape[:2] if frame is not None else (1, 1)
             processed_timestamp = time.time()
@@ -850,7 +945,7 @@ class EdgePipeline:
                 frame_height=frame_h,
             )
             raw_detections = []
-            for detection in getattr(self.detector, "last_raw_detections", []):
+            for detection in (detector_packet.raw_detections if detector_packet is not None else []):
                 class_value = getattr(detection, "class_id", -1)
                 class_name = "person" if class_value == 0 else "vehicle" if class_value in {2, 3, 5, 7} else "unknown"
                 raw_detections.append({
@@ -892,7 +987,10 @@ class EdgePipeline:
                 "lighting_state": getattr(condition, "lighting_state", None),
                 "mean_luminance": getattr(condition, "mean_luminance", condition.brightness_mean),
                 "enhancement_applied": enhancement_applied,
-                "detection_method": "YOLO" if tracks else "NONE",
+                "detection_method": (
+                    "YOLO_BYTE_TRACK" if detector_packet is not None
+                    else "OPTICAL_FLOW" if tracks else "NONE"
+                ),
                 "source_kind": self.adapter.source_kind,
                 "demo_replay": self.adapter.demo_replay,
                 "replay_cycle": getattr(meta, "replay_cycle", 0),
@@ -906,28 +1004,12 @@ class EdgePipeline:
                 "raw_detections": raw_detections,
                 "preview_available": False,
                 "tracks": frame_snapshot.live_tracks(),
+                "visualization_only": True,
+                "detector_frame_index": self._last_detector_frame_index,
+                "detector_latency_ms": self._last_detector_latency_ms,
+                "tracker_latency_ms": self.visual_tracker.last_update_ms,
+                "detector_refresh_interval_ms": self._detector_refresh_interval_ms,
             }
-            try:
-                import base64
-                import cv2
-                annotated_frame = render_snapshot(frame, frame_snapshot, hud=True)
-                clean_ok, clean_encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 72])
-                annotated_ok, annotated_encoded = cv2.imencode(".jpg", annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
-                if clean_ok and annotated_ok:
-                    payload["_clean_preview_jpeg_base64"] = base64.b64encode(clean_encoded.tobytes()).decode("ascii")
-                    payload["_annotated_preview_jpeg_base64"] = base64.b64encode(annotated_encoded.tobytes()).decode("ascii")
-                    payload["preview_available"] = True
-                    validation_dir = os.environ.get("ANNOTATED_FRAME_DIR")
-                    if validation_dir and self._telemetry_sequence in {1, 25, 50, 75, 100}:
-                        Path(validation_dir).mkdir(parents=True, exist_ok=True)
-                        filename = (
-                            f"camera1_frame_{frame_snapshot.frame_index:05d}_"
-                            f"p{frame_snapshot.person_count}_v{frame_snapshot.vehicle_count}_t{frame_snapshot.track_count}.jpg"
-                        )
-                        cv2.imwrite(str(Path(validation_dir) / filename), annotated_frame)
-            except Exception as exc:
-                logger.debug("[Telemetry] Analyzed-frame JPEG unavailable: %s", exc)
-
             trace_path = os.environ.get("TELEMETRY_TRACE_PATH")
             if trace_path:
                 try:
@@ -937,22 +1019,86 @@ class EdgePipeline:
                 except OSError as exc:
                     logger.debug("[Telemetry] Trace write failed: %s", exc)
             try:
-                # Latest-only queue strategy (backpressure):
-                # If queue is full, discard the OLDEST telemetry to make room
-                # for the NEWEST state, rather than discarding the newest.
-                if self.telemetry_queue.full():
+                if self.tracking_queue.full():
                     try:
-                        self.telemetry_queue.get_nowait()
-                        self.telemetry_queue.task_done()
-                        self._telemetry_metrics["dropped"] += 1
+                        self.tracking_queue.get_nowait()
+                        self.tracking_queue.task_done()
+                        self._tracking_metrics["dropped"] += 1
                     except Empty:
                         pass
-                self.telemetry_queue.put_nowait(payload)
-                self._telemetry_metrics["produced"] += 1
+                self.tracking_queue.put_nowait(dict(payload))
+                self._tracking_metrics["produced"] += 1
             except Exception:
-                # This is a real telemetry producer failure, distinct from a
-                # deliberate latest-only drop above.
-                self._telemetry_metrics["errors"] += 1
+                self._tracking_metrics["errors"] += 1
+
+            # Full JPEG + durable latest-state telemetry stays diagnostic and
+            # low-cadence.  Its encoding/upload can no longer gate HUD boxes.
+            snapshot_due = (
+                self.snapshot_telemetry_fps > 0
+                and (processed_timestamp - self._last_snapshot_telemetry_time)
+                >= self.snapshot_telemetry_interval
+            )
+            if snapshot_due:
+                self._last_snapshot_telemetry_time = processed_timestamp
+                snapshot_payload = dict(payload)
+                snapshot_payload["visualization_only"] = False
+                try:
+                    import base64
+                    import cv2
+                    annotated_frame = render_snapshot(frame, frame_snapshot, hud=True)
+                    clean_ok, clean_encoded = cv2.imencode(
+                        ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 68]
+                    )
+                    annotated_ok, annotated_encoded = cv2.imencode(
+                        ".jpg", annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 76]
+                    )
+                    if clean_ok and annotated_ok:
+                        snapshot_payload["_clean_preview_jpeg_base64"] = base64.b64encode(
+                            clean_encoded.tobytes()
+                        ).decode("ascii")
+                        snapshot_payload["_annotated_preview_jpeg_base64"] = base64.b64encode(
+                            annotated_encoded.tobytes()
+                        ).decode("ascii")
+                        snapshot_payload["preview_available"] = True
+                except Exception as exc:
+                    logger.debug("[Telemetry] Diagnostic JPEG unavailable: %s", exc)
+                try:
+                    if self.telemetry_queue.full():
+                        try:
+                            self.telemetry_queue.get_nowait()
+                            self.telemetry_queue.task_done()
+                            self._telemetry_metrics["dropped"] += 1
+                        except Empty:
+                            pass
+                    self.telemetry_queue.put_nowait(snapshot_payload)
+                    self._telemetry_metrics["produced"] += 1
+                except Exception:
+                    self._telemetry_metrics["errors"] += 1
+
+        # Intermediate optical-flow samples are visualization-only.  Existing
+        # event/reliability/evidence rules run exactly once per completed
+        # detector keyframe, never at the higher HUD cadence.
+        if detector_packet is None or detector_tracks is None:
+            t_frame_end = time.perf_counter()
+            self.metrics.record_frame(
+                health_condition_ms=(t_health_condition - t_frame_start) * 1000.0,
+                detection_tracking_ms=(t_detection_tracking - t_health_condition) * 1000.0,
+                event_processing_ms=0.0,
+                total_frame_ms=(t_frame_end - t_frame_start) * 1000.0,
+            )
+            return
+
+        # From here down, retain the original event semantics but bind them to
+        # the exact detector keyframe and context that produced these tracks.
+        frame = detector_packet.job.frame
+        meta = detector_packet.job.meta
+        health = detector_packet.job.health
+        condition = detector_packet.job.condition
+        calibrated_threshold = detector_packet.job.confidence_threshold
+        enhancement_applied = detector_packet.job.enhancement_applied
+        tracks = detector_tracks
+        run_inference = True
+        self._event_video_time = meta.video_time_seconds
 
         # === Layer 3.6: Night-Motion Fallback (architecture v4 §3) ===
         # NightMotionFallback existed in edge/detection/detector.py but was
@@ -1234,7 +1380,10 @@ class EdgePipeline:
             event_overrides = dict(overrides or {})
             # Preserve the source media clock from the exact triggering frame.
             # Never substitute wall-clock time for finite-video events.
-            event_overrides.setdefault("video_time", self._last_video_time)
+            event_overrides.setdefault(
+                "video_time",
+                getattr(self, "_event_video_time", None) or self._last_video_time,
+            )
             ep, seq_num = self.packager.package(
                 track=track,
                 reliability=reliability,
@@ -1320,7 +1469,25 @@ class EdgePipeline:
             f"[Telemetry Metrics] fps={self.telemetry_fps} produced={self._telemetry_metrics['produced']} "
             f"dropped={self._telemetry_metrics['dropped']} errors={self._telemetry_metrics['errors']}"
         )
-        self.metrics.dump_json(self._metrics_json_path, extra={"adaptive_gate": gate_stats})
+        runtime_stage = getattr(getattr(self.detector, "_runtime", None), "last_stage_ms", {})
+        logger.info(
+            "[Hybrid Metrics] tracking_produced=%d dropped=%d errors=%d "
+            "optical_ms=%.2f detector_ms=%s bytetrack_ms=%.2f refresh_ms=%s "
+            "detector_busy=%s detector_queue=%d",
+            self._tracking_metrics["produced"], self._tracking_metrics["dropped"],
+            self._tracking_metrics["errors"], self.visual_tracker.last_update_ms,
+            f"{runtime_stage.get('total', 0.0):.2f}" if runtime_stage else "N/A",
+            float(getattr(self.detector, "last_tracker_ms", 0.0)),
+            f"{self._detector_refresh_interval_ms:.1f}" if self._detector_refresh_interval_ms else "N/A",
+            self.detector_worker.busy, self.detector_worker.queue_depth,
+        )
+        self.metrics.dump_json(self._metrics_json_path, extra={
+            "adaptive_gate": gate_stats,
+            "detector_stage_ms": runtime_stage,
+            "image_tracker_ms": self.visual_tracker.last_update_ms,
+            "detector_refresh_interval_ms": self._detector_refresh_interval_ms,
+            "tracking_transport": dict(self._tracking_metrics),
+        })
 
         # Push the same real summary to the backend (POST /system/metrics),
         # independent of local disk persistence above — before this, the

@@ -50,6 +50,7 @@ class DetectorRuntime(ABC):
         self.model_path = model_path
         self._fps_measurements: List[float] = []
         self._last_fps_report = time.time()
+        self.last_stage_ms: Dict[str, float] = {}
 
     @abstractmethod
     def load(self) -> None:
@@ -160,6 +161,10 @@ class BaseONNXRuntime(DetectorRuntime):
         super().__init__(model_path)
         self.providers = providers
         self.session = None
+        self.input_size = max(160, int(os.environ.get(
+            "DETECTOR_INPUT_SIZE",
+            "320" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "640",
+        )))
 
     def load(self) -> None:
         if not os.path.exists(self.model_path):
@@ -167,8 +172,14 @@ class BaseONNXRuntime(DetectorRuntime):
             
         try:
             import onnxruntime as ort
+            import cv2
         except ImportError:
             raise RuntimeError("STRICT FAILURE: onnxruntime is not installed.")
+
+        # Prevent OpenCV preprocessing/NMS workers from competing with the
+        # ONNX worker for the single fractional CPU available on the edge
+        # service.  This is process-wide and is set once at model load.
+        cv2.setNumThreads(max(1, int(os.environ.get("OPENCV_NUM_THREADS", "1"))))
 
         # Check if the requested providers are actually available in the environment
         available_providers = ort.get_available_providers()
@@ -183,14 +194,28 @@ class BaseONNXRuntime(DetectorRuntime):
             # Enforce single session creation per instance
             sess_options = ort.SessionOptions()
             sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            sess_options.intra_op_num_threads = max(1, int(os.environ.get("ORT_INTRA_OP_THREADS", "1")))
+            sess_options.inter_op_num_threads = max(1, int(os.environ.get("ORT_INTER_OP_THREADS", "1")))
+            sess_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            sess_options.enable_cpu_mem_arena = True
+            sess_options.enable_mem_pattern = True
+            try:
+                sess_options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+                sess_options.add_session_config_entry("session.inter_op.allow_spinning", "0")
+            except Exception:
+                pass
             
             self.session = ort.InferenceSession(self.model_path, sess_options, providers=self.providers)
             
             # Warm up
-            dummy = np.zeros((1, 3, 640, 640), dtype=np.float32)
+            dummy = np.zeros((1, 3, self.input_size, self.input_size), dtype=np.float32)
             input_name = self.session.get_inputs()[0].name
             self.session.run(None, {input_name: dummy})
-            logger.info(f"[{self.__class__.__name__}] Loaded and warmed up using providers: {self.providers}")
+            logger.info(
+                "[%s] Loaded once; providers=%s input=%dx%d intra_op=%d inter_op=%d graph=ALL",
+                self.__class__.__name__, self.providers, self.input_size, self.input_size,
+                sess_options.intra_op_num_threads, sess_options.inter_op_num_threads,
+            )
         except Exception as exc:
             raise RuntimeError(f"STRICT FAILURE: Failed to initialize ONNX session: {exc}")
 
@@ -198,7 +223,7 @@ class BaseONNXRuntime(DetectorRuntime):
         """Resize with letterboxing, HWC -> CHW, BGR -> RGB, and normalize."""
         import cv2
         # Target size for YOLOv8n
-        target_size = (640, 640)
+        target_size = (self.input_size, self.input_size)
         h, w = frame.shape[:2]
         
         r = min(target_size[0] / h, target_size[1] / w)
@@ -228,17 +253,20 @@ class BaseONNXRuntime(DetectorRuntime):
             raise RuntimeError("Model not loaded.")
 
         t_start = time.perf_counter()
-        
         blob, ratio, (pad_w, pad_h) = self._preprocess(frame)
+        t_preprocessed = time.perf_counter()
         input_name = self.session.get_inputs()[0].name
-        
         outputs = self.session.run(None, {input_name: blob})
+        t_inferred = time.perf_counter()
         preds = outputs[0]  # shape: (1, 84, 8400)
-        
-        # Postprocessing: NMS and box scaling
         detections = self._postprocess(preds, ratio, pad_w, pad_h, confidence_threshold)
-        
         t_end = time.perf_counter()
+        self.last_stage_ms = {
+            "preprocess": (t_preprocessed - t_start) * 1000.0,
+            "inference": (t_inferred - t_preprocessed) * 1000.0,
+            "postprocess_nms": (t_end - t_inferred) * 1000.0,
+            "total": (t_end - t_start) * 1000.0,
+        }
         self._record_fps(t_end - t_start)
         
         return detections
@@ -250,10 +278,14 @@ class BaseONNXRuntime(DetectorRuntime):
         preds = preds.transpose()  # (8400, 84)
         
         boxes = preds[:, :4]
-        scores = preds[:, 4:]
-        
-        class_ids = np.argmax(scores, axis=1)
-        confidences = np.max(scores, axis=1)
+        # Only COCO classes the product actually supports participate in the
+        # argmax/NMS.  The old path scanned all 80 classes and could discard a
+        # valid person/vehicle because an unsupported class happened to win.
+        supported_ids = np.asarray(sorted(_YOLO_CLASS_MAP), dtype=np.int64)
+        supported_scores = preds[:, 4:][:, supported_ids]
+        supported_argmax = np.argmax(supported_scores, axis=1)
+        class_ids = supported_ids[supported_argmax]
+        confidences = supported_scores[np.arange(len(supported_scores)), supported_argmax]
         
         mask = confidences > conf_thresh
         boxes = boxes[mask]

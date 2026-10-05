@@ -168,6 +168,11 @@ class TrackData(BaseModel):
     source_class_id: Optional[int] = None
     tracker_state: str = "TRACKED_CURRENT_FRAME"
     matched_current_frame: bool = True
+    # A tracker-only update is grounded in the current image, but it is not a
+    # fresh detector inference.  Keep that distinction explicit end-to-end.
+    detector_confirmed: bool = True
+    confidence_semantics: str = "DETECTOR_CURRENT_FRAME"
+    last_detection_confidence: Optional[float] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -238,6 +243,9 @@ class LiveTrack(BaseModel):
     tracker_state: str = "TRACKED_CURRENT_FRAME"
     matched_current_frame: bool = True
     confidence: float
+    detector_confirmed: bool = True
+    confidence_semantics: str = "DETECTOR_CURRENT_FRAME"
+    last_detection_confidence: Optional[float] = None
     bbox_x: float
     bbox_y: float
     bbox_w: float
@@ -292,6 +300,17 @@ class LiveTelemetryPayload(BaseModel):
     raw_detections: List[LiveDetection] = Field(default_factory=list)
     preview_available: bool = False
     tracks: List[LiveTrack]
+    visualization_only: bool = False
+    detector_frame_index: Optional[int] = None
+    detector_latency_ms: Optional[float] = None
+    tracker_latency_ms: Optional[float] = None
+    detector_refresh_interval_ms: Optional[float] = None
+
+
+class TrackingFramePayload(LiveTelemetryPayload):
+    """Lossy live-HUD sample; never persisted as event/evidence history."""
+
+    visualization_only: Literal[True] = True
 
 
 class TelemetryFramePayload(BaseModel):

@@ -32,6 +32,7 @@ export default function useWebSocket(url, { fetchInitial = true } = {}) {
   const [correlation, setCorrelation] = useState(null);
 
   const latestTelemetry = useRef({});
+  const lastUiTelemetryAt = useRef({});
   const telemetryResetAt = useRef(0);
   const telemetryContextRequest = useRef({});
   const eventsContextRequest = useRef({});
@@ -273,10 +274,18 @@ export default function useWebSocket(url, { fetchInitial = true } = {}) {
               if (!shouldAcceptTelemetry(latestTelemetry.current[cid], state)) break;
               latestTelemetry.current[cid] = state;
               setLastTelemetryAt(Date.now());
-              setLiveTracks(prev => ({
-                ...prev,
-                [cid]: state,
-              }));
+              // The video HUD consumes visualization-only samples directly
+              // and imperatively.  Keep React card updates bounded so a 10 Hz
+              // tracker never rerenders the full Dashboard tree at 10 Hz.
+              window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: state }));
+              const now = Date.now();
+              if (!tel.visualization_only || now - (lastUiTelemetryAt.current[cid] || 0) >= 250) {
+                lastUiTelemetryAt.current[cid] = now;
+                setLiveTracks(prev => ({
+                  ...prev,
+                  [cid]: state,
+                }));
+              }
               // Signal edge health to Header.jsx. Edge ONLINE status is only
               // true when real telemetry is arriving — not just WS connected.
               window.dispatchEvent(new CustomEvent('netraksh-edge-telemetry', {
