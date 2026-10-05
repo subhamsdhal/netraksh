@@ -56,6 +56,33 @@ describe('per-camera authoritative analyzed frame', () => {
     expect(screen.getByText(/SOURCE PLAYBACK 1.0×/)).toBeInTheDocument();
   });
 
+  it('corrects live source playback when it outruns authoritative HUD time', async () => {
+    const { container } = render(<VideoFeed
+      cameraId="cam-checkpoint-01"
+      mediaUrl="blob:video"
+      sourceMode="durable"
+      expectedSessionId="source-1"
+      expectedGeneration={1}
+      telemetryStatus="LIVE"
+      liveTracksData={{
+        camera_id: 'cam-checkpoint-01', stream_id: 'source-1',
+        analysis_session_id: 'run-1', analysis_generation: 1,
+        frame_index: 42, video_time: 6.38, preview_available: true,
+      }}
+    />);
+    const video = container.querySelector('video');
+    Object.defineProperty(video, 'currentTime', { value: 10, writable: true });
+    Object.defineProperty(video, 'playbackRate', { value: 1, writable: true });
+
+    window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: {
+      camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'run-1',
+      analysis_generation: 1, frame_index: 42, video_time: 6.38, tracks: [],
+    } }));
+
+    await waitFor(() => expect(video.currentTime).toBeCloseTo(6.34, 5));
+    expect(video.playbackRate).toBe(1);
+  });
+
   it('does not fetch a frame for a stale session', async () => {
     render(<VideoFeed
       cameraId="cam-border-01"

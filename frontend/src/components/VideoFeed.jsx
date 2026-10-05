@@ -26,6 +26,7 @@ import { formatTelemetryAge } from '../utils/systemTruth';
 import { analyzedSampleIsNewer, analyzedSampleMatchesScope, containedMediaRect } from '../utils/analyzedPlayback';
 import {
   appendTrackingSample,
+  livePlaybackCorrection,
   replayTimelineAssessment,
   selectTrackingSample,
   TRACKING_SAMPLE_TOLERANCE_SECONDS,
@@ -425,12 +426,23 @@ export default function VideoFeed({
           sourceGeneration: expectedSourceGeneration,
         },
       );
+      // The source preview must follow the authoritative source-time clock.
+      // A free-tier edge can briefly process below real time; without bounded
+      // correction the browser reaches EOF while exact HUD samples are still
+      // mid-video, correctly hiding every box as stale. Keep playback at 1.0x
+      // and seek only when drift exceeds the same tolerance used to pair HUD
+      // samples with painted video frames.
+      if (!completedRun) {
+        const video = videoRef.current;
+        const correctedTime = livePlaybackCorrection(video?.currentTime, sample.video_time);
+        if (video && correctedTime != null) video.currentTime = correctedTime;
+      }
       setHudVisible(true);
       setTrackingModeActive(true);
     };
     window.addEventListener('netraksh-tracking-frame', receive);
     return () => window.removeEventListener('netraksh-tracking-frame', receive);
-  }, [cameraId, expectedSessionId, expectedGeneration, expectedSourceGeneration, trackingCapable]);
+  }, [cameraId, completedRun, expectedSessionId, expectedGeneration, expectedSourceGeneration, trackingCapable]);
 
   // Lightweight render-tick to re-evaluate live tracks freshness
   const [tick, setTick] = useState(0);

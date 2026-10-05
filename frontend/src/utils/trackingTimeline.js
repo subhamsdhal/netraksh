@@ -1,6 +1,20 @@
 export const TRACKING_TIMELINE_LIMIT = 180;
 export const TRACKING_SAMPLE_TOLERANCE_SECONDS = 0.16;
 export const REPLAY_COVERAGE_TOLERANCE_SECONDS = 0.5;
+export const LIVE_PLAYBACK_BUFFER_SECONDS = 0.04;
+
+export function livePlaybackCorrection(
+  currentTime,
+  sampleTime,
+  toleranceSeconds = TRACKING_SAMPLE_TOLERANCE_SECONDS,
+) {
+  if (currentTime == null || sampleTime == null) return null;
+  const current = Number(currentTime);
+  const sample = Number(sampleTime);
+  if (!Number.isFinite(current) || !Number.isFinite(sample)) return null;
+  if (Math.abs(current - sample) <= toleranceSeconds) return null;
+  return Math.max(0, sample - LIVE_PLAYBACK_BUFFER_SECONDS);
+}
 
 export function trackingSampleMatchesScope(sample, scope) {
   if (!sample || !scope?.cameraId || sample.camera_id !== scope.cameraId) return false;

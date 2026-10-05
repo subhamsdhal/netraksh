@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendTrackingSample,
+  livePlaybackCorrection,
   replayTimelineAssessment,
   selectTrackingSample,
   trackingIntervalsMs,
@@ -46,6 +47,13 @@ describe('tracking timeline', () => {
     const timeline = [sample(0, 0), sample(3, 0.125), sample(6, 0.25)];
     expect(selectTrackingSample(timeline, 0.13)?.frame_index).toBe(3);
     expect(selectTrackingSample(timeline, 0.7)).toBeNull();
+  });
+
+  it('keeps live source playback within the exact HUD pairing tolerance', () => {
+    expect(livePlaybackCorrection(6.38, 6.31)).toBeNull();
+    expect(livePlaybackCorrection(10, 6.38)).toBeCloseTo(6.34, 5);
+    expect(livePlaybackCorrection(0, 0.5)).toBeCloseTo(0.46, 5);
+    expect(livePlaybackCorrection(0, null)).toBeNull();
   });
 
   it('retains actual moving coordinates and reports source-time cadence', () => {
