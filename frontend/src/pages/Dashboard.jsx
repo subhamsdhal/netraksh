@@ -9,7 +9,7 @@ import { parseUtc } from '../utils/time';
 import { MAX_VISIBLE_CAMERAS, selectCameraSlots, cameraDisplayMetadata } from '../utils/cameraSlots';
 import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState, formatTelemetryAge } from '../utils/systemTruth';
 import useStartupReadiness from '../hooks/useStartupReadiness';
-import { analysisSessionIdForSource, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring } from '../utils/dashboardScope';
+import { analysisSessionIdForSource, completedRunSummaryIdentity, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring } from '../utils/dashboardScope';
 import { updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
 import { analysisLifecyclePresentation, applyReplayResult, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
@@ -701,13 +701,13 @@ export default function Dashboard() {
     let mounted = true;
     visibleCameraIds.filter(Boolean).forEach(async (cameraId) => {
       const source = slotSources[cameraId];
-      const sessionId = analysisSessionIdForSource(scopedLiveTracks[cameraId], source);
-      if (!sessionId || !source?.sourceId || !source.latestAnalysisSessionId) return;
+      const identity = completedRunSummaryIdentity(cameraId, source, scopedLiveTracks[cameraId]);
+      if (!identity) return;
       setRunSummaryLoading(current => ({ ...current, [cameraId]: true }));
-      const params = new URLSearchParams({ camera_id: cameraId, stream_id: source.sourceId });
-      if (source.analysisGeneration != null) params.set('analysis_generation', String(source.analysisGeneration));
+      const params = new URLSearchParams({ camera_id: identity.cameraId, stream_id: identity.streamId });
+      if (identity.analysisGeneration != null) params.set('analysis_generation', String(identity.analysisGeneration));
       try {
-        const response = await authFetch(`/system/analysis-runs/${encodeURIComponent(sessionId)}?${params.toString()}`);
+        const response = await authFetch(`/system/analysis-runs/${encodeURIComponent(identity.analysisSessionId)}?${params.toString()}`);
         const summary = response.ok ? await response.json() : null;
         if (mounted) setRunSummaries(current => ({ ...current, [cameraId]: summary }));
       } catch (_) {

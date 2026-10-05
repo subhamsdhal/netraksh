@@ -6,6 +6,7 @@ import {
   isActiveTelemetry,
   telemetryForSource,
   analysisSessionIdForSource,
+  completedRunSummaryIdentity,
   eventsForCameraRun,
   latestFaceEventForSession,
   latestPlateEventForSession,
@@ -223,6 +224,27 @@ describe('camera telemetry correctness', () => {
       stream_id: 'new-upload',
       analysis_session_id: 'frame-generation-2',
     }, { ...source, runState: 'UPLOADING' })).toBeNull();
+  });
+
+  it('fetches completed run history from exact telemetry identity while the source pointer lags', () => {
+    expect(completedRunSummaryIdentity(
+      'cam-checkpoint-01',
+      { sourceMode: 'durable', sourceId: 'stream-current', analysisGeneration: 6 },
+      { analysis_session_id: 'run-current', stream_id: 'stream-current', analysis_generation: 6 },
+    )).toEqual({
+      cameraId: 'cam-checkpoint-01',
+      streamId: 'stream-current',
+      analysisSessionId: 'run-current',
+      analysisGeneration: 6,
+    });
+  });
+
+  it('does not invent a completed run summary identity without a real run session', () => {
+    expect(completedRunSummaryIdentity(
+      'cam-checkpoint-01',
+      { sourceMode: 'durable', sourceId: 'stream-current', analysisGeneration: 6 },
+      { stream_id: 'stream-current', analysis_generation: 6 },
+    )).toBeNull();
   });
 
   it('rejects an older replay generation even when the durable stream is unchanged', () => {

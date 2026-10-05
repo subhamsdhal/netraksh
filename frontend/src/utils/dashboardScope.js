@@ -129,6 +129,17 @@ export function analysisSessionIdForSource(telemetry, sourceState) {
   return telemetry?.analysis_session_id || sourceState?.latestAnalysisSessionId || null;
 }
 
+export function completedRunSummaryIdentity(cameraId, sourceState, telemetry) {
+  const analysisSessionId = analysisSessionIdForSource(telemetry, sourceState);
+  if (!cameraId || !sourceState?.sourceId || !analysisSessionId) return null;
+  return {
+    cameraId,
+    streamId: sourceState.sourceId,
+    analysisSessionId,
+    analysisGeneration: sourceState.analysisGeneration ?? null,
+  };
+}
+
 export function filterLiveEvents(events = [], activeCameraIds = [], cameraFilter = 'ALL') {
   const contexts = Array.isArray(activeCameraIds) ? null : activeCameraIds;
   const active = new Set(Array.isArray(activeCameraIds) ? activeCameraIds.filter(Boolean) : Object.keys(contexts || {}));
