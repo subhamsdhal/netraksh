@@ -2,23 +2,26 @@ export function analyzedSampleIdentity(sample) {
   if (!sample?.camera_id || !sample?.stream_id || !sample?.analysis_session_id) return null;
   if (!Number.isFinite(Number(sample.frame_index))) return null;
   return [sample.camera_id, sample.stream_id, sample.analysis_session_id,
+    sample.source_generation ?? 'source-generation',
     sample.analysis_generation ?? 'generation', Number(sample.frame_index)].join(':');
 }
 
 export function analyzedSampleMatchesScope(sample, {
-  cameraId, streamId, analysisSessionId = null, analysisGeneration = null,
+  cameraId, streamId, analysisSessionId = null, analysisGeneration = null, sourceGeneration = null,
 } = {}) {
   if (!analyzedSampleIdentity(sample) || !cameraId || !streamId) return false;
   if (sample.camera_id !== cameraId || sample.stream_id !== streamId) return false;
   if (analysisSessionId && sample.analysis_session_id !== analysisSessionId) return false;
   if (analysisGeneration != null && Number(sample.analysis_generation) !== Number(analysisGeneration)) return false;
+  if (sourceGeneration != null && Number(sample.source_generation) !== Number(sourceGeneration)) return false;
   return true;
 }
 
 export function analyzedSampleIsNewer(current, incoming) {
   if (!analyzedSampleIdentity(incoming)) return false;
   if (!current) return true;
-  const run = sample => [sample.camera_id, sample.stream_id, sample.analysis_session_id, sample.analysis_generation].join(':');
+  const run = sample => [sample.camera_id, sample.stream_id, sample.analysis_session_id,
+    sample.source_generation, sample.analysis_generation].join(':');
   if (run(current) !== run(incoming)) return true;
   const currentFrame = Number(current.frame_index);
   const incomingFrame = Number(incoming.frame_index);

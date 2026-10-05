@@ -20,6 +20,17 @@ const sample = (frame, time, extra = {}) => ({
 });
 
 describe('tracking timeline', () => {
+  it('rejects an older source generation even when the camera and bytes-derived stream context look similar', () => {
+    const scope = {
+      cameraId: 'cam-checkpoint-01', streamId: 'fresh-source', analysisSessionId: 'fresh-run',
+      analysisGeneration: 1, sourceGeneration: 12,
+    };
+    const stale = sample(1, 0.1, {
+      camera_id: 'cam-checkpoint-01', stream_id: 'fresh-source', analysis_session_id: 'fresh-run',
+      analysis_generation: 1, source_generation: 11,
+    });
+    expect(appendTrackingSample([], stale, scope)).toEqual([]);
+  });
   it('keeps a bounded ordered current-run timeline and rejects wrong scope', () => {
     let timeline = [];
     for (let index = 0; index < TRACKING_TIMELINE_LIMIT + 20; index += 1) {

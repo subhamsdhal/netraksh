@@ -100,8 +100,16 @@ def activate_session(camera_id: str, session_id: str) -> dict[str, Any]:
     metadata = get_uploaded_session(camera_id, session_id)
     if metadata is None:
         raise FileNotFoundError("Video session was not found in durable storage")
+    previous = _get_json(control_key(camera_id)) or {}
+    source_generation = (
+        int(previous.get("source_generation") or 1)
+        if previous.get("session_id") == session_id
+        else int(previous.get("source_generation") or 0) + 1
+    )
     control = {
         **metadata,
+        "upload_intent_id": session_id,
+        "source_generation": source_generation,
         "source_mode": "durable",
         "scenario": "paused",
         "video_time": 0.0,

@@ -159,10 +159,32 @@ describe('per-camera authoritative analyzed frame', () => {
       telemetryStatus="COMPLETED"
       liveTracksData={{ stream_id: 'source-1', analysis_session_id: 'run-1', frame_index: 42, preview_available: false }}
     />);
-    expect(screen.getByText('SOURCE PREVIEW · COMPLETED RUN · ANALYZED VIEW NOT PERSISTED')).toBeInTheDocument();
+    expect(screen.getByText('SOURCE PREVIEW · COMPLETED RUN · ANALYZED TIMELINE UNAVAILABLE')).toBeInTheDocument();
     expect(screen.queryByText('SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME')).not.toBeInTheDocument();
     expect(screen.queryByText(/ANALYZED FRAME UNAVAILABLE/i)).not.toBeInTheDocument();
     expect(screen.getByTitle('Analyzed view will appear after the first current-run frame')).toBeDisabled();
+  });
+
+  it('restores a completed analyzed timeline for replay without starting a new analysis', async () => {
+    const completedTimeline = [{
+      camera_id: 'cam-checkpoint-01', stream_id: 'source-2', analysis_session_id: 'run-2',
+      analysis_generation: 1, source_generation: 9, sequence: 4, frame_index: 12,
+      video_time: 0.5, frame_width: 640, frame_height: 360,
+      person_count: 1, vehicle_count: 0, track_count: 1, tracks: [],
+    }];
+    render(<VideoFeed
+      cameraId="cam-checkpoint-01"
+      mediaUrl="blob:video"
+      sourceMode="durable"
+      sourceRunState="COMPLETED"
+      expectedSessionId="source-2"
+      expectedGeneration={1}
+      expectedSourceGeneration={9}
+      telemetryStatus="COMPLETED"
+      completedTimeline={completedTimeline}
+    />);
+    await waitFor(() => expect(screen.getByText(/COMPLETED RUN · ANALYZED REPLAY/)).toBeInTheDocument());
+    expect(screen.getByLabelText('Current source-frame tracking overlay')).toHaveStyle({ display: 'block' });
   });
 
   it('promotes the first exact frame once, respects source preview, and resets for the next run', async () => {

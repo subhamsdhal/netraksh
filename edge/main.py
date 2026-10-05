@@ -21,6 +21,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Dict, List, Optional
@@ -160,6 +161,7 @@ class EdgePipeline:
         # generations; stream_id above is the per-run analysis identity.
         self.source_stream_id = config.get("source_stream_id") or self.stream_id
         self.analysis_generation = config.get("analysis_generation")
+        self.source_generation = config.get("source_generation")
         self.zone_config_path = config.get("zones_config_path", "demo/scripts/zones_config.json")
         self._running = False
 
@@ -193,7 +195,8 @@ class EdgePipeline:
         self.telemetry_queue = Queue(maxsize=2)
         self.tracking_queue = Queue(maxsize=2)
         self._telemetry_metrics = {"produced": 0, "dropped": 0, "errors": 0}
-        self._tracking_metrics = {"produced": 0, "dropped": 0, "errors": 0}
+        self._tracking_metrics = {"produced": 0, "transmitted": 0, "dropped": 0, "errors": 0}
+        self._tracking_emit_times = deque(maxlen=64)
         self.snapshot_telemetry_fps = float(os.environ.get("SNAPSHOT_TELEMETRY_FPS", "1"))
         self.snapshot_telemetry_interval = (
             1.0 / self.snapshot_telemetry_fps if self.snapshot_telemetry_fps > 0 else 0
@@ -578,6 +581,8 @@ class EdgePipeline:
                     response = client.post(url, json=payload, headers=self._edge_auth_headers())
                     if response.status_code != 202:
                         self._record_tracking_transport_error(status_code=response.status_code)
+                    else:
+                        self._tracking_metrics["transmitted"] += 1
                 except httpx.RequestError as exc:
                     self._record_tracking_transport_error(exception=exc)
                 finally:
@@ -961,6 +966,12 @@ class EdgePipeline:
             self._telemetry_sequence += 1
             frame_h, frame_w = frame.shape[:2] if frame is not None else (1, 1)
             processed_timestamp = time.time()
+            self._tracking_emit_times.append(processed_timestamp)
+            measured_hud_fps = None
+            if len(self._tracking_emit_times) >= 2:
+                tracking_span = self._tracking_emit_times[-1] - self._tracking_emit_times[0]
+                if tracking_span > 0:
+                    measured_hud_fps = (len(self._tracking_emit_times) - 1) / tracking_span
             frame_snapshot = build_frame_snapshot(
                 camera_id=self.camera_id,
                 analysis_session_id=self.stream_id,
@@ -1010,6 +1021,7 @@ class EdgePipeline:
                 "stream_id": self.source_stream_id,
                 "analysis_session_id": self.stream_id,
                 "analysis_generation": self.analysis_generation,
+                "source_generation": self.source_generation,
                 "analysis_state": "PROCESSING",
                 "scene_condition": str(condition.condition),
                 "lighting_state": getattr(condition, "lighting_state", None),
@@ -1037,6 +1049,12 @@ class EdgePipeline:
                 "detector_latency_ms": self._last_detector_latency_ms,
                 "tracker_latency_ms": self.visual_tracker.last_update_ms,
                 "detector_refresh_interval_ms": self._detector_refresh_interval_ms,
+                "detector_fps": (
+                    1000.0 / self._detector_refresh_interval_ms
+                    if self._detector_refresh_interval_ms and self._detector_refresh_interval_ms > 0
+                    else None
+                ),
+                "hud_fps": measured_hud_fps,
             }
             trace_path = os.environ.get("TELEMETRY_TRACE_PATH")
             if trace_path:
@@ -1389,6 +1407,7 @@ class EdgePipeline:
                         "stream_id": self.source_stream_id,
                         "analysis_session_id": self.stream_id,
                         "analysis_generation": self.analysis_generation,
+                        "source_generation": self.source_generation,
                         "processed_timestamp": processed_timestamp,
                         "analysis_state": state,
                         "tracks": [],
@@ -1498,10 +1517,10 @@ class EdgePipeline:
         )
         runtime_stage = getattr(getattr(self.detector, "_runtime", None), "last_stage_ms", {})
         logger.info(
-            "[Hybrid Metrics] tracking_produced=%d dropped=%d errors=%d "
+            "[Hybrid Metrics] tracking_produced=%d transmitted=%d dropped=%d errors=%d "
             "optical_ms=%.2f detector_ms=%s bytetrack_ms=%.2f refresh_ms=%s "
             "detector_busy=%s detector_queue=%d",
-            self._tracking_metrics["produced"], self._tracking_metrics["dropped"],
+            self._tracking_metrics["produced"], self._tracking_metrics["transmitted"], self._tracking_metrics["dropped"],
             self._tracking_metrics["errors"], self.visual_tracker.last_update_ms,
             f"{runtime_stage.get('total', 0.0):.2f}" if runtime_stage else "N/A",
             float(getattr(self.detector, "last_tracker_ms", 0.0)),

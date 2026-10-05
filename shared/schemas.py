@@ -273,6 +273,10 @@ class LiveTelemetryPayload(BaseModel):
     # Durable replay generation from the control plane. It prevents late
     # telemetry from an older replay from advancing the current lifecycle.
     analysis_generation: Optional[int] = None
+    # Monotonic identity for a deliberate upload/replacement action. This is
+    # separate from analysis_generation because identical bytes still require
+    # a fresh source generation and inference run.
+    source_generation: Optional[int] = None
     analysis_state: Optional[str] = None
     frame_index: Optional[int] = None
     source_timestamp: Optional[float] = None
@@ -305,6 +309,8 @@ class LiveTelemetryPayload(BaseModel):
     detector_latency_ms: Optional[float] = None
     tracker_latency_ms: Optional[float] = None
     detector_refresh_interval_ms: Optional[float] = None
+    detector_fps: Optional[float] = None
+    hud_fps: Optional[float] = None
 
 
 class TrackingFramePayload(LiveTelemetryPayload):

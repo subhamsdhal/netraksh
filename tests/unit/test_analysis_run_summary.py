@@ -7,6 +7,7 @@ from backend.api.system import (
     _latest_frames,
     _latest_telemetry,
     _record_run_summary,
+    _tracking_timelines,
     post_telemetry,
 )
 from backend.models.orm import AnalysisRunSummary, Base
@@ -70,6 +71,31 @@ def test_sparse_completion_preserves_real_final_measurements():
     assert summary.vehicle_count == 2
     assert summary.track_count == 2
     assert summary.scene_condition == "LOW_LIGHT_NIGHT"
+
+
+def test_completion_persists_only_the_exact_run_tracking_timeline():
+    db = _session()
+    identity = ("cam-border-01", "source-1", "run-1", 3)
+    _tracking_timelines[identity] = [{
+        "camera_id": "cam-border-01", "stream_id": "source-1",
+        "analysis_session_id": "run-1", "analysis_generation": 3,
+        "source_generation": 7, "frame_index": 12, "video_time": 0.5,
+        "tracks": [],
+    }]
+    try:
+        _record_run_summary(db, _payload(
+            source_generation=7, detector_fps=1.5, hud_fps=10.0,
+            analysis_state="COMPLETED",
+        ))
+        db.commit()
+        summary = db.get(AnalysisRunSummary, "run-1")
+        assert summary.source_generation == 7
+        assert summary.tracking_sample_count == 1
+        assert summary.tracking_timeline_json[0]["frame_index"] == 12
+        assert summary.detector_fps == 1.5
+        assert summary.hud_fps == 10.0
+    finally:
+        _tracking_timelines.pop(identity, None)
 
 
 def test_run_identity_conflict_is_rejected():

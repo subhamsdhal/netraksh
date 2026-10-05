@@ -7,6 +7,8 @@ export function trackingSampleMatchesScope(sample, scope) {
   if (scope.analysisSessionId && sample.analysis_session_id !== scope.analysisSessionId) return false;
   if (scope.analysisGeneration != null
     && Number(sample.analysis_generation) !== Number(scope.analysisGeneration)) return false;
+  if (scope.sourceGeneration != null
+    && Number(sample.source_generation) !== Number(scope.sourceGeneration)) return false;
   return Number.isFinite(Number(sample.video_time)) && Number.isFinite(Number(sample.frame_index));
 }
 

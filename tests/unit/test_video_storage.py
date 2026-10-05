@@ -56,6 +56,25 @@ def test_uploaded_video_state_uses_logical_object_keys(monkeypatch, tmp_path):
     assert video_storage.get_active_session("cam-border-01")["session_id"] == session_id
 
 
+def test_each_distinct_upload_session_gets_a_new_source_generation(monkeypatch, tmp_path):
+    storage = MemoryStorage()
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)
+    source = tmp_path / "same-bytes.mp4"
+    source.write_bytes(b"identical-video-bytes")
+    first_id = str(uuid.uuid4())
+    second_id = str(uuid.uuid4())
+    for session_id in (first_id, second_id):
+        video_storage.store_uploaded_session(
+            camera_id="cam-checkpoint-01", session_id=session_id, source_path=source,
+            preview_path=None, source_name="same-name.mp4", content_type="video/mp4",
+        )
+        active = video_storage.activate_session("cam-checkpoint-01", session_id)
+        assert active["upload_intent_id"] == session_id
+    second = video_storage.get_active_session("cam-checkpoint-01")
+    assert second["source_generation"] == 2
+    assert video_storage.activate_session("cam-checkpoint-01", second_id)["source_generation"] == 2
+
+
 def test_active_video_control_updates_without_changing_source(monkeypatch, tmp_path):
     storage = MemoryStorage()
     monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)

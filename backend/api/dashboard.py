@@ -599,6 +599,8 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
                     "scenario": durable.get("scenario", "paused"),
                     "analysis_state": durable.get("analysis_state", "READY"),
                     "analysis_generation": durable.get("analysis_generation", 0),
+                    "source_generation": durable.get("source_generation"),
+                    "upload_intent_id": durable.get("upload_intent_id"),
                     "latest_analysis_session_id": durable.get("latest_analysis_session_id"),
                     "completion_time": durable.get("completion_time"),
                 }
@@ -614,6 +616,8 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
                 "processing_status": durable.get("analysis_state", "READY").lower(),
                 "analysis_state": durable.get("analysis_state", "READY"),
                 "analysis_generation": durable.get("analysis_generation", 0),
+                "source_generation": durable.get("source_generation"),
+                "upload_intent_id": durable.get("upload_intent_id"),
                 "video_time": durable.get("video_time", 0.0),
                 "video_time_updated_at": durable.get("video_time_updated_at", 0.0),
                 "completion_time": durable.get("completion_time"),
@@ -738,6 +742,7 @@ async def get_internal_sync(request: Request, _edge=Depends(require_edge_auth)):
                 "scenario": durable.get("scenario", "paused"),
                 "analysis_state": durable.get("analysis_state", "READY"),
                 "analysis_generation": durable.get("analysis_generation", 0),
+                "source_generation": durable.get("source_generation"),
                 "video_time": durable.get("video_time", 0.0),
                 "video_time_updated_at": durable.get("video_time_updated_at", 0.0),
                 "completion_time": durable.get("completion_time"),
@@ -1155,7 +1160,7 @@ async def upload_dashboard_video(
             # The upload response is the authoritative READY acknowledgement.
             # Activation selects the durable source but deliberately does not
             # wake an edge worker or start analysis.
-            await asyncio.to_thread(activate_session, camera_id, new_session_id)
+            activated = await asyncio.to_thread(activate_session, camera_id, new_session_id) or {}
         if camera_id:
             _demo_state.setdefault("uploaded_sources", {}).setdefault(camera_id, {})[new_session_id] = {
                 "source_name": normalized_name,
@@ -1186,6 +1191,8 @@ async def upload_dashboard_video(
             "source_state": "READY",
             "preview_url": preview_url,
             "session_id": new_session_id,
+            "upload_intent_id": new_session_id,
+            "source_generation": activated.get("source_generation") if durable else None,
             "source_name": original_name,
             "normalized_name": normalized_name,
             "camera_id": camera_id,
@@ -1201,7 +1208,7 @@ async def upload_dashboard_video(
                 "finalization": round(finalization_ms, 1),
                 "total_ready": round(total_ready_ms, 1),
             },
-            "message": "Video validated, stored, and ready. Press START to wake analysis for this camera.",
+            "message": "Video validated, stored, and ready for automatic analysis.",
         }
     except HTTPException:
         raise

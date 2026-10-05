@@ -239,6 +239,8 @@ export default function VideoFeed({
   sourceMode,
   expectedSessionId,
   expectedGeneration = null,
+  expectedSourceGeneration = null,
+  completedTimeline = [],
   sourceRunState,
   sourceRestoring = false,
   onAnalyzedSample,
@@ -296,6 +298,7 @@ export default function VideoFeed({
     cameraId,
     streamId: expectedSessionId || sourceSessionId,
     analysisGeneration: expectedGeneration,
+    sourceGeneration: expectedSourceGeneration,
   });
   const runIdentity = scopeMatches && cameraId && analysisSessionId && Number.isFinite(liveTracksData?.frame_index)
     ? `${cameraId}:${sourceSessionId || expectedSessionId || 'source'}:${analysisSessionId}:${telemetryGeneration ?? expectedGeneration ?? 'generation'}`
@@ -312,7 +315,29 @@ export default function VideoFeed({
     displayedSampleRef.current = null;
     setDisplayedSample(null);
     onAnalyzedSampleRef.current?.(null);
-  }, [cameraId, sourceMode, expectedSessionId]);
+  }, [cameraId, sourceMode, expectedSessionId, expectedSourceGeneration]);
+
+  useEffect(() => {
+    if (String(sourceRunState || '').toUpperCase() !== 'COMPLETED') return;
+    if (!Array.isArray(completedTimeline) || completedTimeline.length === 0) return;
+    const first = completedTimeline[0];
+    const scope = {
+      cameraId,
+      streamId: expectedSessionId,
+      analysisSessionId: first.analysis_session_id,
+      analysisGeneration: expectedGeneration,
+      sourceGeneration: expectedSourceGeneration,
+    };
+    const restored = completedTimeline.reduce(
+      (timeline, sample) => appendTrackingSample(timeline, sample, scope, 1800),
+      [],
+    );
+    if (!restored.length) return;
+    trackingRunRef.current = first.analysis_session_id;
+    trackingTimelineRef.current = restored;
+    setTrackingModeActive(true);
+    setHudVisible(true);
+  }, [cameraId, completedTimeline, expectedGeneration, expectedSessionId, expectedSourceGeneration, sourceRunState]);
 
   useEffect(() => {
     if (!runIdentity || currentRunRef.current === runIdentity) return;
@@ -331,6 +356,8 @@ export default function VideoFeed({
       if (expectedSessionId && sample.stream_id !== expectedSessionId) return;
       if (expectedGeneration != null
         && Number(sample.analysis_generation) !== Number(expectedGeneration)) return;
+      if (expectedSourceGeneration != null
+        && Number(sample.source_generation) !== Number(expectedSourceGeneration)) return;
       const incomingRun = sample.analysis_session_id || null;
       if (!incomingRun) return;
       if (trackingRunRef.current && trackingRunRef.current !== incomingRun) return;
@@ -347,14 +374,16 @@ export default function VideoFeed({
           video.play().catch(() => {});
         }
       }
+      const receivedSample = { ...sample, browser_received_timestamp: Date.now() / 1000 };
       trackingTimelineRef.current = appendTrackingSample(
         trackingTimelineRef.current,
-        sample,
+        receivedSample,
         {
           cameraId,
           streamId: expectedSessionId || sample.stream_id,
           analysisSessionId: trackingRunRef.current,
           analysisGeneration: expectedGeneration,
+          sourceGeneration: expectedSourceGeneration,
         },
       );
       setHudVisible(true);
@@ -362,7 +391,7 @@ export default function VideoFeed({
     };
     window.addEventListener('netraksh-tracking-frame', receive);
     return () => window.removeEventListener('netraksh-tracking-frame', receive);
-  }, [cameraId, expectedSessionId, expectedGeneration, trackingCapable]);
+  }, [cameraId, expectedSessionId, expectedGeneration, expectedSourceGeneration, trackingCapable]);
 
   // Lightweight render-tick to re-evaluate live tracks freshness
   const [tick, setTick] = useState(0);
@@ -585,7 +614,10 @@ export default function VideoFeed({
       context.strokeRect(x, y, width, height);
       const objectLabel = String(track.class_name || track.detection_class || 'object').toUpperCase();
       const provenance = track.detector_confirmed ? 'DET' : 'FLOW';
-      const label = `${objectLabel} · #${track.track_id ?? '?'} · ${provenance}`;
+      const confidence = track.detector_confirmed && Number.isFinite(Number(track.confidence))
+        ? ` · ${Math.round(Number(track.confidence) * 100)}%`
+        : '';
+      const label = `${objectLabel} · #${track.track_id ?? '?'} · ${provenance}${confidence}`;
       context.font = '700 10px ui-monospace, monospace';
       const labelWidth = context.measureText(label).width + 10;
       context.fillStyle = palette.labelFill;
@@ -609,10 +641,11 @@ export default function VideoFeed({
       );
       drawTrackingCanvas(sample);
       const now = performance.now();
-      if (sample && now - lastPresentedAtRef.current >= 250) {
+      if (sample && now - lastPresentedAtRef.current >= 100) {
         lastPresentedAtRef.current = now;
-        displayedSampleRef.current = sample;
-        onAnalyzedSampleRef.current?.(sample);
+        const visibleSample = { ...sample, visible_timestamp: Date.now() / 1000 };
+        displayedSampleRef.current = visibleSample;
+        onAnalyzedSampleRef.current?.(visibleSample);
       }
     };
     const callback = (_now, metadata) => {
@@ -1053,10 +1086,12 @@ export default function VideoFeed({
           fontFamily: 'ui-monospace, monospace', fontSize: '0.55rem', letterSpacing: '0.07em',
           pointerEvents: 'none',
         }}>
-          ANALYZED LIVE HUD · SOURCE PLAYBACK 1.0× · IMAGE-GROUNDED BOXES · STALE BOXES HIDDEN
+          {String(sourceRunState || '').toUpperCase() === 'COMPLETED'
+            ? 'COMPLETED RUN · ANALYZED REPLAY · SOURCE PLAYBACK 1.0×'
+            : 'ANALYZED LIVE HUD · SOURCE PLAYBACK 1.0× · IMAGE-GROUNDED BOXES · STALE BOXES HIDDEN'}
         </div>
       )}
-      {!showAnalyzedFrame && mediaUrl && isDurableSource && (
+      {!showAnalyzedFrame && !useLiveTimeline && mediaUrl && isDurableSource && (
         <div style={{
           position: 'absolute', left: '0.45rem', bottom: '0.45rem', zIndex: 20,
           padding: '0.25rem 0.45rem', border: '1px solid rgba(56,189,248,0.55)',
@@ -1067,7 +1102,9 @@ export default function VideoFeed({
           {analyzedFrameUrl
             ? `SOURCE PREVIEW · AI SAMPLE AVAILABLE · FRAME ${liveTracksData?.frame_index ?? '—'} · SOURCE TIME ${Number.isFinite(liveTracksData?.video_time) ? `${liveTracksData.video_time.toFixed(2)}s` : '—'} · PROCESSED ${processedAgeSeconds == null ? 'RECENTLY' : formatTelemetryAge(processedAgeSeconds * 1000).toUpperCase()}`
             : telemetryStatus === 'COMPLETED' || sourceRunState === 'COMPLETED'
-              ? 'SOURCE PREVIEW · COMPLETED RUN · ANALYZED VIEW NOT PERSISTED'
+              ? (Array.isArray(completedTimeline) && completedTimeline.length
+                ? 'SOURCE PREVIEW · COMPLETED RUN · ANALYZED REPLAY AVAILABLE'
+                : 'SOURCE PREVIEW · COMPLETED RUN · ANALYZED TIMELINE UNAVAILABLE')
               : 'SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME'}
         </div>
       )}
@@ -1075,7 +1112,7 @@ export default function VideoFeed({
       {/* ── Corner HUD toggle button ── */}
       <button
         onClick={() => {
-          if (!analyzedFrameUrl) return;
+          if (!analyzedFrameUrl && !trackingTimelineRef.current.length) return;
           setHudVisible((visible) => {
             const nextVisible = !visible;
             if (!nextVisible && runIdentity) manualSourceRunRef.current = runIdentity;
@@ -1083,8 +1120,8 @@ export default function VideoFeed({
             return nextVisible;
           });
         }}
-        disabled={!analyzedFrameUrl}
-        title={analyzedFrameUrl ? (hudVisible ? 'Show source preview' : 'Show analyzed HUD') : 'Analyzed view will appear after the first current-run frame'}
+        disabled={!analyzedFrameUrl && !trackingTimelineRef.current.length}
+        title={(analyzedFrameUrl || trackingTimelineRef.current.length) ? (hudVisible ? 'Show source preview' : 'Show analyzed HUD') : 'Analyzed view will appear after the first current-run frame'}
         aria-pressed={hudVisible}
         style={{
           position: 'absolute', top: '0.4rem', right: '0.4rem',

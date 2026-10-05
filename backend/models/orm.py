@@ -489,6 +489,7 @@ class AnalysisTelemetrySnapshot(Base):
     # telemetry existed; legacy data must never manufacture an identity.
     analysis_session_id: Mapped[Optional[str]] = mapped_column(String(36))
     analysis_generation: Mapped[Optional[int]] = mapped_column(Integer)
+    source_generation: Mapped[Optional[int]] = mapped_column(Integer)
     frame_index: Mapped[Optional[int]] = mapped_column(Integer)
     timestamp: Mapped[float] = mapped_column(Float, nullable=False)
     video_time: Mapped[Optional[float]] = mapped_column(Float)
@@ -511,6 +512,7 @@ class AnalysisRunSummary(Base):
     camera_id: Mapped[str] = mapped_column(String(36), nullable=False)
     stream_id: Mapped[str] = mapped_column(String(36), nullable=False)
     analysis_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_generation: Mapped[Optional[int]] = mapped_column(Integer)
     first_telemetry_at: Mapped[float] = mapped_column(Float, nullable=False)
     last_telemetry_at: Mapped[float] = mapped_column(Float, nullable=False)
     completed_at: Mapped[Optional[float]] = mapped_column(Float)
@@ -526,6 +528,10 @@ class AnalysisRunSummary(Base):
     scene_condition: Mapped[Optional[str]] = mapped_column(String(64))
     lighting_state: Mapped[Optional[str]] = mapped_column(String(64))
     detection_method: Mapped[Optional[str]] = mapped_column(String(64))
+    detector_fps: Mapped[Optional[float]] = mapped_column(Float)
+    hud_fps: Mapped[Optional[float]] = mapped_column(Float)
+    tracking_sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tracking_timeline_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 

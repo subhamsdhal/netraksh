@@ -11,6 +11,7 @@ const sample = (overrides = {}) => ({
   camera_id: 'cam-checkpoint-01',
   stream_id: 'source-2',
   analysis_session_id: 'run-2',
+  source_generation: 3,
   analysis_generation: 7,
   frame_index: 42,
   sequence: 10,
@@ -25,17 +26,18 @@ const sample = (overrides = {}) => ({
 
 describe('authoritative analyzed playback samples', () => {
   it('keys every frame by camera, source, run, generation and frame', () => {
-    expect(analyzedSampleIdentity(sample())).toBe('cam-checkpoint-01:source-2:run-2:7:42');
+    expect(analyzedSampleIdentity(sample())).toBe('cam-checkpoint-01:source-2:run-2:3:7:42');
     expect(analyzedSampleIdentity(sample({ analysis_session_id: null }))).toBeNull();
   });
 
   it('rejects cross-camera, cross-source, cross-run and cross-generation samples', () => {
-    const scope = { cameraId: 'cam-checkpoint-01', streamId: 'source-2', analysisSessionId: 'run-2', analysisGeneration: 7 };
+    const scope = { cameraId: 'cam-checkpoint-01', streamId: 'source-2', analysisSessionId: 'run-2', analysisGeneration: 7, sourceGeneration: 3 };
     expect(analyzedSampleMatchesScope(sample(), scope)).toBe(true);
     expect(analyzedSampleMatchesScope(sample({ camera_id: 'cam-border-01' }), scope)).toBe(false);
     expect(analyzedSampleMatchesScope(sample({ stream_id: 'old-source' }), scope)).toBe(false);
     expect(analyzedSampleMatchesScope(sample({ analysis_session_id: 'old-run' }), scope)).toBe(false);
     expect(analyzedSampleMatchesScope(sample({ analysis_generation: 6 }), scope)).toBe(false);
+    expect(analyzedSampleMatchesScope(sample({ source_generation: 2 }), scope)).toBe(false);
   });
 
   it('does not let an out-of-order frame replace the displayed sample', () => {

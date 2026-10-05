@@ -17,6 +17,8 @@ describe('dashboard video control ownership', () => {
       runState: 'PAUSED',
       analysisState: 'PAUSED',
       analysisGeneration: 0,
+      sourceGeneration: null,
+      uploadIntentId: null,
       scenario: 'paused',
     });
   });

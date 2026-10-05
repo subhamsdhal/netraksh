@@ -46,6 +46,47 @@ router = APIRouter(tags=["system"])
 # only the newest sequence for the current run of each camera so a delayed
 # packet can never move the live HUD backwards.
 _latest_tracking_sequence: Dict[str, tuple[Optional[str], int]] = {}
+_MAX_TRACKING_SAMPLES_PER_RUN = 1800
+_tracking_timelines: Dict[tuple[str, str, str, int], list[dict[str, Any]]] = {}
+
+
+def _tracking_identity(payload: LiveTelemetryPayload) -> Optional[tuple[str, str, str, int]]:
+    if not payload.stream_id or not payload.analysis_session_id or payload.analysis_generation is None:
+        return None
+    return (
+        payload.camera_id,
+        payload.stream_id,
+        payload.analysis_session_id,
+        int(payload.analysis_generation),
+    )
+
+
+def _compact_tracking_sample(payload: TrackingFramePayload, received_at: float) -> dict[str, Any]:
+    """Keep replay data bounded and free of full-frame imagery or event data."""
+    return {
+        "camera_id": payload.camera_id,
+        "stream_id": payload.stream_id,
+        "analysis_session_id": payload.analysis_session_id,
+        "analysis_generation": payload.analysis_generation,
+        "source_generation": payload.source_generation,
+        "sequence": payload.sequence,
+        "frame_index": payload.frame_index,
+        "video_time": payload.video_time,
+        "source_timestamp": payload.source_timestamp,
+        "processed_timestamp": payload.processed_timestamp,
+        "backend_received_timestamp": received_at,
+        "frame_width": payload.frame_width,
+        "frame_height": payload.frame_height,
+        "source_fps": payload.source_fps or payload.fps_declared,
+        "detector_fps": payload.detector_fps,
+        "hud_fps": payload.hud_fps,
+        "person_count": payload.person_count,
+        "vehicle_count": payload.vehicle_count,
+        "track_count": payload.track_count,
+        "detection_method": payload.detection_method,
+        "detector_frame_index": payload.detector_frame_index,
+        "tracks": [track.model_dump() for track in payload.tracks],
+    }
 
 
 @router.get("/metrics")
@@ -338,6 +379,7 @@ def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[
             camera_id=payload.camera_id,
             stream_id=payload.stream_id,
             analysis_generation=payload.analysis_generation,
+            source_generation=payload.source_generation,
             first_telemetry_at=observed_at,
             last_telemetry_at=observed_at,
         )
@@ -353,6 +395,12 @@ def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[
         summary.final_video_time = payload.video_time
     if payload.processing_fps is not None:
         summary.processing_fps = payload.processing_fps
+    if payload.source_generation is not None:
+        summary.source_generation = payload.source_generation
+    if payload.detector_fps is not None:
+        summary.detector_fps = payload.detector_fps
+    if payload.hud_fps is not None:
+        summary.hud_fps = payload.hud_fps
     reported_source_fps = payload.source_fps if payload.source_fps is not None else payload.fps_declared
     if reported_source_fps is not None:
         summary.source_fps = reported_source_fps
@@ -362,6 +410,10 @@ def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[
             setattr(summary, field, value)
     if str(payload.analysis_state or "").upper() == "COMPLETED":
         summary.completed_at = observed_at
+        identity = _tracking_identity(payload)
+        timeline = list(_tracking_timelines.get(identity, [])) if identity else []
+        summary.tracking_timeline_json = timeline
+        summary.tracking_sample_count = len(timeline)
     return summary
 
 
@@ -379,8 +431,11 @@ def _completed_telemetry_view(db: Session, telemetry: dict, previous: Optional[d
         telemetry.get("camera_id"),
         telemetry.get("stream_id"),
         telemetry.get("analysis_generation"),
+        telemetry.get("source_generation"),
     )
-    summary_identity = (summary.camera_id, summary.stream_id, summary.analysis_generation)
+    summary_identity = (
+        summary.camera_id, summary.stream_id, summary.analysis_generation, summary.source_generation,
+    )
     if telemetry_identity != summary_identity:
         return telemetry
     hydrated = dict(telemetry)
@@ -414,6 +469,7 @@ def _completed_telemetry_view(db: Session, telemetry: dict, previous: Optional[d
         previous.get("camera_id"),
         previous.get("stream_id"),
         previous.get("analysis_generation"),
+        previous.get("source_generation"),
         previous.get("analysis_session_id"),
     ) if previous else None
     expected_identity = (*summary_identity, analysis_session_id)
@@ -567,6 +623,7 @@ async def post_telemetry(
         "stream_id": payload.stream_id,
         "analysis_session_id": payload.analysis_session_id,
         "analysis_generation": payload.analysis_generation,
+        "source_generation": payload.source_generation,
         "frame_index": payload.frame_index,
         "timestamp": payload.timestamp,
         "video_time": payload.video_time,
@@ -607,7 +664,20 @@ async def post_tracking_frame(
     if current is not None and current[0] == run_id and payload.sequence <= current[1]:
         return {"status": "stale_ignored"}
     _latest_tracking_sequence[payload.camera_id] = (run_id, payload.sequence)
-    await broadcast_telemetry(payload.model_dump())
+    received_at = __import__("time").time()
+    identity = _tracking_identity(payload)
+    if identity is not None:
+        timeline = _tracking_timelines.setdefault(identity, [])
+        timeline.append(_compact_tracking_sample(payload, received_at))
+        if len(timeline) > _MAX_TRACKING_SAMPLES_PER_RUN:
+            del timeline[:-_MAX_TRACKING_SAMPLES_PER_RUN]
+        # Keep at most four completed/in-flight run buffers per camera.
+        camera_keys = [key for key in _tracking_timelines if key[0] == payload.camera_id]
+        for stale_key in camera_keys[:-4]:
+            _tracking_timelines.pop(stale_key, None)
+    telemetry = payload.model_dump()
+    telemetry["backend_received_timestamp"] = received_at
+    await broadcast_telemetry(telemetry)
     return {"status": "ok"}
 
 
@@ -659,6 +729,7 @@ async def latest_telemetry(
             "analysis_session_id": item.analysis_session_id,
             "analysis_state": item.analysis_state,
             "analysis_generation": item.analysis_generation,
+            "source_generation": getattr(item, "source_generation", None),
             "frame_index": item.frame_index,
             "source_timestamp": None,
             "processed_timestamp": item.timestamp,

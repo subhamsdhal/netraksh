@@ -6,6 +6,8 @@ export function sourceStateFromCurrentVideo(state) {
     restoring: false,
     analysisState: lifecycle || runState,
     analysisGeneration: Number.isFinite(Number(state.analysis_generation)) ? Number(state.analysis_generation) : 0,
+    sourceGeneration: Number.isFinite(Number(state.source_generation)) ? Number(state.source_generation) : null,
+    uploadIntentId: state.upload_intent_id || null,
     scenario: String(state.scenario || 'paused').toLowerCase(),
   };
   if (state.source_mode === 'bundled') {

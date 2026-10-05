@@ -288,6 +288,7 @@ def _apply_control_sync(data: dict) -> bool:
     new_scenario = data.get("scenario", "normal")
     _scenario["analysis_state"] = str(data.get("analysis_state") or "READY").upper()
     _scenario["analysis_generation"] = int(data.get("analysis_generation") or 0)
+    _scenario["source_generation"] = data.get("source_generation")
     new_video_time = data.get("video_time")
 
     if new_scenario != _scenario.get("current"):
@@ -741,6 +742,7 @@ def run_demo_pipeline(
             "camera_name": camera_id,
             "source_stream_id": current_session,
             "analysis_generation": _scenario.get("analysis_generation", 0) if current_session else None,
+            "source_generation": _scenario.get("source_generation") if current_session else None,
             "stream_id": analysis_session_id,
             "video_source": current_source,
             # User-uploaded sessions are finite jobs. Only explicit demo mode
