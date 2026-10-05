@@ -626,7 +626,7 @@ class EdgePipeline:
                 continue
             try:
                 with self._hud_state_lock:
-                    if self._hud_anchor is not None and self._hud_anchor_frame_index != self._hud_anchor[1]:
+                    if self._hud_anchor is not None and self._hud_anchor_frame_index != self._hud_anchor[2]:
                         detector_tracks, detector_frame, detector_index = self._hud_anchor
                         self._hud_tracker.reset()
                         self._hud_tracker.observe(detector_frame, detector_index)

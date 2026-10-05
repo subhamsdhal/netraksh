@@ -4,6 +4,7 @@ Phase 7.4.5: Continuity Identity Hardening Regression Test
 import pytest
 import time
 import numpy as np
+from queue import Queue
 from shared.schemas import BoundingBox, Point
 from edge.tracking.continuity_guard import TrackContinuityGuard
 from edge.main import EdgePipeline
@@ -91,9 +92,48 @@ def test_replay_boundary_resets_transient_tracker_and_rule_state():
     pipeline.fence_module = RuleState(); pipeline.line_module = RuleState(); pipeline.behavior_module = RuleState()
     pipeline.face_module = type("Face", (), {"_temporal_fusion": None})()
     pipeline.detector = type("Detector", (), {"_tracker": None})()
+    pipeline._hud_state_lock = __import__("threading").Lock()
+    pipeline._hud_tracker = type("HudTracker", (), {"reset": lambda self: None})()
+    pipeline.visual_tracker = type("VisualTracker", (), {"reset": lambda self: None})()
     pipeline._reset_replay_state(2)
     assert pipeline._trajectories == {}
     assert pipeline._known_track_ids == set()
     assert pipeline.continuity_guard.get_pool_size() == 0
     assert pipeline.fence_module._track_zone_state == {}
     assert isinstance(pipeline.event_verifier, EventVerifier)
+
+
+def test_hud_loop_reanchors_against_detector_frame_index():
+    class HudTracker:
+        def __init__(self):
+            self.calls = []
+
+        def reset(self):
+            self.calls.append(("reset",))
+
+        def observe(self, frame, frame_index):
+            self.calls.append(("observe", frame_index))
+            return []
+
+        def reanchor(self, tracks, frame_index, frame):
+            self.calls.append(("reanchor", frame_index))
+
+    pipeline = EdgePipeline.__new__(EdgePipeline)
+    pipeline._running = False
+    pipeline._hud_frame_queue = Queue()
+    pipeline._hud_state_lock = __import__("threading").Lock()
+    pipeline._hud_tracker = HudTracker()
+    pipeline._hud_anchor_frame_index = None
+    anchor_frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    pipeline._hud_anchor = ([], anchor_frame, 7)
+    sample_frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    sample_meta = type("Meta", (), {"frame_index": 8})()
+    pipeline._hud_frame_queue.put((sample_frame, sample_meta))
+    emitted = []
+    pipeline._emit_hud_sample = lambda frame, meta, tracks: emitted.append((meta.frame_index, tracks))
+
+    pipeline._run_hud_loop()
+
+    assert pipeline._hud_anchor_frame_index == 7
+    assert ("reanchor", 7) in pipeline._hud_tracker.calls
+    assert emitted == [(8, [])]
