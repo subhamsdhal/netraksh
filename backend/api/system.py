@@ -41,6 +41,12 @@ from backend.api.websocket import broadcast_telemetry
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["system"])
 
+# The edge may use several concurrent, persistent HTTP transports to overcome
+# hosted-network latency.  Requests can therefore arrive out of order.  Keep
+# only the newest sequence for the current run of each camera so a delayed
+# packet can never move the live HUD backwards.
+_latest_tracking_sequence: Dict[str, tuple[Optional[str], int]] = {}
+
 
 @router.get("/metrics")
 async def prometheus_metrics():
@@ -596,6 +602,11 @@ async def post_tracking_frame(
     """
     if edge_identity and edge_identity.edge_id != payload.camera_id:
         raise HTTPException(status_code=403, detail="Authenticated edge identity does not match camera_id")
+    current = _latest_tracking_sequence.get(payload.camera_id)
+    run_id = payload.analysis_session_id
+    if current is not None and current[0] == run_id and payload.sequence <= current[1]:
+        return {"status": "stale_ignored"}
+    _latest_tracking_sequence[payload.camera_id] = (run_id, payload.sequence)
     await broadcast_telemetry(payload.model_dump())
     return {"status": "ok"}
 

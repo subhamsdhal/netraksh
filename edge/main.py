@@ -418,13 +418,26 @@ class EdgePipeline:
         telemetry_thread.start()
         logger.info("[Pipeline] Telemetry thread started")
 
-        tracking_thread = threading.Thread(
-            target=self._run_tracking_loop,
-            daemon=True,
-            name=f"tracking-{self.camera_id}",
+        tracking_worker_count = max(
+            1,
+            int(os.environ.get(
+                "TRACKING_TRANSPORT_WORKERS",
+                "8" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "2",
+            )),
         )
-        tracking_thread.start()
-        logger.info("[Pipeline] Lightweight tracking transport started")
+        tracking_threads = []
+        for worker_index in range(tracking_worker_count):
+            tracking_thread = threading.Thread(
+                target=self._run_tracking_loop,
+                daemon=True,
+                name=f"tracking-{self.camera_id}-{worker_index + 1}",
+            )
+            tracking_thread.start()
+            tracking_threads.append(tracking_thread)
+        logger.info(
+            "[Pipeline] Lightweight tracking transport started workers=%d",
+            tracking_worker_count,
+        )
 
         try:
             self._run_frame_loop()
@@ -432,6 +445,15 @@ class EdgePipeline:
             logger.info("[Pipeline] Interrupted by user")
         finally:
             completed = self.adapter.eof_reached and self.adapter.state != StreamState.FAILED
+            # No PROCESSING packet may be delivered after a terminal state.
+            # Stop producers first, discard lossy visualization snapshots,
+            # and wait for any in-flight request before publishing the final
+            # lifecycle record synchronously.
+            self._running = False
+            self._clear_live_queues()
+            telemetry_thread.join(timeout=12.0)
+            for tracking_thread in tracking_threads:
+                tracking_thread.join(timeout=5.0)
             if completed:
                 self._flush_event_outbox()
                 # Publish one final metrics snapshot after the drain so the
@@ -440,7 +462,6 @@ class EdgePipeline:
                 self._publish_analysis_state("COMPLETED")
             elif self.adapter.state == StreamState.FAILED:
                 self._publish_analysis_state("FAILED")
-            self._running = False
             if hasattr(self, 'sync_client') and self.sync_client:
                 try:
                     self.sync_client.stop()
@@ -449,8 +470,16 @@ class EdgePipeline:
             self.adapter.stop()
             self.adapter.join()
             self.detector_worker.stop()
-            telemetry_thread.join(timeout=2.0)
-            tracking_thread.join(timeout=2.0)
+
+    def _clear_live_queues(self) -> None:
+        """Discard lossy live packets before a replay/terminal transition."""
+        for live_queue in (self.telemetry_queue, self.tracking_queue):
+            while not live_queue.empty():
+                try:
+                    live_queue.get_nowait()
+                    live_queue.task_done()
+                except Empty:
+                    break
 
     def stop(self) -> None:
         """Gracefully stop the pipeline."""
@@ -602,6 +631,8 @@ class EdgePipeline:
         last_watchlist_sync_time = time.time()  # already synced once in __init__
 
         self.adapter.start()
+        finite_wall_start: Optional[float] = None
+        finite_media_start: Optional[float] = None
         try:
             while self._running:
                 frame, meta = self.adapter.get_frame(timeout=0.1)
@@ -611,6 +642,15 @@ class EdgePipeline:
                         self._reset_replay_state(meta.replay_cycle)
                     frame_count += 1
                     if frame_count % frame_skip == 0:
+                        if self.adapter.source_kind == "LOCAL_FINITE_FILE":
+                            media_time = float(meta.video_time_seconds)
+                            if finite_wall_start is None or finite_media_start is None:
+                                finite_wall_start = time.perf_counter()
+                                finite_media_start = media_time
+                            target_elapsed = max(0.0, media_time - finite_media_start)
+                            lead = target_elapsed - (time.perf_counter() - finite_wall_start)
+                            if lead > 0:
+                                time.sleep(lead)
                         self._process_frame(frame, meta)
                 else:
                     if self.adapter.eof_reached:
@@ -671,19 +711,7 @@ class EdgePipeline:
         self._last_detector_frame_index = None
         self._last_condition = None
         self.visual_tracker.reset()
-        telemetry_queue = getattr(self, "telemetry_queue", None)
-        while telemetry_queue is not None and not telemetry_queue.empty():
-            try:
-                telemetry_queue.get_nowait()
-                telemetry_queue.task_done()
-            except Empty:
-                break
-        while not self.tracking_queue.empty():
-            try:
-                self.tracking_queue.get_nowait()
-                self.tracking_queue.task_done()
-            except Empty:
-                break
+        self._clear_live_queues()
 
     def _report_camera_health(self) -> None:
         """
@@ -1340,7 +1368,6 @@ class EdgePipeline:
     def _publish_analysis_state(self, state: str) -> None:
         """Publish an explicit lifecycle state after all buffered frames finish."""
         try:
-            self._telemetry_sequence += 1
             processed_timestamp = time.time()
             import httpx
             verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True

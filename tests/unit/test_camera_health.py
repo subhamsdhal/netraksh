@@ -105,6 +105,52 @@ class TestExposureCheckRealFrame:
         cap.release()
         assert processed > 0
 
+    def test_constrained_quality_checks_are_cached_but_motion_updates_each_frame(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("EDGE_CONSTRAINED_CLOUD", "true")
+        monkeypatch.setenv("HEALTH_QUALITY_INTERVAL_FRAMES", "3")
+        monkeypatch.setenv("HEALTH_MOTION_INTERVAL_FRAMES", "1")
+        import cv2
+
+        real_laplacian = cv2.Laplacian
+        real_histogram = cv2.calcHist
+        calls = {"laplacian": 0, "histogram": 0}
+
+        def counted_laplacian(*args, **kwargs):
+            calls["laplacian"] += 1
+            return real_laplacian(*args, **kwargs)
+
+        def counted_histogram(*args, **kwargs):
+            calls["histogram"] += 1
+            return real_histogram(*args, **kwargs)
+
+        monkeypatch.setattr(cv2, "Laplacian", counted_laplacian)
+        monkeypatch.setattr(cv2, "calcHist", counted_histogram)
+        monitor = CameraHealthMonitor(camera_id="cam-cached-quality", fps_declared=25.0)
+
+        reports = [
+            monitor.update(_frame(value=120 + index, noise=25), time.time() + index / 25.0)
+            for index in range(5)
+        ]
+
+        assert calls == {"laplacian": 2, "histogram": 2}
+        assert reports[-1].frame_variance is not None
+        assert reports[-1].blur_score is not None
+        assert reports[-1].exposure_clip_fraction is not None
+
+    def test_constrained_motion_sampling_keeps_every_source_timestamp(self, monkeypatch):
+        monkeypatch.setenv("EDGE_CONSTRAINED_CLOUD", "true")
+        monkeypatch.setenv("HEALTH_MOTION_INTERVAL_FRAMES", "3")
+        monitor = CameraHealthMonitor(camera_id="cam-motion-cadence", fps_declared=25.0)
+        started = time.time()
+
+        for index in range(5):
+            monitor.update(_frame(value=100 + index, noise=20), started + index / 25.0)
+
+        assert len(monitor._frame_times) == 5
+        assert len(monitor._recent_frames) == 2
+
 
 class TestFrozenFrameDetection:
     def test_one_low_variance_pair_is_not_failed(self):

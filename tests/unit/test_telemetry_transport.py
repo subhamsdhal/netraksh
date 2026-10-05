@@ -101,3 +101,18 @@ def test_snapshot_http_rejection_is_counted_separately_from_drops(monkeypatch, c
 
     assert pipeline._telemetry_metrics == {"produced": 1, "dropped": 7, "errors": 1}
     assert "snapshot upload rejected: HTTP 422" in caplog.text
+
+
+def test_terminal_transition_discards_all_lossy_live_packets():
+    pipeline = object.__new__(EdgePipeline)
+    pipeline.telemetry_queue = Queue(maxsize=2)
+    pipeline.tracking_queue = Queue(maxsize=2)
+    pipeline.telemetry_queue.put({"analysis_state": "PROCESSING"})
+    pipeline.tracking_queue.put({"analysis_state": "PROCESSING"})
+
+    pipeline._clear_live_queues()
+
+    assert pipeline.telemetry_queue.empty()
+    assert pipeline.tracking_queue.empty()
+    assert pipeline.telemetry_queue.unfinished_tasks == 0
+    assert pipeline.tracking_queue.unfinished_tasks == 0

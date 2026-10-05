@@ -61,12 +61,31 @@ class CameraHealthMonitor:
         self._last_report_time: float = 0.0
         self._report_interval: float = 2.0  # seconds between health reports
         self._consecutive_frozen_frames: int = 0
+        constrained = os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true"
+        self._motion_interval_frames = max(
+            1,
+            int(os.environ.get("HEALTH_MOTION_INTERVAL_FRAMES", "3" if constrained else "1")),
+        )
+        self._quality_interval_frames = max(
+            1,
+            int(os.environ.get("HEALTH_QUALITY_INTERVAL_FRAMES", "6" if constrained else "1")),
+        )
+        self._quality_frame_counter = 0
+        self._motion_frame_counter = 0
+        self._cached_blur_score: Optional[float] = None
+        self._cached_exposure_clip_fraction: Optional[float] = None
+        self._cached_frame_variance: Optional[float] = None
 
     def reset(self) -> None:
         """Reset the monitor's state, e.g., on loop boundaries."""
         self._recent_frames.clear()
         self._frame_times.clear()
         self._consecutive_frozen_frames = 0
+        self._quality_frame_counter = 0
+        self._motion_frame_counter = 0
+        self._cached_blur_score = None
+        self._cached_exposure_clip_fraction = None
+        self._cached_frame_variance = None
 
     def update(self, frame: Optional[np.ndarray], frame_timestamp: float, stream_state: Optional[StreamState] = None) -> CameraHealthReport:
         """
@@ -75,9 +94,41 @@ class CameraHealthMonitor:
         """
         new_frame_added = False
         if frame is not None:
-            self._recent_frames.append(frame.copy())
             self._frame_times.append(frame_timestamp)
-            new_frame_added = True
+            self._quality_frame_counter += 1
+            self._motion_frame_counter += 1
+            motion_due = (
+                not self._recent_frames
+                or self._motion_frame_counter % self._motion_interval_frames == 0
+            )
+            if motion_due:
+                # On constrained cloud CPUs, sample the full-resolution
+                # frozen-frame signal at a bounded cadence while keeping all
+                # frame timestamps for truthful source-FPS/drift checks.
+                # Full resolution preserves the established variance scale.
+                self._recent_frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
+                new_frame_added = True
+            quality_due = (
+                self._cached_blur_score is None
+                or self._cached_exposure_clip_fraction is None
+                or self._quality_frame_counter % self._quality_interval_frames == 0
+            )
+            if quality_due:
+                # Blur/exposure are comparatively expensive full-frame quality
+                # measurements.  Their state changes much more slowly than
+                # motion, FPS or drift, so constrained edge nodes cache them
+                # between bounded refreshes.  Frozen-frame checks still use a
+                # real image-derived sample on every processed source frame.
+                quality_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                self._cached_blur_score = float(
+                    cv2.Laplacian(quality_gray, cv2.CV_64F).var()
+                )
+                hist = cv2.calcHist([quality_gray], [0], None, [256], [0, 256])
+                total_pixels = quality_gray.size
+                self._cached_exposure_clip_fraction = max(
+                    float(hist[255]) / total_pixels,
+                    float(hist[0]) / total_pixels,
+                )
 
         state, reason, metrics = self._evaluate(stream_state, new_frame_added)
 
@@ -109,15 +160,18 @@ class CameraHealthMonitor:
             # We don't have a stream state that indicates failure, but no frames yet
             return CameraHealthState.DEGRADED, HealthReason.STREAM_UNAVAILABLE, metrics
 
-        frame = self._recent_frames[-1]
+        gray = self._recent_frames[-1]
 
         # --- Check 2: Frozen frame detection ---
         if len(self._recent_frames) >= 2:
-            diff = cv2.absdiff(
-                cv2.cvtColor(self._recent_frames[-1], cv2.COLOR_BGR2GRAY),
-                cv2.cvtColor(self._recent_frames[-2], cv2.COLOR_BGR2GRAY),
-            )
-            variance = float(np.var(diff))
+            diff = None
+            if new_frame_added or self._cached_frame_variance is None:
+                diff = cv2.absdiff(
+                    self._recent_frames[-1],
+                    self._recent_frames[-2],
+                )
+                self._cached_frame_variance = float(np.var(diff))
+            variance = float(self._cached_frame_variance)
             metrics["frame_variance"] = variance
             
             if new_frame_added:
@@ -127,8 +181,8 @@ class CameraHealthMonitor:
                 # as a stalled camera; a genuinely static black frame still
                 # accumulates toward FAILED.
                 low_light_limit = float(os.environ.get("LOW_LIGHT_LUMA_THRESHOLD", "60.0"))
-                mean_luma = float(np.mean(cv2.cvtColor(self._recent_frames[-1], cv2.COLOR_BGR2GRAY)))
-                changed_fraction = float(np.mean(diff > 3))
+                mean_luma = float(np.mean(self._recent_frames[-1]))
+                changed_fraction = float(np.mean(diff > 3)) if diff is not None else 0.0
                 meaningful_dark_motion = mean_luma < low_light_limit and changed_fraction >= float(os.environ.get("NIGHT_HEALTH_MOTION_FRACTION", "0.005"))
                 if variance < FROZEN_FRAME_VARIANCE_THRESHOLD and not meaningful_dark_motion:
                     self._consecutive_frozen_frames += 1
@@ -140,8 +194,7 @@ class CameraHealthMonitor:
                 return CameraHealthState.FAILED, HealthReason.FROZEN_STREAM, metrics
 
         # --- Check 3: Blur / defocus (Laplacian variance) ---
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        blur_score = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+        blur_score = float(self._cached_blur_score or 0.0)
         metrics["blur_score"] = blur_score
         if blur_score < BLUR_LAPLACIAN_THRESHOLD:
             logger.debug(f"[Health] Camera {self.camera_id}: blur score={blur_score:.1f} < {BLUR_LAPLACIAN_THRESHOLD}")
@@ -149,21 +202,7 @@ class CameraHealthMonitor:
             return CameraHealthState.DEGRADED, HealthReason.EXCESSIVE_BLUR, metrics
 
         # --- Check 4: Exposure (histogram clipping) ---
-        hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
-        total_pixels = gray.size
-        # cv2.calcHist's returned array shape is (256, 1) on some OpenCV
-        # builds and (256,) on others (confirmed different between the
-        # opencv-python and opencv-contrib-python-headless builds this
-        # project has used at different points — see docs/LIMITATIONS.md).
-        # float(hist[i]) works for both: a size-1 (256,1) row or a bare
-        # scalar from a (256,) array. The previous hist[i][0] form crashed
-        # with "IndexError: invalid index to scalar variable" on any build
-        # returning the 1-D shape, on the very first real frame processed.
-        # Over-exposed: too many pixels at 255
-        overexposed_fraction = float(hist[255]) / total_pixels
-        # Under-exposed: too many pixels at 0
-        underexposed_fraction = float(hist[0]) / total_pixels
-        clip_fraction = max(overexposed_fraction, underexposed_fraction)
+        clip_fraction = float(self._cached_exposure_clip_fraction or 0.0)
         metrics["exposure_clip_fraction"] = clip_fraction
         if clip_fraction > EXPOSURE_CLIPPING_THRESHOLD:
             logger.debug(f"[Health] Camera {self.camera_id}: abnormal exposure clip={clip_fraction:.3f}")
