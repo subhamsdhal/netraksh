@@ -415,7 +415,7 @@ export default function VideoFeed({
         }
       }
       const receivedSample = { ...sample, browser_received_timestamp: Date.now() / 1000 };
-      trackingTimelineRef.current = appendTrackingSample(
+      const nextTimeline = appendTrackingSample(
         trackingTimelineRef.current,
         receivedSample,
         {
@@ -426,6 +426,7 @@ export default function VideoFeed({
           sourceGeneration: expectedSourceGeneration,
         },
       );
+      trackingTimelineRef.current = nextTimeline;
       // The source preview must follow the authoritative source-time clock.
       // A free-tier edge can briefly process below real time; without bounded
       // correction the browser reaches EOF while exact HUD samples are still
@@ -434,8 +435,13 @@ export default function VideoFeed({
       // samples with painted video frames.
       if (!completedRun) {
         const video = videoRef.current;
-        const correctedTime = livePlaybackCorrection(video?.currentTime, sample.video_time);
-        if (video && correctedTime != null) video.currentTime = correctedTime;
+        const newestSample = nextTimeline[nextTimeline.length - 1];
+        const correctedTime = livePlaybackCorrection(video?.currentTime, newestSample?.video_time);
+        if (video) {
+          video.playbackRate = 1.0;
+          if (correctedTime != null) video.currentTime = correctedTime;
+          if (video.paused) video.play().catch(() => {});
+        }
       }
       setHudVisible(true);
       setTrackingModeActive(true);
@@ -685,9 +691,20 @@ export default function VideoFeed({
     let handle = null;
     let stopped = false;
     const renderAt = (mediaTime) => {
+      let synchronizedMediaTime = mediaTime;
+      if (!completedRun) {
+        const newestSample = trackingTimelineRef.current[trackingTimelineRef.current.length - 1];
+        const newestTime = Number(newestSample?.video_time);
+        const correctedTime = livePlaybackCorrection(mediaTime, newestTime);
+        if (correctedTime != null && Number(mediaTime) > newestTime) {
+          video.currentTime = correctedTime;
+          if (!video.paused) video.pause();
+          synchronizedMediaTime = correctedTime;
+        }
+      }
       const sample = selectTrackingSample(
         trackingTimelineRef.current,
-        mediaTime,
+        synchronizedMediaTime,
         TRACKING_SAMPLE_TOLERANCE_SECONDS,
       );
       drawTrackingCanvas(sample);
@@ -725,7 +742,7 @@ export default function VideoFeed({
       cancelAnimationFrame(handle);
       drawTrackingCanvas(null);
     };
-  }, [drawTrackingCanvas, mediaUrl, useTrackingTimeline]);
+  }, [completedRun, drawTrackingCanvas, mediaUrl, useTrackingTimeline]);
 
   useEffect(() => {
     setVideoError(false);

@@ -81,6 +81,16 @@ describe('per-camera authoritative analyzed frame', () => {
 
     await waitFor(() => expect(video.currentTime).toBeCloseTo(6.34, 5));
     expect(video.playbackRate).toBe(1);
+    expect(HTMLMediaElement.prototype.play).toHaveBeenCalled();
+
+    HTMLMediaElement.prototype.play.mockClear();
+    video.currentTime = 7;
+    window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: {
+      camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'run-1',
+      analysis_generation: 1, frame_index: 8, video_time: 1, tracks: [],
+    } }));
+    await waitFor(() => expect(video.currentTime).toBeCloseTo(6.34, 5));
+    expect(HTMLMediaElement.prototype.play).toHaveBeenCalled();
   });
 
   it('does not fetch a frame for a stale session', async () => {
