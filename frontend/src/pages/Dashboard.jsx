@@ -10,7 +10,7 @@ import { MAX_VISIBLE_CAMERAS, selectCameraSlots, cameraDisplayMetadata } from '.
 import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState, formatTelemetryAge } from '../utils/systemTruth';
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, completedRunSummaryIdentity, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring } from '../utils/dashboardScope';
-import { updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
+import { canReuseRestoredMedia, updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
 import { analysisLifecyclePresentation, applyReplayResult, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 import { replayTimelineAssessment } from '../utils/trackingTimeline';
@@ -530,14 +530,16 @@ export default function Dashboard() {
     if (visibleCameraIds[0] && !visibleCameraIds.includes(selectedCameraId)) setSelectedCameraId(visibleCameraIds[0]);
   }, [cameraSlots.join('|'), visibleCameraIds.join('|')]);
   useEffect(() => {
+    if (backendStatus !== 'HEALTHY') return undefined;
     let mounted = true;
     setSlotSources((current) => {
       const next = { ...current };
-      visibleCameraIds.filter(Boolean).forEach((cameraId) => { next[cameraId] = restoringSourceState(); });
+      visibleCameraIds.filter(Boolean).forEach((cameraId) => {
+        if (!next[cameraId]) next[cameraId] = restoringSourceState();
+      });
       return next;
     });
     const restoreScopedSources = async () => {
-      if (backendStatus !== 'HEALTHY') return;
       await Promise.all(visibleCameraIds.filter(Boolean).map(async (cameraId) => {
         let authoritativeResponse = false;
         try {
@@ -549,22 +551,26 @@ export default function Dashboard() {
           if (restoredSource) {
             // Commit backend authority before making the control available.
             setSlotSources((current) => ({ ...current, [cameraId]: restoredSource }));
-            setCameraMedia((current) => {
-              const previous = current[cameraId]?.mediaUrl;
-              if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous);
-              return {
-                ...current,
-                [cameraId]: {
-                  ...current[cameraId],
-                  mediaUrl: null,
-                  sessionId: restoredSource.sourceMode === 'durable' ? state.session_id : null,
-                  playbackEnded: false,
-                  uploadError: null,
-                  isUploading: false,
-                },
-              };
-            });
-            if (state.preview_url) {
+            const existingMedia = cameraMediaRef.current[cameraId];
+            const reuseLoadedMedia = canReuseRestoredMedia(existingMedia, restoredSource, state.session_id);
+            if (!reuseLoadedMedia) {
+              setCameraMedia((current) => {
+                const previous = current[cameraId]?.mediaUrl;
+                if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous);
+                return {
+                  ...current,
+                  [cameraId]: {
+                    ...current[cameraId],
+                    mediaUrl: null,
+                    sessionId: restoredSource.sourceMode === 'durable' ? state.session_id : null,
+                    playbackEnded: false,
+                    uploadError: null,
+                    isUploading: false,
+                  },
+                };
+              });
+            }
+            if (state.preview_url && !reuseLoadedMedia) {
               const mediaResponse = await authFetch(state.preview_url);
               if (mediaResponse.ok) {
                 const blobUrl = URL.createObjectURL(await mediaResponse.blob());

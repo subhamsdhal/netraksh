@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  canReuseRestoredMedia,
   sourceIsReady,
   updateCameraMediaState,
   uploadResultIsCurrent,
@@ -73,6 +74,15 @@ describe('camera media state isolation', () => {
     const active = { id: 'new-request' };
     expect(uploadResultIsCurrent(active, 'old-request')).toBe(false);
     expect(uploadResultIsCurrent(active, 'new-request')).toBe(true);
+  });
+
+  it('reuses an already loaded preview for the exact restored durable session', () => {
+    const media = { mediaUrl: 'blob:exact-session', sessionId: 'session-1' };
+    const source = { sourceMode: 'durable', sourceId: 'session-1', runState: 'COMPLETED' };
+
+    expect(canReuseRestoredMedia(media, source, 'session-1')).toBe(true);
+    expect(canReuseRestoredMedia(media, source, 'session-2')).toBe(false);
+    expect(canReuseRestoredMedia({ ...media, mediaUrl: null }, source, 'session-1')).toBe(false);
   });
 
   it('clears progress and errors without changing the other camera', () => {

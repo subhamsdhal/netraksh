@@ -46,3 +46,13 @@ export function uploadResultIsCurrent(activeRequest, requestId) {
   return Boolean(activeRequest?.id && activeRequest.id === requestId);
 }
 
+export function canReuseRestoredMedia(mediaState, sourceState, sessionId) {
+  return Boolean(
+    sourceState?.sourceMode === 'durable'
+    && sessionId
+    && sourceState.sourceId === sessionId
+    && mediaState?.sessionId === sessionId
+    && mediaState?.mediaUrl,
+  );
+}
+
