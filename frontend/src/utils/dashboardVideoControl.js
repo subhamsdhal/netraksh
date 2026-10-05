@@ -44,6 +44,34 @@ export function lifecycleAction(sourceState) {
   return ['WAKING', 'ACTIVE', 'LIVE'].includes(lifecycle) ? 'STOP' : 'START';
 }
 
+// Auto-start authority exists only inside the browser event that completed a
+// new upload. Restored/polled READY sources never have an uploadRequestId, so
+// they cannot accidentally create a run after refresh or reconnect.
+export function uploadAutoStartIdentity(cameraId, sourceState, uploadRequestId) {
+  const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
+  if (
+    !cameraId
+    || !uploadRequestId
+    || sourceState?.sourceMode !== 'durable'
+    || !sourceState?.sourceId
+    || lifecycle !== 'READY'
+  ) return null;
+  return `${cameraId}:${sourceState.sourceId}:${uploadRequestId}`;
+}
+
+export function claimUploadAutoStart(claims, identity) {
+  if (!claims || !identity || claims.has(identity)) return false;
+  claims.add(identity);
+  return true;
+}
+
+export async function runUploadAutoStart({ claims, cameraId, sourceState, uploadRequestId, start }) {
+  const identity = uploadAutoStartIdentity(cameraId, sourceState, uploadRequestId);
+  if (!claimUploadAutoStart(claims, identity)) return { attempted: false, duplicate: Boolean(identity) };
+  const outcome = await start(cameraId, sourceState, 'new-upload');
+  return { attempted: true, identity, outcome };
+}
+
 // A successful replay changes lifecycle fields only.  Source identity is an
 // invariant across replay and preview hydration.
 export function applyReplayResult(sourceState, result) {

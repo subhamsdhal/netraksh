@@ -11,7 +11,7 @@ import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring } from '../utils/dashboardScope';
 import { updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
-import { applyReplayResult, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
+import { applyReplayResult, lifecycleAction, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 
 // Reads structured scores from the event instead of string-parsing the reason.
@@ -129,6 +129,8 @@ export default function Dashboard() {
   const [controlRequests, setControlRequests] = useState({});
   const fileInputRefs = useRef({});
   const uploadRequestsRef = useRef({});
+  const uploadAutoStartClaimsRef = useRef(new Set());
+  const startRequestsRef = useRef({});
   const wakeTimeoutsRef = useRef({});
   // This is a request lifecycle, not a mount latch.  A cold backend must not
   // consume the only prewarm attempt before it can accept the POST.
@@ -144,10 +146,9 @@ export default function Dashboard() {
     setCameraMedia((current) => updateCameraMediaState(current, cameraId, patch));
   };
 
-  const requestScenario = async (cameraId, payload, onPhase = () => {}) => {
+  const requestScenario = async (cameraId, payload, onPhase = () => {}, sourceStateOverride = null) => {
     if (!payload) return { ok: false, status: null, error: 'CONTROL SOURCE SESSION MISSING — REFRESH SOURCE STATE' };
-    const previousSourceState = cameraId ? slotSources[cameraId] : null;
-    const previousMediaState = cameraId ? cameraMediaRef.current[cameraId] : null;
+    const previousSourceState = sourceStateOverride || (cameraId ? slotSources[cameraId] : null);
     try {
       onPhase('CONTROL POST DISPATCHED');
       const response = await authFetch('/api/dashboard/video/scenario', {
@@ -188,11 +189,14 @@ export default function Dashboard() {
       const status = Number.isFinite(error?.status) ? error.status : null;
       onPhase(status ? `CONTROL FAILED HTTP ${status}` : 'CONTROL NETWORK FAILED');
       if (cameraId) {
-        // Failed controls are fully transactional: restore the exact prior
-        // lifecycle and media state instead of leaving a fake WAKING card.
+        // A failed START preserves the exact READY source. In particular, an
+        // auto-start failure must not turn a successful upload into a failed
+        // upload or resurrect the source that the operator just replaced.
         setSlotSources((current) => ({ ...current, [cameraId]: previousSourceState }));
         updateCameraMedia(cameraId, {
-          ...(previousMediaState || {}),
+          isUploading: false,
+          uploadStage: null,
+          uploadProgress: null,
           uploadError: error?.message || 'START FAILED — CONTROL REQUEST DID NOT COMPLETE',
         });
       }
@@ -200,16 +204,19 @@ export default function Dashboard() {
     }
   };
 
-  const handleStartAnalysis = async (cameraId, sourceState) => {
+  const handleStartAnalysis = async (cameraId, sourceState, trigger = 'manual') => {
     if (!cameraId || !sourceState) {
       if (cameraId) updateCameraMedia(cameraId, { uploadError: 'CONTROL SOURCE SESSION MISSING — REFRESH SOURCE STATE', controlStatus: 'CONTROL PAYLOAD FAILED' });
-      return;
+      return { ok: false, status: null, error: 'CONTROL SOURCE SESSION MISSING — REFRESH SOURCE STATE' };
     }
     const payload = scenarioAction(cameraId, sourceState, 'normal', true);
     if (!payload) {
       updateCameraMedia(cameraId, { uploadError: 'CONTROL SOURCE SESSION MISSING — REFRESH SOURCE STATE', controlStatus: 'CONTROL PAYLOAD FAILED' });
-      return;
+      return { ok: false, status: null, error: 'CONTROL SOURCE SESSION MISSING — REFRESH SOURCE STATE' };
     }
+    const startKey = `${cameraId}:${payload.video_session_id || payload.source_mode}`;
+    if (startRequestsRef.current[startKey]) return { ok: false, duplicate: true, error: 'START ALREADY PENDING' };
+    startRequestsRef.current[startKey] = true;
     // The camera whose run the operator starts becomes the explicit
     // presentation scope for summaries, events, and reliability.
     setSelectedCameraId(cameraId);
@@ -222,17 +229,20 @@ export default function Dashboard() {
       session_prefix: payload.video_session_id ? String(payload.video_session_id).slice(0, 8) : null,
       scenario: payload.scenario,
       wake_edge: payload.wake_edge === true,
+      trigger,
     };
-    console.info('[Dashboard] START CLICKED', safeDetails);
+    console.info('[Dashboard] START REQUESTED', safeDetails);
     updateCameraMedia(cameraId, { uploadError: null, controlStatus: 'CONTROL PAYLOAD READY' });
     const outcome = await requestScenario(cameraId, payload, (phase) => {
       console.info('[Dashboard] start control', { ...safeDetails, phase });
       updateCameraMedia(cameraId, { controlStatus: phase });
-    });
+    }, sourceState);
     if (!outcome.ok) {
       updateCameraMedia(cameraId, { uploadError: outcome.error, controlStatus: outcome.status ? `CONTROL FAILED HTTP ${outcome.status}` : 'CONTROL NETWORK FAILED' });
     }
     setControlRequests((current) => ({ ...current, [cameraId]: false }));
+    delete startRequestsRef.current[startKey];
+    return outcome;
   };
 
   useEffect(() => {
@@ -864,12 +874,34 @@ export default function Dashboard() {
       return;
     }
 
-    // READY is authoritative at upload response time. Edge wake and analysis
-    // remain a separate explicit operator action.
-    setSlotSources((current) => ({
-      ...current,
-      [cameraId]: { sourceMode: 'durable', sourceId: sessionId, sourceName, runState: 'READY' },
-    }));
+    const readySource = {
+      sourceMode: 'durable', sourceId: sessionId, sourceName,
+      runState: 'READY', analysisState: 'READY', scenario: 'paused',
+    };
+    setSlotSources((current) => ({ ...current, [cameraId]: readySource }));
+
+    // Claim exactly one automatic START for this concrete browser upload and
+    // authoritative durable source. No effect observes generic READY state,
+    // so polling, websocket repeats, remounts and restored sources are inert.
+    const autoStart = await runUploadAutoStart({
+      claims: uploadAutoStartClaimsRef.current,
+      cameraId,
+      sourceState: readySource,
+      uploadRequestId,
+      start: handleStartAnalysis,
+    });
+    if (autoStart.attempted) {
+      const outcome = autoStart.outcome;
+      if (!outcome?.ok) {
+        setSlotSources((current) => ({ ...current, [cameraId]: readySource }));
+        updateCameraMedia(cameraId, {
+          isUploading: false,
+          uploadStage: null,
+          uploadProgress: null,
+          uploadError: outcome?.duplicate ? 'ANALYSIS START ALREADY PENDING' : (outcome?.error || 'SOURCE READY — AUTOMATIC ANALYSIS START FAILED'),
+        });
+      }
+    }
 
     // Preview is useful but never authoritative. A redirect/blob
     // failure must not clear the stored session or its source identity.
@@ -1164,7 +1196,7 @@ export default function Dashboard() {
                   <span className={`dashboard-camera-status status-${status.toLowerCase().replace(/\s+/g, '-')}`}>{statusLabel}</span>
                   {cameraId && canUpload && !sourceState?.restoring && <div className="dashboard-slot-actions">
                     <button type="button" className="btn btn-sm btn-outline" onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
-                    {sourceState?.sourceMode && lifecycleAction(sourceState) === 'START' && <button type="button" className="btn btn-sm btn-outline" data-action="start-analysis" data-camera-id={cameraId} disabled={Boolean(controlRequests[cameraId])} onClick={() => handleStartAnalysis(cameraId, sourceState)}>{controlRequests[cameraId] ? 'STARTING...' : 'START / ANALYZE'}</button>}
+                    {sourceState?.sourceMode && lifecycleAction(sourceState) === 'START' && <button type="button" className="btn btn-sm btn-outline" data-action="start-analysis" data-camera-id={cameraId} disabled={Boolean(controlRequests[cameraId] || uploadState.isUploading || (sourceState.sourceMode === 'durable' && !sourceState.sourceId))} onClick={() => handleStartAnalysis(cameraId, sourceState)}>{controlRequests[cameraId] ? 'STARTING...' : uploadState.isUploading ? 'UPLOADING...' : 'START / ANALYZE'}</button>}
                     {sourceState?.sourceMode && lifecycleAction(sourceState) === 'STOP' && <button className="btn btn-sm btn-outline" onClick={async () => {
                       const payload = scenarioAction(cameraId, sourceState, 'paused');
                       if (payload) {
@@ -1229,6 +1261,7 @@ export default function Dashboard() {
                     uploadError={mediaState.uploadError || null}
                     sourceMode={sourceState?.sourceMode || null}
                     expectedSessionId={sourceState?.sourceId || null}
+                    expectedGeneration={sourceState?.analysisGeneration ?? null}
                     sourceRunState={displayRunState}
                     sourceRestoring={Boolean(sourceState?.restoring)}
                     onVideoEnded={() => updateCameraMedia(cameraId, { playbackEnded: true })}
@@ -1355,6 +1388,7 @@ export default function Dashboard() {
               uploadError={uploadError}
               sourceMode={slotSources[activeCameraId]?.sourceMode || null}
               expectedSessionId={slotSources[activeCameraId]?.sourceId || null}
+              expectedGeneration={slotSources[activeCameraId]?.analysisGeneration ?? null}
               sourceRunState={slotSources[activeCameraId]?.runState || null}
               onVideoEnded={() => updateCameraMedia(activeCameraId, { playbackEnded: true })}
             />

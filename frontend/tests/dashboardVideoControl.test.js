@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { applyReplayResult, bundledSourceState, durableHeartbeat, lifecycleAction, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo } from '../src/utils/dashboardVideoControl';
+import { describe, expect, it, vi } from 'vitest';
+import { applyReplayResult, bundledSourceState, claimUploadAutoStart, durableHeartbeat, lifecycleAction, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
 
 describe('dashboard video control ownership', () => {
   it('replaces a stale browser session with the bundled source contract', () => {
@@ -132,5 +132,73 @@ describe('dashboard video control ownership', () => {
   it('does not create a durable control payload without its server session identity', () => {
     const missing = scenarioAction('cam-border-01', { sourceMode: 'durable', sourceName: 'cam 1.mp4' }, 'normal', true);
     expect(missing).toBeNull();
+  });
+
+  it('claims one automatic start for one authoritative new upload only', () => {
+    const claims = new Set();
+    const ready = { sourceMode: 'durable', sourceId: 'new-source', analysisState: 'READY' };
+    const identity = uploadAutoStartIdentity('cam-checkpoint-01', ready, 'upload-request-1');
+    expect(identity).toBe('cam-checkpoint-01:new-source:upload-request-1');
+    expect(claimUploadAutoStart(claims, identity)).toBe(true);
+    expect(claimUploadAutoStart(claims, identity)).toBe(false);
+    expect(claimUploadAutoStart(claims, identity)).toBe(false);
+  });
+
+  it('never grants auto-start authority to restored, completed, running or identity-less sources', () => {
+    expect(uploadAutoStartIdentity('cam-checkpoint-01', {
+      sourceMode: 'durable', sourceId: 'stored-source', analysisState: 'READY',
+    }, null)).toBeNull();
+    expect(uploadAutoStartIdentity('cam-checkpoint-01', {
+      sourceMode: 'durable', sourceId: 'stored-source', analysisState: 'COMPLETED',
+    }, 'upload-request')).toBeNull();
+    expect(uploadAutoStartIdentity('cam-checkpoint-01', {
+      sourceMode: 'durable', sourceId: 'stored-source', analysisState: 'ACTIVE',
+    }, 'upload-request')).toBeNull();
+    expect(uploadAutoStartIdentity('cam-checkpoint-01', {
+      sourceMode: 'durable', analysisState: 'READY',
+    }, 'upload-request')).toBeNull();
+  });
+
+  it('isolates automatic start claims by camera, source and upload generation', () => {
+    const claims = new Set();
+    const ready = (sourceId) => ({ sourceMode: 'durable', sourceId, runState: 'READY' });
+    const camera2 = uploadAutoStartIdentity('cam-checkpoint-01', ready('source-2'), 'upload-2');
+    expect(claimUploadAutoStart(claims, camera2)).toBe(true);
+    expect(claimUploadAutoStart(claims, uploadAutoStartIdentity('cam-border-01', ready('source-1'), 'upload-1'))).toBe(true);
+    expect(claimUploadAutoStart(claims, camera2)).toBe(false);
+    expect(claims).toHaveLength(2);
+  });
+
+  it('dispatches exactly one existing start path for repeated READY notifications', async () => {
+    const claims = new Set();
+    const start = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    const input = {
+      claims, cameraId: 'cam-checkpoint-01', uploadRequestId: 'upload-2', start,
+      sourceState: { sourceMode: 'durable', sourceId: 'source-2', analysisState: 'READY' },
+    };
+    const first = await runUploadAutoStart(input);
+    const pollingRepeat = await runUploadAutoStart(input);
+    const websocketRepeat = await runUploadAutoStart(input);
+    expect(first).toMatchObject({ attempted: true, outcome: { ok: true } });
+    expect(pollingRepeat).toEqual({ attempted: false, duplicate: true });
+    expect(websocketRepeat).toEqual({ attempted: false, duplicate: true });
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith('cam-checkpoint-01', input.sourceState, 'new-upload');
+  });
+
+  it('does not dispatch on restoration and returns an auto-start failure for manual recovery', async () => {
+    const start = vi.fn().mockResolvedValue({ ok: false, status: 503, error: 'worker unavailable' });
+    const restored = await runUploadAutoStart({
+      claims: new Set(), cameraId: 'cam-checkpoint-01', uploadRequestId: null, start,
+      sourceState: { sourceMode: 'durable', sourceId: 'stored-source', analysisState: 'READY' },
+    });
+    expect(restored).toEqual({ attempted: false, duplicate: false });
+    expect(start).not.toHaveBeenCalled();
+    const failed = await runUploadAutoStart({
+      claims: new Set(), cameraId: 'cam-checkpoint-01', uploadRequestId: 'new-upload', start,
+      sourceState: { sourceMode: 'durable', sourceId: 'new-source', analysisState: 'READY' },
+    });
+    expect(failed).toMatchObject({ attempted: true, outcome: { ok: false, status: 503 } });
+    expect(start).toHaveBeenCalledTimes(1);
   });
 });

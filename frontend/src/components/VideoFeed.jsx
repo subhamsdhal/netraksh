@@ -232,6 +232,7 @@ export default function VideoFeed({
   onPauseAnalysis,
   sourceMode,
   expectedSessionId,
+  expectedGeneration = null,
   sourceRunState,
   sourceRestoring = false,
 }) {
@@ -245,13 +246,17 @@ export default function VideoFeed({
     left: 0, top: 0, width: 0, height: 0, cw: 0, ch: 0, vw: 0, vh: 0,
   });
 
-  // Durable uploads default to the authoritative analyzed view once telemetry
-  // exists; the toggle switches back to the independently playing source.
-  const [hudVisible, setHudVisible] = useState(sourceMode === 'durable');
+  // Source preview remains truthful while a run is starting. The first exact,
+  // decodable frame for each new run promotes the view to analyzed/HUD once.
+  const [hudVisible, setHudVisible] = useState(false);
   const [videoError, setVideoError] = useState(false);
   const [analyzedFrameUrl, setAnalyzedFrameUrl] = useState(null);
   const [analyzedFrameStatus, setAnalyzedFrameStatus] = useState('WAITING FOR NEXT ANALYZED FRAME');
+  const promotedRunRef = useRef(null);
+  const manualSourceRunRef = useRef(null);
+  const currentRunRef = useRef(null);
   const isDurableSource = sourceMode === 'durable';
+  const requestHudFrame = isDurableSource || hudVisible;
   const hasStoredDurableSource = isDurableSource && Boolean(expectedSessionId);
   const uploadLabel = uploadStage === 'UPLOADING'
     ? `UPLOADING${Number.isFinite(uploadProgress) ? ` ${uploadProgress}%` : ''}`
@@ -264,9 +269,28 @@ export default function VideoFeed({
     && ['LIVE', 'STALE', 'COMPLETED'].includes(telemetryStatus)
   );
 
+  const sourceSessionId = liveTracksData?.stream_id || null;
+  const analysisSessionId = liveTracksData?.analysis_session_id || null;
+  const telemetryGeneration = liveTracksData?.analysis_generation;
+  const scopeMatches = (!liveTracksData?.camera_id || liveTracksData.camera_id === cameraId)
+    && (!expectedSessionId || !sourceSessionId || sourceSessionId === expectedSessionId)
+    && (expectedGeneration == null || telemetryGeneration == null || Number(telemetryGeneration) === Number(expectedGeneration));
+  const runIdentity = scopeMatches && cameraId && analysisSessionId && Number.isFinite(liveTracksData?.frame_index)
+    ? `${cameraId}:${sourceSessionId || expectedSessionId || 'source'}:${analysisSessionId}:${telemetryGeneration ?? expectedGeneration ?? 'generation'}`
+    : null;
+
   useEffect(() => {
-    setHudVisible(sourceMode === 'durable');
-  }, [sourceMode]);
+    promotedRunRef.current = null;
+    manualSourceRunRef.current = null;
+    currentRunRef.current = null;
+    setHudVisible(false);
+  }, [cameraId, sourceMode, expectedSessionId]);
+
+  useEffect(() => {
+    if (!runIdentity || currentRunRef.current === runIdentity) return;
+    currentRunRef.current = runIdentity;
+    setHudVisible(false);
+  }, [runIdentity]);
 
   // Lightweight render-tick to re-evaluate live tracks freshness
   const [tick, setTick] = useState(0);
@@ -282,19 +306,18 @@ export default function VideoFeed({
     // endpoint, however, is keyed by analysis_session_id + frame_index.
     // Keeping those identities separate prevents an old demo frame from
     // being displayed for a newly selected upload.
-    const sourceSessionId = liveTracksData?.stream_id || null;
-    const analysisSessionId = liveTracksData?.analysis_session_id || null;
     const frameIndex = liveTracksData?.frame_index;
-    if (!isDurableSource && !hudVisible) return undefined;
-    if (expectedSessionId && sourceSessionId && sourceSessionId !== expectedSessionId) return undefined;
+    if (!requestHudFrame) return undefined;
+    if (!scopeMatches) return undefined;
     if (!cameraId || !analysisSessionId || !Number.isFinite(frameIndex) || !liveTracksData?.preview_available) return undefined;
     let cancelled = false;
     let nextUrl = null;
+    let committed = false;
     const params = new URLSearchParams({
       analysis_session_id: analysisSessionId,
       frame_index: String(frameIndex),
-      hud: isDurableSource || hudVisible ? 'true' : 'false',
-      cache_bust: `${analysisSessionId}:${frameIndex}:${isDurableSource || hudVisible ? 1 : 0}`,
+      hud: requestHudFrame ? 'true' : 'false',
+      cache_bust: `${analysisSessionId}:${frameIndex}:${requestHudFrame ? 1 : 0}`,
     });
     authFetch(`/system/telemetry/frame/${encodeURIComponent(cameraId)}?${params.toString()}`)
       .then((response) => response.ok && frameResponseMatchesTelemetry(liveTracksData, response.headers) ? response.blob() : null)
@@ -311,7 +334,16 @@ export default function VideoFeed({
             if (previous) URL.revokeObjectURL(previous);
             return nextUrl;
           });
+          committed = true;
           setAnalyzedFrameStatus('LATEST ANALYZED FRAME');
+          if (
+            runIdentity
+            && promotedRunRef.current !== runIdentity
+            && manualSourceRunRef.current !== runIdentity
+          ) {
+            promotedRunRef.current = runIdentity;
+            setHudVisible(true);
+          }
         };
         candidate.onerror = () => {
           URL.revokeObjectURL(nextUrl);
@@ -321,8 +353,8 @@ export default function VideoFeed({
         candidate.src = nextUrl;
       })
       .catch(() => { if (!cancelled) setAnalyzedFrameStatus('WAITING FOR NEXT ANALYZED FRAME'); });
-    return () => { cancelled = true; if (nextUrl) URL.revokeObjectURL(nextUrl); };
-  }, [cameraId, liveTracksData, hudVisible, isDurableSource, expectedSessionId]);
+    return () => { cancelled = true; if (nextUrl && !committed) URL.revokeObjectURL(nextUrl); };
+  }, [cameraId, liveTracksData, requestHudFrame, expectedSessionId, expectedGeneration, scopeMatches, runIdentity, analysisSessionId]);
 
   useEffect(() => {
     if (!['OFFLINE', 'DISCONNECTED'].includes(telemetryStatus)) return;
@@ -717,7 +749,7 @@ export default function VideoFeed({
           const labelH = labelFontSize + labelPadV * 2;
 
           return (
-            <g key={ev.track_id}>
+            <g key={ev.track_id} data-track-id={ev.track_id ?? 'unknown'} data-track-class={ev.class_name || ev.class || 'unknown'}>
               {/* Main bounding rectangle */}
               <rect
                 x={x} y={y} width={w} height={h}
@@ -826,16 +858,23 @@ export default function VideoFeed({
           {analyzedFrameUrl
             ? `SOURCE PREVIEW · AI SAMPLE AVAILABLE · FRAME ${liveTracksData?.frame_index ?? '—'} · SOURCE TIME ${Number.isFinite(liveTracksData?.video_time) ? `${liveTracksData.video_time.toFixed(2)}s` : '—'} · PROCESSED ${processedAgeSeconds == null ? 'RECENTLY' : formatTelemetryAge(processedAgeSeconds * 1000).toUpperCase()}`
             : telemetryStatus === 'COMPLETED' || sourceRunState === 'COMPLETED'
-              ? 'SOURCE PREVIEW · COMPLETED RUN · ANALYZED FRAME UNAVAILABLE'
+              ? 'SOURCE PREVIEW · COMPLETED RUN · ANALYZED VIEW NOT PERSISTED'
               : 'SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME'}
         </div>
       )}
 
       {/* ── Corner HUD toggle button ── */}
       <button
-        onClick={() => { if (analyzedFrameUrl) setHudVisible((v) => !v); }}
+        onClick={() => {
+          if (!analyzedFrameUrl) return;
+          setHudVisible((visible) => {
+            const nextVisible = !visible;
+            if (!nextVisible && runIdentity) manualSourceRunRef.current = runIdentity;
+            return nextVisible;
+          });
+        }}
         disabled={!analyzedFrameUrl}
-        title={analyzedFrameUrl ? 'Toggle debug HUD' : 'Analyzed frame unavailable'}
+        title={analyzedFrameUrl ? (hudVisible ? 'Show source preview' : 'Show analyzed HUD') : 'Analyzed view will appear after the first current-run frame'}
         aria-pressed={hudVisible}
         style={{
           position: 'absolute', top: '0.4rem', right: '0.4rem',
@@ -852,7 +891,7 @@ export default function VideoFeed({
           display: 'flex', alignItems: 'center', gap: '0.25rem',
         }}
       >
-        <Activity size={8} /> {hudVisible && analyzedFrameUrl ? 'ANALYZED' : analyzedFrameUrl ? 'SOURCE' : 'ANALYZED FRAME UNAVAILABLE'}
+        <Activity size={8} /> {hudVisible && analyzedFrameUrl ? 'ANALYZED' : analyzedFrameUrl ? 'SOURCE' : 'ANALYZED VIEW PENDING'}
       </button>
 
       {/* ── Toggleable debug HUD (replaces removed [SUPER DEBUG OVERLAY]) ── */}
