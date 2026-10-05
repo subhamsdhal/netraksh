@@ -18,6 +18,17 @@ describe('production UI contains no retired operational claims', () => {
     expect(dashboard).not.toContain('DEMO_CAMERA_LABELS');
   });
 
+  it('uses lifecycle status instead of primary evaluator START or STOP controls', () => {
+    const dashboard = read('../src/pages/Dashboard.jsx');
+    expect(dashboard).toContain('analysisLifecyclePresentation(sourceState, mediaState');
+    expect(dashboard).toContain('RETRY ANALYSIS');
+    expect(dashboard).not.toContain('START / ANALYZE');
+    expect(dashboard).not.toContain('STOP ANALYSIS');
+    expect(dashboard).not.toContain('data-action="stop-analysis"');
+    // The normal backend stop contract remains available for operational use.
+    expect(read('../src/utils/dashboardVideoControl.js')).toContain("payload.control_action = 'stop'");
+  });
+
   it('uses shared freshness and age truth in the command center', () => {
     const dashboard = read('../src/pages/Dashboard.jsx');
     expect(dashboard).toContain('cameraHealthPresentation(health[activeCameraId], now)');

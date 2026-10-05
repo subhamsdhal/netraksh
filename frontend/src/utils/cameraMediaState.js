@@ -8,6 +8,7 @@ export const DEFAULT_CAMERA_MEDIA = Object.freeze({
   sessionId: null,
   sessionStartTime: 0,
   uploadError: null,
+  analysisStartFailed: false,
   playbackEnded: false,
 });
 

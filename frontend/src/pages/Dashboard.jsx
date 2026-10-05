@@ -11,7 +11,7 @@ import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring } from '../utils/dashboardScope';
 import { updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
-import { applyReplayResult, lifecycleAction, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 
 // Reads structured scores from the event instead of string-parsing the reason.
@@ -177,6 +177,7 @@ export default function Dashboard() {
           edgeStatus: ['ready', 'waking'].includes(String(result.edge_status || '').toLowerCase()) ? 'WAKING' : 'WAITING',
           isUploading: false,
           uploadError: null,
+          analysisStartFailed: false,
         });
         window.dispatchEvent(new CustomEvent('netraksh:edge-wake', { detail: { cameraId, status: 'WAKING' } }));
         clearTimeout(wakeTimeoutsRef.current[cameraId]);
@@ -232,13 +233,13 @@ export default function Dashboard() {
       trigger,
     };
     console.info('[Dashboard] START REQUESTED', safeDetails);
-    updateCameraMedia(cameraId, { uploadError: null, controlStatus: 'CONTROL PAYLOAD READY' });
+    updateCameraMedia(cameraId, { uploadError: null, analysisStartFailed: false, controlStatus: 'CONTROL PAYLOAD READY' });
     const outcome = await requestScenario(cameraId, payload, (phase) => {
       console.info('[Dashboard] start control', { ...safeDetails, phase });
       updateCameraMedia(cameraId, { controlStatus: phase });
     }, sourceState);
     if (!outcome.ok) {
-      updateCameraMedia(cameraId, { uploadError: outcome.error, controlStatus: outcome.status ? `CONTROL FAILED HTTP ${outcome.status}` : 'CONTROL NETWORK FAILED' });
+      updateCameraMedia(cameraId, { analysisStartFailed: true, uploadError: outcome.error, controlStatus: outcome.status ? `CONTROL FAILED HTTP ${outcome.status}` : 'CONTROL NETWORK FAILED' });
     }
     setControlRequests((current) => ({ ...current, [cameraId]: false }));
     delete startRequestsRef.current[startKey];
@@ -800,6 +801,7 @@ export default function Dashboard() {
       sessionStartTime: Date.now(),
       playbackEnded: false,
       uploadError: null,
+      analysisStartFailed: false,
     });
 
     const formData = new FormData();
@@ -898,6 +900,7 @@ export default function Dashboard() {
           isUploading: false,
           uploadStage: null,
           uploadProgress: null,
+          analysisStartFailed: true,
           uploadError: outcome?.duplicate ? 'ANALYSIS START ALREADY PENDING' : (outcome?.error || 'SOURCE READY — AUTOMATIC ANALYSIS START FAILED'),
         });
       }
@@ -1158,8 +1161,9 @@ export default function Dashboard() {
                 : lifecycle || (telemetryAvailable ? 'LIVE' : 'LOADED');
           const mediaState = cameraId ? (cameraMedia[cameraId] || {}) : {};
           const uploadState = visibleUploadState(mediaState, sourceState);
+          const analysisPresentation = analysisLifecyclePresentation(sourceState, mediaState, Boolean(controlRequests[cameraId]));
           const isDemoReplay = Boolean(telemetry?.demo_replay || sourceState?.sourceMode === 'bundled');
-          const statusLabel = status;
+          const statusLabel = analysisPresentation.badge;
           const cardFps = processingFpsForTelemetry(telemetry, now);
           const sourceFps = sourceFpsForTelemetry(telemetry);
           // Process-local telemetry is not a durable completed-run record.
@@ -1188,43 +1192,15 @@ export default function Dashboard() {
                   {sourceState?.restoring && <p className="dashboard-source-name">RESTORING CLOUD SOURCE...</p>}
                   {!sourceState?.restoring && sourceState?.sourceName && <p className="dashboard-source-name">SOURCE: {sourceState.sourceName}</p>}
                   {!sourceState?.restoring && sourceState?.sourceMode && <p className="dashboard-source-name">MODE: {sourceState.sourceMode === 'durable' ? 'USER UPLOAD' : 'BUNDLED DEMO'} · ANALYSIS: {displayRunState}</p>}
-                  {mediaState.controlStatus && <p className="dashboard-source-name" role="status">{mediaState.controlStatus}</p>}
                   <p className="dashboard-source-name">SUPPORTED: MP4 · AVI · MOV · MKV · WEBM · M4V</p>
                   {mediaState.edgeStatus === 'WAKING' && !telemetryAvailable && <p className="dashboard-source-name">WAKING AI WORKER...</p>}
                 </div>
                 <div className="dashboard-camera-card-controls">
-                  <span className={`dashboard-camera-status status-${status.toLowerCase().replace(/\s+/g, '-')}`}>{statusLabel}</span>
+                  <span className={`dashboard-camera-status status-${analysisPresentation.tone}`}>{statusLabel}</span>
                   {cameraId && canUpload && !sourceState?.restoring && <div className="dashboard-slot-actions">
-                    <button type="button" className="btn btn-sm btn-outline" onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
-                    {sourceState?.sourceMode && lifecycleAction(sourceState) === 'START' && <button type="button" className="btn btn-sm btn-outline" data-action="start-analysis" data-camera-id={cameraId} disabled={Boolean(controlRequests[cameraId] || uploadState.isUploading || (sourceState.sourceMode === 'durable' && !sourceState.sourceId))} onClick={() => handleStartAnalysis(cameraId, sourceState)}>{controlRequests[cameraId] ? 'STARTING...' : uploadState.isUploading ? 'UPLOADING...' : 'START / ANALYZE'}</button>}
-                    {sourceState?.sourceMode && lifecycleAction(sourceState) === 'STOP' && <button className="btn btn-sm btn-outline" onClick={async () => {
-                      const payload = scenarioAction(cameraId, sourceState, 'paused');
-                      if (payload) {
-                        try {
-                          const response = await authFetch('/api/dashboard/video/scenario', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                          const result = await response.json().catch(() => ({}));
-                          if (!response.ok) throw new Error(`STOP FAILED — HTTP ${response.status}`);
-                          setSlotSources((current) => ({
-                            ...current,
-                            [cameraId]: current[cameraId] ? {
-                              ...current[cameraId],
-                              runState: String(result.analysis_state || 'PAUSED').toUpperCase(),
-                              analysisState: String(result.analysis_state || 'PAUSED').toUpperCase(),
-                              ...(result.analysis_generation != null ? { analysisGeneration: result.analysis_generation } : {}),
-                            } : current[cameraId],
-                          }));
-                          updateCameraMedia(cameraId, { edgeStatus: 'WAITING', uploadError: null });
-                        } catch (error) {
-                          updateCameraMedia(cameraId, { uploadError: error.message || 'STOP FAILED' });
-                        }
-                      }
-                      // Keep the selected source bound to this slot while it is
-                      // paused so the operator can START / ANALYZE the same
-                      // uploaded file again. Clearing the slot and deleting
-                      // its source metadata made local uploads impossible to
-                      // restart after STOP.
-                      setLatestEvent(null);
-                    }} type="button" data-action="stop-analysis" data-camera-id={cameraId}>STOP ANALYSIS</button>}
+                    <button type="button" className="btn btn-sm btn-outline" disabled={uploadState.isUploading} onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
+                    <span className={`dashboard-analysis-state is-${analysisPresentation.tone}`} role="status">{analysisPresentation.label}</span>
+                    {analysisPresentation.retry && <button type="button" className="btn btn-sm btn-outline" data-action="retry-analysis" data-camera-id={cameraId} disabled={Boolean(controlRequests[cameraId])} onClick={() => handleStartAnalysis(cameraId, sourceState, 'retry')}>RETRY ANALYSIS</button>}
                   </div>}
                   <select
                     aria-label={`Select camera slot ${slotIndex + 1}`}

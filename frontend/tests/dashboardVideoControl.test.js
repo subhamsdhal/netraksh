@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { applyReplayResult, bundledSourceState, claimUploadAutoStart, durableHeartbeat, lifecycleAction, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, claimUploadAutoStart, durableHeartbeat, lifecycleAction, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
 
 describe('dashboard video control ownership', () => {
   it('replaces a stale browser session with the bundled source contract', () => {
@@ -132,6 +132,32 @@ describe('dashboard video control ownership', () => {
   it('does not create a durable control payload without its server session identity', () => {
     const missing = scenarioAction('cam-border-01', { sourceMode: 'durable', sourceName: 'cam 1.mp4' }, 'normal', true);
     expect(missing).toBeNull();
+  });
+
+  it('presents authoritative analysis lifecycle independently of telemetry freshness', () => {
+    expect(analysisLifecyclePresentation({ analysisState: 'STARTING' }).label).toBe('STARTING ANALYSIS...');
+    expect(analysisLifecyclePresentation({ analysisState: 'WAKING' }).label).toBe('WAKING AI WORKER...');
+    expect(analysisLifecyclePresentation({ analysisState: 'RUNNING' })).toMatchObject({
+      label: 'ANALYZING...', badge: 'ONLINE / ANALYZING', retry: false,
+    });
+    expect(analysisLifecyclePresentation({ analysisState: 'ACTIVE' }, { telemetryStatus: 'STALE' }).label).toBe('ANALYZING...');
+    expect(analysisLifecyclePresentation({ analysisState: 'STOPPING' }).label).toBe('FINISHING ANALYSIS...');
+    expect(analysisLifecyclePresentation({ analysisState: 'COMPLETED' })).toMatchObject({
+      label: 'ANALYSIS COMPLETED', badge: 'COMPLETED', retry: false,
+    });
+    expect(analysisLifecyclePresentation({ analysisState: 'FAILED' }).label).toBe('ANALYSIS FAILED');
+  });
+
+  it('presents upload preparation, restored readiness, and explicit start recovery truthfully', () => {
+    expect(analysisLifecyclePresentation({ runState: 'UPLOADING' }, { isUploading: true, uploadStage: 'UPLOADING' }).label).toBe('UPLOADING...');
+    expect(analysisLifecyclePresentation({ runState: 'UPLOADING' }, { isUploading: true, uploadStage: 'PREPARING' }).label).toBe('PREPARING VIDEO...');
+    expect(analysisLifecyclePresentation({ runState: 'NORMALIZING' }, { uploadStage: 'PREPARING' }).label).toBe('PREPARING VIDEO...');
+    expect(analysisLifecyclePresentation({ analysisState: 'READY', sourceMode: 'durable' }).label).toBe('SOURCE READY');
+    expect(analysisLifecyclePresentation({ analysisState: 'READY', sourceMode: 'durable' }, {}, true).label).toBe('STARTING ANALYSIS...');
+    expect(analysisLifecyclePresentation(
+      { analysisState: 'READY', sourceMode: 'durable' },
+      { analysisStartFailed: true },
+    )).toMatchObject({ label: 'ANALYSIS START FAILED', retry: true });
   });
 
   it('claims one automatic start for one authoritative new upload only', () => {

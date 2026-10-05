@@ -1514,6 +1514,12 @@ button {
 .dashboard-camera-card-controls { display: flex; align-items: flex-start; flex-direction: column; gap: 0.4rem; min-width: 10rem; }
 .dashboard-slot-actions { display: flex; gap: .65rem; flex-wrap: wrap; align-items: center; }
 .dashboard-slot-actions .btn { white-space: nowrap; }
+.dashboard-analysis-state { display: inline-flex; align-items: center; min-height: 2rem; padding: 0.35rem 0.65rem; border: 1px solid var(--border-color); border-radius: var(--radius-md); font: 700 0.68rem var(--font-display); letter-spacing: 0.07em; white-space: nowrap; }
+.dashboard-analysis-state.is-active { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 55%, var(--border-color)); }
+.dashboard-analysis-state.is-active::before { content: ''; width: 0.45rem; height: 0.45rem; margin-right: 0.45rem; border-radius: 999px; background: currentColor; animation: pulse 1.4s ease-in-out infinite; }
+.dashboard-analysis-state.is-completed { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 55%, var(--border-color)); }
+.dashboard-analysis-state.is-completed::before { content: '\2713'; margin-right: 0.45rem; }
+.dashboard-analysis-state.is-failed { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 55%, var(--border-color)); }
 .dashboard-camera-card-controls select { max-width: 13rem; }
 .dashboard-camera-status { align-self: flex-end; font: 700 0.62rem var(--font-display); letter-spacing: 0.08em; padding: 0.22rem 0.45rem; border: 1px solid var(--border-color); border-radius: 999px; }
 .status-live { color: var(--color-ok); border-color: rgba(74,222,128,.5); } .status-offline, .status-not-connected { color: var(--text-muted); }

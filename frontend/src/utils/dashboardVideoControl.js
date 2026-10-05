@@ -44,6 +44,47 @@ export function lifecycleAction(sourceState) {
   return ['WAKING', 'ACTIVE', 'LIVE'].includes(lifecycle) ? 'STOP' : 'START';
 }
 
+export function analysisLifecyclePresentation(sourceState, mediaState = {}, controlPending = false) {
+  const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
+  const uploadStage = String(mediaState?.uploadStage || '').toUpperCase();
+
+  if (['VALIDATING', 'PREPARING', 'QUEUED_FOR_NORMALIZATION', 'NORMALIZING', 'ACTIVATING'].includes(lifecycle)
+    || ['VALIDATING', 'PREPARING', 'NORMALIZING'].includes(uploadStage)) {
+    return { label: 'PREPARING VIDEO...', badge: 'PREPARING', tone: 'active', retry: false };
+  }
+  if (mediaState?.isUploading || ['UPLOADING', 'SELECTING'].includes(lifecycle) || uploadStage === 'UPLOADING') {
+    return { label: 'UPLOADING...', badge: 'UPLOADING', tone: 'active', retry: false };
+  }
+  if (mediaState?.analysisStartFailed) {
+    return { label: 'ANALYSIS START FAILED', badge: 'START FAILED', tone: 'failed', retry: true };
+  }
+  if (controlPending || lifecycle === 'STARTING') {
+    return { label: 'STARTING ANALYSIS...', badge: 'STARTING', tone: 'active', retry: false };
+  }
+  if (lifecycle === 'WAKING') {
+    return { label: 'WAKING AI WORKER...', badge: 'WAKING', tone: 'active', retry: false };
+  }
+  if (['ACTIVE', 'LIVE', 'RUNNING'].includes(lifecycle)) {
+    return { label: 'ANALYZING...', badge: 'ONLINE / ANALYZING', tone: 'active', retry: false };
+  }
+  if (lifecycle === 'STOPPING') {
+    return { label: 'FINISHING ANALYSIS...', badge: 'FINISHING', tone: 'active', retry: false };
+  }
+  if (lifecycle === 'COMPLETED') {
+    return { label: 'ANALYSIS COMPLETED', badge: 'COMPLETED', tone: 'completed', retry: false };
+  }
+  if (['FAILED', 'ERROR'].includes(lifecycle) || uploadStage === 'ERROR') {
+    return { label: 'ANALYSIS FAILED', badge: 'FAILED', tone: 'failed', retry: false };
+  }
+  if (sourceState?.restoring) {
+    return { label: 'RESTORING SOURCE...', badge: 'RESTORING', tone: 'active', retry: false };
+  }
+  if (sourceState?.sourceMode) {
+    return { label: 'SOURCE READY', badge: 'SOURCE READY', tone: 'ready', retry: false };
+  }
+  return { label: 'ADD / REPLACE VIDEO', badge: 'IDLE', tone: 'ready', retry: false };
+}
+
 // Auto-start authority exists only inside the browser event that completed a
 // new upload. Restored/polled READY sources never have an uploadRequestId, so
 // they cannot accidentally create a run after refresh or reconnect.
