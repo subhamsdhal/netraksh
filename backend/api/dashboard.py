@@ -944,9 +944,10 @@ async def complete_dashboard_video(
     changes = {
         "latest_analysis_session_id": payload.get("analysis_session_id"),
         "final_frame_index": payload.get("final_frame_index"),
-        "video_time": float(payload.get("final_video_time") or 0.0),
         "video_time_updated_at": time.time(),
     }
+    if payload.get("final_video_time") is not None:
+        changes["video_time"] = float(payload["final_video_time"])
     completed = complete_active_session(camera_id, session_id, generation, changes)
     if completed is None:
         raise HTTPException(status_code=409, detail="Completion does not match active durable generation")

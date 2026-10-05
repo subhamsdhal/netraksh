@@ -389,9 +389,19 @@ def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[
     ):
         raise HTTPException(status_code=409, detail="analysis_session_id identity conflict")
     summary.last_telemetry_at = max(float(summary.last_telemetry_at), observed_at)
-    if payload.frame_index is not None:
+    # Sparse lifecycle packets must not replace a real final sample with a
+    # decoder/transport artifact that is older or less complete. The edge
+    # reports its last processed frame explicitly; retain monotonic source
+    # identity for delayed packets from the same run as well.
+    if payload.frame_index is not None and (
+        summary.final_frame_index is None
+        or int(payload.frame_index) >= int(summary.final_frame_index)
+    ):
         summary.final_frame_index = payload.frame_index
-    if payload.video_time is not None:
+    if payload.video_time is not None and (
+        summary.final_video_time is None
+        or float(payload.video_time) >= float(summary.final_video_time)
+    ):
         summary.final_video_time = payload.video_time
     if payload.processing_fps is not None:
         summary.processing_fps = payload.processing_fps

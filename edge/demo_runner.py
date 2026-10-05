@@ -798,8 +798,13 @@ def run_demo_pipeline(
                                 "video_session_id": current_session,
                                 "analysis_session_id": pipeline.stream_id,
                                 "analysis_generation": _scenario.get("analysis_generation", 0),
-                                "final_frame_index": getattr(pipeline.adapter, "frame_index", None),
-                                "final_video_time": getattr(pipeline, "_last_video_time", 0.0),
+                                # Use the last frame actually processed by the
+                                # pipeline. CameraAdapter exposes
+                                # frames_received, not a frame_index property,
+                                # and that decoder counter can include frames
+                                # dropped before processing.
+                                "final_frame_index": getattr(pipeline, "_last_processed_frame_index", None),
+                                "final_video_time": getattr(pipeline, "_last_video_time", None),
                             },
                             timeout=10.0,
                         )

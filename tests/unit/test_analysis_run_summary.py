@@ -73,6 +73,35 @@ def test_sparse_completion_preserves_real_final_measurements():
     assert summary.scene_condition == "LOW_LIGHT_NIGHT"
 
 
+def test_sparse_completion_preserves_real_final_frame_and_source_time():
+    db = _session()
+    _record_run_summary(db, _payload(
+        frame_index=138,
+        video_time=9.88,
+        person_count=2,
+    ))
+    db.commit()
+    _record_run_summary(db, _payload(
+        sequence=2,
+        timestamp=1010.0,
+        processed_timestamp=1010.0,
+        analysis_state="COMPLETED",
+        frame_index=None,
+        video_time=None,
+        person_count=None,
+        vehicle_count=None,
+        track_count=None,
+        scene_condition=None,
+        lighting_state=None,
+        detection_method=None,
+    ))
+    db.commit()
+
+    summary = db.get(AnalysisRunSummary, "run-1")
+    assert summary.final_frame_index == 138
+    assert summary.final_video_time == 9.88
+
+
 def test_completion_persists_only_the_exact_run_tracking_timeline():
     db = _session()
     identity = ("cam-border-01", "source-1", "run-1", 3)

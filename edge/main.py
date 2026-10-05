@@ -188,6 +188,10 @@ class EdgePipeline:
         self._last_tracking_video_time: Optional[float] = None
         self._telemetry_sequence = 0
         self._last_video_time = None
+        # The adapter's frame counter includes decoded frames that may be
+        # dropped by its bounded queue. Completion must report the last frame
+        # that this pipeline actually processed instead.
+        self._last_processed_frame_index: Optional[int] = None
         self._last_frame_width = None
         self._last_frame_height = None
         # We need a small bounded queue so if the backend goes down or network
@@ -714,6 +718,7 @@ class EdgePipeline:
         self._last_detector_source_time = None
         self._last_detector_completed_at = None
         self._last_detector_frame_index = None
+        self._last_processed_frame_index = None
         self._last_condition = None
         self.visual_tracker.reset()
         self._clear_live_queues()
@@ -796,6 +801,10 @@ class EdgePipeline:
     def _process_frame(self, frame, meta) -> None:
         """Process a single frame through the full pipeline."""
         log_runtime_checkpoint("active_inference", active=True)
+        # Record the authoritative frame identity before any health gate can
+        # return early. This is the frame the pipeline really processed, not
+        # merely the number of frames the decoder read.
+        self._last_processed_frame_index = int(meta.frame_index)
         self._last_video_time = meta.video_time_seconds
         self._last_frame_width = meta.width
         self._last_frame_height = meta.height
@@ -949,18 +958,13 @@ class EdgePipeline:
 
         # === Live Telemetry (architecture v4 §16) ===
         tracking_video_time = float(meta.video_time_seconds)
-        tracking_due = (
-            self.telemetry_fps > 0
-            and (
-                self._last_tracking_video_time is None
-                or tracking_video_time < self._last_tracking_video_time
-                or (tracking_video_time - self._last_tracking_video_time) >= self.telemetry_interval
-            )
-        )
-        # Cadence is keyed to source media time, not wall time.  A fast local
-        # processor therefore cannot race through the file while emitting only
-        # a handful of widely spaced source samples; a constrained processor
-        # still emits every actual frame it can process.
+        # Every processed frame has an image-grounded optical-flow/tracker
+        # result, including an explicit empty result when all tracks leave the
+        # frame. Emitting every processed frame prevents detector latency from
+        # turning a source-time cadence gate into a stale, sub-8Hz HUD. The
+        # bounded transport queue remains the loss-tolerant back-pressure
+        # boundary; event/evidence semantics stay on their existing keyframes.
+        tracking_due = self.telemetry_fps > 0
         if tracking_due:
             self._last_tracking_video_time = tracking_video_time
             self._telemetry_sequence += 1
@@ -1402,6 +1406,7 @@ class EdgePipeline:
                         "timestamp": processed_timestamp,
                         "video_time": self._last_video_time,
                         "sequence": self._telemetry_sequence,
+                        "frame_index": self._last_processed_frame_index,
                         "frame_width": self._last_frame_width,
                         "frame_height": self._last_frame_height,
                         "stream_id": self.source_stream_id,

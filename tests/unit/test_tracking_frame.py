@@ -90,3 +90,18 @@ def test_tracking_frame_accepts_sequence_reset_for_new_run():
 
     assert result == {"status": "ok"}
     assert broadcast.await_count == 2
+
+
+def test_tracking_frame_accepts_empty_image_grounded_sample_to_clear_stale_boxes():
+    payload = _payload().model_copy(update={"sequence": 10, "frame_index": 30, "tracks": []})
+    _latest_tracking_sequence.clear()
+
+    with patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock) as broadcast:
+        result = asyncio.run(post_tracking_frame(
+            payload,
+            SimpleNamespace(edge_id="cam-checkpoint-01"),
+        ))
+
+    assert result == {"status": "ok"}
+    broadcast.assert_awaited_once()
+    assert broadcast.await_args.args[0]["tracks"] == []
