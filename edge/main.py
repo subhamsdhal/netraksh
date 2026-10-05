@@ -181,6 +181,7 @@ class EdgePipeline:
             simulate_night=config.get("simulate_night", False),
             loop_video=config.get("loop_video", os.environ.get("DEMO_LOOP_VIDEO", "false").lower() == "true"),
         )
+        self.adapter.set_frame_tap(self._capture_hud_frame)
 
         # Telemetry
         self.telemetry_fps = int(os.environ.get("TELEMETRY_FPS", 10))
@@ -197,7 +198,18 @@ class EdgePipeline:
         # We need a small bounded queue so if the backend goes down or network
         # is durable/offline-capable. Telemetry is explicitly lossy.
         self.telemetry_queue = Queue(maxsize=2)
-        self.tracking_queue = Queue(maxsize=2)
+        self.tracking_queue = Queue(maxsize=32)
+        self._hud_frame_queue = Queue(maxsize=2)
+        self._hud_decoupled = False
+        self._hud_tracker = OpticalFlowBoxTracker(
+            max_width=int(os.environ.get("IMAGE_TRACKER_MAX_WIDTH", "480")),
+            history_frames=int(os.environ.get("TRACKING_HISTORY_FRAMES", "180")),
+            max_detector_age_frames=int(os.environ.get("TRACK_MAX_DETECTOR_AGE_FRAMES", "144")),
+        )
+        self._hud_state_lock = threading.Lock()
+        self._hud_anchor = None
+        self._hud_anchor_frame_index = None
+        self._hud_emit_times = deque(maxlen=64)
         self._telemetry_metrics = {"produced": 0, "dropped": 0, "errors": 0}
         self._tracking_metrics = {"produced": 0, "transmitted": 0, "dropped": 0, "errors": 0}
         self._tracking_emit_times = deque(maxlen=64)
@@ -425,11 +437,20 @@ class EdgePipeline:
         telemetry_thread.start()
         logger.info("[Pipeline] Telemetry thread started")
 
+        self._hud_decoupled = True
+        hud_thread = threading.Thread(
+            target=self._run_hud_loop,
+            daemon=True,
+            name=f"hud-{self.camera_id}",
+        )
+        hud_thread.start()
+        logger.info("[Pipeline] Decoupled image-grounded HUD tracker started")
+
         tracking_worker_count = max(
             1,
             int(os.environ.get(
                 "TRACKING_TRANSPORT_WORKERS",
-                "8" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "2",
+                "32" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
             )),
         )
         tracking_threads = []
@@ -459,6 +480,7 @@ class EdgePipeline:
             self._running = False
             self._clear_live_queues()
             telemetry_thread.join(timeout=12.0)
+            hud_thread.join(timeout=5.0)
             for tracking_thread in tracking_threads:
                 tracking_thread.join(timeout=5.0)
             if completed:
@@ -480,7 +502,7 @@ class EdgePipeline:
 
     def _clear_live_queues(self) -> None:
         """Discard lossy live packets before a replay/terminal transition."""
-        for live_queue in (self.telemetry_queue, self.tracking_queue):
+        for live_queue in (self.telemetry_queue, self.tracking_queue, self._hud_frame_queue):
             while not live_queue.empty():
                 try:
                     live_queue.get_nowait()
@@ -567,6 +589,97 @@ class EdgePipeline:
                 self._telemetry_metrics["errors"] += 1
                 logger.error("[Telemetry] Unexpected worker error: %s: %s", type(e).__name__, e)
         client.close()
+
+    def _capture_hud_frame(self, frame, meta) -> None:
+        """Tap every decoded frame into the loss-tolerant HUD queue."""
+        try:
+            if self._hud_frame_queue.full():
+                self._hud_frame_queue.get_nowait()
+                self._hud_frame_queue.task_done()
+            self._hud_frame_queue.put_nowait((frame, meta))
+        except Exception:
+            # The HUD is lossy by design; camera ingestion never waits for it.
+            pass
+
+    def _run_hud_loop(self) -> None:
+        """Track every decoded image independently of heavy event analysis."""
+        while self._running:
+            try:
+                frame, meta = self._hud_frame_queue.get(timeout=0.25)
+            except Empty:
+                continue
+            try:
+                with self._hud_state_lock:
+                    if self._hud_anchor is not None and self._hud_anchor_frame_index != self._hud_anchor[1]:
+                        detector_tracks, detector_frame, detector_index = self._hud_anchor
+                        self._hud_tracker.reset()
+                        self._hud_tracker.observe(detector_frame, detector_index)
+                        self._hud_tracker.reanchor(detector_tracks, detector_index, detector_frame)
+                        self._hud_anchor_frame_index = detector_index
+                    tracks = self._hud_tracker.observe(frame, meta.frame_index)
+                self._emit_hud_sample(frame, meta, tracks)
+            except Exception as exc:
+                logger.debug("[HUD] Lightweight tracker sample failed: %s", type(exc).__name__)
+            finally:
+                self._hud_frame_queue.task_done()
+
+    def _emit_hud_sample(self, frame, meta, tracks) -> None:
+        frame_h, frame_w = frame.shape[:2]
+        processed_timestamp = time.time()
+        self._hud_emit_times.append(processed_timestamp)
+        span = self._hud_emit_times[-1] - self._hud_emit_times[0]
+        measured_hud_fps = ((len(self._hud_emit_times) - 1) / span) if len(self._hud_emit_times) > 1 and span > 0 else None
+        with self._hud_state_lock:
+            self._telemetry_sequence += 1
+            sequence = self._telemetry_sequence
+        snapshot = build_frame_snapshot(
+            camera_id=self.camera_id,
+            analysis_session_id=self.stream_id,
+            frame_index=meta.frame_index,
+            source_timestamp=meta.timestamp,
+            processed_at=processed_timestamp,
+            source_video_time=meta.video_time_seconds,
+            tracks=tracks,
+            frame_width=frame_w,
+            frame_height=frame_h,
+        )
+        payload = {
+            "camera_id": self.camera_id, "timestamp": processed_timestamp,
+            "video_time": meta.video_time_seconds, "sequence": sequence,
+            "frame_index": int(meta.frame_index), "source_timestamp": float(meta.timestamp),
+            "processed_timestamp": processed_timestamp,
+            "processing_fps": float(self.metrics.current_fps()),
+            "source_fps": float(meta.fps_declared) if meta.fps_declared > 0 else None,
+            "fps_declared": float(meta.fps_declared) if meta.fps_declared > 0 else None,
+            "frame_width": frame_w, "frame_height": frame_h,
+            "stream_id": self.source_stream_id, "analysis_session_id": self.stream_id,
+            "analysis_generation": self.analysis_generation, "source_generation": self.source_generation,
+            "analysis_state": "PROCESSING",
+            "scene_condition": str(getattr(self._last_condition, "condition", "UNKNOWN")),
+            "detection_method": "OPTICAL_FLOW" if tracks else "NONE",
+            "source_kind": self.adapter.source_kind, "demo_replay": self.adapter.demo_replay,
+            "replay_cycle": getattr(meta, "replay_cycle", 0), "raw_detection_count": 0,
+            "tracker_output_count": len(tracks), "person_count": snapshot.person_count,
+            "vehicle_count": snapshot.vehicle_count, "track_count": snapshot.track_count,
+            "active_track_ids": snapshot.active_track_ids, "tracker_output_ids": list(snapshot.tracker_output_ids),
+            "raw_detections": [], "preview_available": False,
+            "tracks": snapshot.live_tracks(), "visualization_only": True,
+            "detector_frame_index": self._last_detector_frame_index,
+            "detector_latency_ms": self._last_detector_latency_ms,
+            "tracker_latency_ms": self._hud_tracker.last_update_ms,
+            "detector_refresh_interval_ms": self._detector_refresh_interval_ms,
+            "detector_fps": (1000.0 / self._detector_refresh_interval_ms if self._detector_refresh_interval_ms and self._detector_refresh_interval_ms > 0 else None),
+            "hud_fps": measured_hud_fps,
+        }
+        try:
+            if self.tracking_queue.full():
+                self.tracking_queue.get_nowait()
+                self.tracking_queue.task_done()
+                self._tracking_metrics["dropped"] += 1
+            self.tracking_queue.put_nowait(payload)
+            self._tracking_metrics["produced"] += 1
+        except Exception:
+            self._tracking_metrics["errors"] += 1
 
     def _run_tracking_loop(self) -> None:
         """Push small current-frame box metadata without persistence/JPEGs."""
@@ -719,6 +832,10 @@ class EdgePipeline:
         self._last_detector_completed_at = None
         self._last_detector_frame_index = None
         self._last_processed_frame_index = None
+        with self._hud_state_lock:
+            self._hud_anchor = None
+            self._hud_anchor_frame_index = None
+            self._hud_tracker.reset()
         self._last_condition = None
         self.visual_tracker.reset()
         self._clear_live_queues()
@@ -897,6 +1014,13 @@ class EdgePipeline:
                     detector_packet.job.frame_index,
                     detector_packet.job.frame,
                 )
+                if self._hud_decoupled:
+                    with self._hud_state_lock:
+                        self._hud_anchor = (
+                            list(detector_tracks),
+                            detector_packet.job.frame.copy(),
+                            int(detector_packet.job.frame_index),
+                        )
                 self._verify_tick += 1
                 for expired_id in self.continuity_guard.expire_stale(time.time()):
                     self.track_feature_tracker.forget(expired_id)
@@ -1068,18 +1192,19 @@ class EdgePipeline:
                         trace_file.write(json.dumps(trace_record, sort_keys=True) + "\n")
                 except OSError as exc:
                     logger.debug("[Telemetry] Trace write failed: %s", exc)
-            try:
-                if self.tracking_queue.full():
-                    try:
-                        self.tracking_queue.get_nowait()
-                        self.tracking_queue.task_done()
-                        self._tracking_metrics["dropped"] += 1
-                    except Empty:
-                        pass
-                self.tracking_queue.put_nowait(dict(payload))
-                self._tracking_metrics["produced"] += 1
-            except Exception:
-                self._tracking_metrics["errors"] += 1
+            if not self._hud_decoupled:
+                try:
+                    if self.tracking_queue.full():
+                        try:
+                            self.tracking_queue.get_nowait()
+                            self.tracking_queue.task_done()
+                            self._tracking_metrics["dropped"] += 1
+                        except Empty:
+                            pass
+                    self.tracking_queue.put_nowait(dict(payload))
+                    self._tracking_metrics["produced"] += 1
+                except Exception:
+                    self._tracking_metrics["errors"] += 1
 
             # Full JPEG + durable latest-state telemetry stays diagnostic and
             # low-cadence.  Its encoding/upload can no longer gate HUD boxes.

@@ -13,7 +13,7 @@ import random
 import re
 import threading
 import time
-from typing import Generator, Optional, Tuple
+from typing import Callable, Generator, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -120,6 +120,10 @@ class CameraAdapter:
         self.frames_received = 0
         self.frames_dropped = 0
         self.last_frame_time = 0.0
+        self.frame_tap: Optional[Callable[[np.ndarray, FrameMetadata], None]] = None
+
+    def set_frame_tap(self, callback: Optional[Callable[[np.ndarray, FrameMetadata], None]]) -> None:
+        self.frame_tap = callback
 
     @property
     def state(self) -> StreamState:
@@ -362,6 +366,12 @@ class CameraAdapter:
                 )
                 self._replay_boundary_pending = False
                 self._last_video_time = meta.video_time_seconds
+
+                if self.frame_tap is not None:
+                    try:
+                        self.frame_tap(frame.copy(), meta)
+                    except Exception as exc:
+                        logger.debug("[Adapter] Frame tap failed (non-fatal): %s", type(exc).__name__)
 
                 # Push to bounded queue with DROP_OLDEST policy
                 try:
