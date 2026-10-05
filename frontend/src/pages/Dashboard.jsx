@@ -1180,6 +1180,12 @@ export default function Dashboard() {
           // analysis session; otherwise name the absence instead of implying
           // that an old global/latest value is current evidence.
           const completedTelemetry = completedRun ? completedSummary : null;
+          // During a live run the presented sample is the authoritative
+          // image-grounded HUD sample. After EOF, however, VideoFeed may keep
+          // a timeline sample selected near source time 0 for replay. The
+          // completed run summary is the durable authority for final metrics
+          // and must win for the card's final-frame fields.
+          const metricsSample = completedRun ? completedTelemetry : presentedSample;
           const updateTimestamp = completedRun
             ? presentedSample?.processed_timestamp || completedSummary?.completed_at || completedSummary?.last_telemetry_at
             : presentedSample?.processed_timestamp || null;
@@ -1289,14 +1295,14 @@ export default function Dashboard() {
                 <span><b>SCORE</b>{latestFaceEvent?.recognition_score == null ? 'N/A' : Number(latestFaceEvent.recognition_score).toFixed(1)}</span>
               </div>
               <div className="dashboard-camera-telemetry">
-                <span><b>DETECTOR FPS</b>{Number.isFinite(Number(presentedSample?.detector_fps ?? completedTelemetry?.detector_fps)) ? Number(presentedSample?.detector_fps ?? completedTelemetry.detector_fps).toFixed(2) : 'N/A'}</span>
-                <span><b>HUD / TRACKING FPS</b>{Number.isFinite(Number(presentedSample?.hud_fps ?? completedTelemetry?.hud_fps)) ? Number(presentedSample?.hud_fps ?? completedTelemetry.hud_fps).toFixed(2) : (completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : (cardFps == null ? 'N/A' : cardFps.toFixed(2)))}</span>
-                <span><b>SOURCE FPS</b>{completedRun ? (sourceFpsForTelemetry(presentedSample || completedTelemetry) == null ? 'NOT RECORDED FOR THIS COMPLETED RUN' : sourceFpsForTelemetry(presentedSample || completedTelemetry).toFixed(2)) : (sourceFps == null ? 'N/A' : sourceFps.toFixed(2))}</span>
-                <span><b>{completedRun ? 'FINAL FRAME PERSONS' : 'PERSONS'}</b>{presentedSample ? (presentedSample.person_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? (completedTelemetry?.person_count ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : 'N/A'}</span>
-                <span><b>{completedRun ? 'FINAL FRAME VEHICLES' : 'VEHICLES'}</b>{presentedSample ? (presentedSample.vehicle_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? (completedTelemetry?.vehicle_count ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : 'N/A'}</span>
-                <span><b>{completedRun ? 'FINAL FRAME TRACKS' : 'TRACKS'}</b>{presentedSample ? (presentedSample.track_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? (completedTelemetry?.track_count ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : 'N/A'}</span>
-                <span><b>FRAME</b>{presentedSample?.frame_index ?? (completedRun ? completedTelemetry?.final_frame_index ?? completedTelemetry?.frame_index ?? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A')}</span>
-                <span><b>SOURCE TIME</b>{Number.isFinite(Number(presentedSample?.video_time)) ? `${Number(presentedSample.video_time).toFixed(2)}s` : completedRun && Number.isFinite(Number(completedTelemetry?.final_video_time ?? completedTelemetry?.video_time)) ? `${Number(completedTelemetry.final_video_time ?? completedTelemetry.video_time).toFixed(2)}s` : 'N/A'}</span>
+                <span><b>DETECTOR FPS</b>{Number.isFinite(Number(metricsSample?.detector_fps)) ? Number(metricsSample.detector_fps).toFixed(2) : 'N/A'}</span>
+                <span><b>HUD / TRACKING FPS</b>{Number.isFinite(Number(metricsSample?.hud_fps)) ? Number(metricsSample.hud_fps).toFixed(2) : (completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : (cardFps == null ? 'N/A' : cardFps.toFixed(2)))}</span>
+                <span><b>SOURCE FPS</b>{completedRun ? (sourceFpsForTelemetry(metricsSample) == null ? 'NOT RECORDED FOR THIS COMPLETED RUN' : sourceFpsForTelemetry(metricsSample).toFixed(2)) : (sourceFps == null ? 'N/A' : sourceFps.toFixed(2))}</span>
+                <span><b>{completedRun ? 'FINAL FRAME PERSONS' : 'PERSONS'}</b>{metricsSample ? (metricsSample.person_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A'}</span>
+                <span><b>{completedRun ? 'FINAL FRAME VEHICLES' : 'VEHICLES'}</b>{metricsSample ? (metricsSample.vehicle_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A'}</span>
+                <span><b>{completedRun ? 'FINAL FRAME TRACKS' : 'TRACKS'}</b>{metricsSample ? (metricsSample.track_count ?? 'NOT REPORTED FOR THIS COMPLETED RUN') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A'}</span>
+                <span><b>FRAME</b>{completedRun ? (metricsSample?.final_frame_index ?? metricsSample?.frame_index ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : (metricsSample?.frame_index ?? 'N/A')}</span>
+                <span><b>SOURCE TIME</b>{Number.isFinite(Number(metricsSample?.final_video_time ?? metricsSample?.video_time)) ? `${Number(metricsSample.final_video_time ?? metricsSample.video_time).toFixed(2)}s` : 'N/A'}</span>
                 <span><b>LAST UPDATE</b>{runSummaryLoading[cameraId] ? 'LOADING RUN HISTORY...' : updateAge == null ? (completedRun ? 'NOT RECORDED FOR THIS HISTORICAL RUN' : 'Never') : liveStatus === 'COMPLETED' ? `COMPLETED ${formatTelemetryAge(updateAge)}` : liveStatus === 'OFFLINE' ? 'OFFLINE' : liveStatus === 'STALE' ? `STALE · ${formatTelemetryAge(updateAge)}` : formatTelemetryAge(updateAge)}</span>
                 <span><b>LATEST EVENT</b>{formatLatestEvent(latestCameraEvent, now)}</span>
               </div>
