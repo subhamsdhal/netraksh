@@ -11,6 +11,7 @@ from backend.api.system import _telemetry_is_newer as backend_telemetry_is_newer
 from shared.constants import DetectionClass
 from shared.schemas import BoundingBox, TrackingFramePayload
 from edge.main import EdgePipeline
+import edge.main as edge_main
 
 
 def _track(track_id, detection_class, confidence=0.9, matched=True):
@@ -145,3 +146,11 @@ def test_decoupled_hud_publishes_detector_confirmed_box_for_exact_detector_frame
     assert payload["tracks"][0]["detector_confirmed"] is True
     assert (payload["person_count"], payload["vehicle_count"], payload["track_count"]) == (1, 0, 1)
     assert TrackingFramePayload.model_validate(payload).tracks[0].detector_confirmed is True
+
+
+def test_flow_reanchor_numpy_dependency_is_available():
+    # Production detector/flow overlap reaches np.array in EdgePipeline.
+    # A missing module import used to crash and restart the active run.
+    assert edge_main.np is np
+    box = edge_main.np.array([10, 20, 110, 220], dtype=edge_main.np.float32)
+    assert box.tolist() == [10, 20, 110, 220]

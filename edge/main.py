@@ -26,6 +26,8 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import Dict, List, Optional
 
+import numpy as np
+
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
