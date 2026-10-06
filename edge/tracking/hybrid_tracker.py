@@ -166,11 +166,17 @@ class OpticalFlowBoxTracker:
         history_frames: int = 180,
         max_detector_age_frames: int = 144,
         max_missed_frames: int = 2,
+        max_points: int = 20,
+        flow_win_size: int = 17,
+        backward_check_interval: int = 4,
     ):
         self.max_width = max(160, int(max_width))
         self.history = deque(maxlen=max(8, int(history_frames)))
         self.max_detector_age_frames = max(1, int(max_detector_age_frames))
         self.max_missed_frames = max(0, int(max_missed_frames))
+        self.max_points = max(4, int(max_points))
+        self.flow_win_size = max(9, int(flow_win_size) | 1)
+        self.backward_check_interval = max(1, int(backward_check_interval))
         self._tracks: dict[int, _FlowTrack] = {}
         self._previous_gray: Optional[np.ndarray] = None
         self._scale = 1.0
@@ -191,8 +197,7 @@ class OpticalFlowBoxTracker:
             frame = cv2.resize(frame, (int(round(w * scale)), int(round(h * scale))), interpolation=cv2.INTER_AREA)
         return cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), scale
 
-    @staticmethod
-    def _seed_points(gray: np.ndarray, bbox: np.ndarray) -> np.ndarray:
+    def _seed_points(self, gray: np.ndarray, bbox: np.ndarray) -> np.ndarray:
         h, w = gray.shape[:2]
         x1, y1, x2, y2 = bbox
         x1, x2 = sorted((max(0, int(x1)), min(w - 1, int(x2))))
@@ -204,9 +209,9 @@ class OpticalFlowBoxTracker:
         points = cv2.goodFeaturesToTrack(
             gray,
             mask=mask,
-            maxCorners=32,
+            maxCorners=self.max_points,
             qualityLevel=0.01,
-            minDistance=4,
+            minDistance=5,
             blockSize=5,
         )
         return points.astype(np.float32) if points is not None else np.empty((0, 1, 2), dtype=np.float32)
@@ -255,27 +260,34 @@ class OpticalFlowBoxTracker:
             state.frames_since_detector += 1
             if state.frames_since_detector > self.max_detector_age_frames or len(state.points) < 2:
                 continue
+            win_size = (self.flow_win_size, self.flow_win_size)
+            criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 12, 0.03)
             nxt, status, _ = cv2.calcOpticalFlowPyrLK(
                 previous,
                 current,
                 state.points,
                 None,
-                winSize=(21, 21),
+                winSize=win_size,
                 maxLevel=2,
-                criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 0.03),
+                criteria=criteria,
             )
             if nxt is None or status is None:
                 state.missed += 1
                 if state.missed <= self.max_missed_frames:
                     next_tracks[track_id] = state
                 continue
-            back, back_status, _ = cv2.calcOpticalFlowPyrLK(
-                current, previous, nxt, None, winSize=(21, 21), maxLevel=2,
-            )
             valid = status.reshape(-1).astype(bool)
-            if back is not None and back_status is not None:
-                fb = np.linalg.norm(state.points.reshape(-1, 2) - back.reshape(-1, 2), axis=1)
-                valid &= back_status.reshape(-1).astype(bool) & (fb < 1.5)
+            # Forward flow is sufficient for the intermediate image-grounded
+            # sample path.  Keep the more expensive backward consistency check
+            # at a bounded cadence so it still rejects drift/ghost boxes while
+            # leaving enough CPU for a genuinely high-cadence visible HUD.
+            if state.frames_since_detector % self.backward_check_interval == 0:
+                back, back_status, _ = cv2.calcOpticalFlowPyrLK(
+                    current, previous, nxt, None, winSize=win_size, maxLevel=2,
+                )
+                if back is not None and back_status is not None:
+                    fb = np.linalg.norm(state.points.reshape(-1, 2) - back.reshape(-1, 2), axis=1)
+                    valid &= back_status.reshape(-1).astype(bool) & (fb < 1.5)
             old_points = state.points.reshape(-1, 2)[valid]
             new_points = nxt.reshape(-1, 2)[valid]
             if len(new_points) < 2:
