@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from backend.services import video_storage
-from backend.services.evidence_storage import EvidenceNotFoundError
+from backend.services.evidence_storage import EvidenceNotFoundError, S3Storage
 
 
 class MemoryStorage:
@@ -37,6 +37,47 @@ class MemoryStorage:
 
     def object_exists(self, key):
         return key in self.objects
+
+
+def test_s3_file_transfer_streams_without_managed_multipart(tmp_path):
+    source = tmp_path / "large.mp4"
+    source.write_bytes(b"bounded-stream")
+    destination = tmp_path / "downloaded.mp4"
+
+    class Body:
+        def iter_chunks(self, chunk_size):
+            assert chunk_size == 1024 * 1024
+            yield b"bounded-"
+            yield b"stream"
+
+    class Client:
+        def __init__(self):
+            self.puts = []
+
+        def put_object(self, **kwargs):
+            assert not isinstance(kwargs["Body"], (bytes, bytearray))
+            self.puts.append({**kwargs, "Body": kwargs["Body"].read()})
+
+        def get_object(self, **_kwargs):
+            return {"Body": Body()}
+
+        def upload_file(self, *_args, **_kwargs):
+            pytest.fail("managed multipart upload must not be used")
+
+        def download_file(self, *_args, **_kwargs):
+            pytest.fail("managed multipart download must not be used")
+
+    storage = S3Storage.__new__(S3Storage)
+    storage.bucket = "private-test-bucket"
+    storage.s3 = Client()
+    storage._ClientError = RuntimeError
+
+    storage.put_file("video/original.mp4", str(source), "video/mp4")
+    storage.get_file("video/original.mp4", str(destination))
+
+    assert storage.s3.puts[0]["ContentLength"] == len(b"bounded-stream")
+    assert storage.s3.puts[0]["Body"] == b"bounded-stream"
+    assert destination.read_bytes() == b"bounded-stream"
 
 
 def test_uploaded_video_state_uses_logical_object_keys(monkeypatch, tmp_path):

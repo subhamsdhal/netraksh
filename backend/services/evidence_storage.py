@@ -318,18 +318,28 @@ class S3Storage(EvidenceStorageBackend):
 
     def put_file(self, object_key: str, file_path: str, content_type: str = "application/octet-stream") -> None:
         try:
-            self.s3.upload_file(
-                file_path,
-                self.bucket,
-                object_key,
-                ExtraArgs={"ContentType": content_type},
-            )
-        except self._ClientError as e:
+            # The application caps uploads at 200 MiB. Use one bounded,
+            # streaming PutObject below that limit because some S3-compatible
+            # providers reject boto3's automatic multipart UploadPart flow.
+            with open(file_path, "rb") as source:
+                self.s3.put_object(
+                    Bucket=self.bucket,
+                    Key=object_key,
+                    Body=source,
+                    ContentLength=os.path.getsize(file_path),
+                    ContentType=content_type,
+                )
+        except (self._ClientError, OSError) as e:
             raise StorageUploadError(f"Failed to upload file to S3: {str(e)}")
 
     def get_file(self, object_key: str, file_path: str) -> None:
         try:
-            self.s3.download_file(self.bucket, object_key, file_path)
+            response = self.s3.get_object(Bucket=self.bucket, Key=object_key)
+            body = response["Body"]
+            with open(file_path, "wb") as destination:
+                for chunk in body.iter_chunks(chunk_size=1024 * 1024):
+                    if chunk:
+                        destination.write(chunk)
         except self._ClientError as e:
             status, code = _log_s3_failure("download_file", e)
             if _is_missing_s3_error(status, code):
