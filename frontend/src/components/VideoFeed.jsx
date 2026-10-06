@@ -600,7 +600,6 @@ export default function VideoFeed({
 
     const painted = (sample, target, done) => {
       let committed = false;
-      let callbackObserved = false;
       const finish = () => {
         if (committed || cancelled) return;
         committed = true;
@@ -611,7 +610,6 @@ export default function VideoFeed({
       };
       if ('requestVideoFrameCallback' in video) {
         frameCallback = video.requestVideoFrameCallback((_now, metadata) => {
-          callbackObserved = true;
           const frameTolerance = Math.max(0.01, 0.5 / Number(sample.source_fps || sample.fps_declared || 30));
           if (Math.abs(Number(metadata.mediaTime) - target) <= frameTolerance) finish();
         });
@@ -619,7 +617,7 @@ export default function VideoFeed({
         // seeked + readyState + two paints confirm the sought frame is visible.
         paintTimer = setTimeout(() => {
           const frameTolerance = Math.max(0.01, 0.5 / Number(sample.source_fps || sample.fps_declared || 30));
-          if (!callbackObserved && !video.seeking && video.readyState >= 2
+          if (!video.seeking && video.readyState >= 2
               && Math.abs(Number(video.currentTime) - target) <= frameTolerance) {
             requestAnimationFrame(() => requestAnimationFrame(finish));
           }

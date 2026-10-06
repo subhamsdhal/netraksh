@@ -119,6 +119,20 @@ describe('detection-synchronized analyzed playback', () => {
     expect(container.querySelector('[data-track-id="9"]')).toBeInTheDocument();
   });
 
+  it('falls back when requestVideoFrameCallback reports the previous painted frame', async () => {
+    HTMLMediaElement.prototype.requestVideoFrameCallback = vi.fn((callback) => {
+      queueMicrotask(() => callback(performance.now(), { mediaTime: 0 }));
+      return 1;
+    });
+    const onAnalyzedSample = vi.fn();
+    const { container } = renderFeed({ onAnalyzedSample });
+    const video = wireVideo(container.querySelector('video'));
+    act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: sample() })));
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 12 })), { timeout: 1500 });
+    expect(video.currentTime).toBeCloseTo(0.4, 5);
+    expect(container.querySelector('[data-track-id="9"]')).toBeInTheDocument();
+  });
+
   it('rejects optical-flow-only and malformed boxes instead of displaying irregular HUD data', async () => {
     const onAnalyzedSample = vi.fn();
     const { container } = renderFeed({ onAnalyzedSample });
