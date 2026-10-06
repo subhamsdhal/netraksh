@@ -71,6 +71,15 @@ from shared.constants import (
 logger = logging.getLogger(__name__)
 
 
+def hud_sample_is_due(last_video_time: Optional[float], current_video_time: float, interval: float) -> bool:
+    """Return whether the next source-time HUD sample should be emitted."""
+    if interval <= 0:
+        return False
+    if last_video_time is None or current_video_time < last_video_time:
+        return True
+    return (current_video_time - last_video_time) >= interval
+
+
 def should_capture_abstain_snapshot(last_snapshot_time: float, now: float) -> bool:
     """
     Tiered evidence capture by condition quality (shared/constants.py's
@@ -201,7 +210,7 @@ class EdgePipeline:
         # Keep a little more burst headroom for the lightweight HUD channel.
         # The queue remains bounded and lossy; this only prevents short hosted
         # response-latency spikes from erasing an entire visible interval.
-        self.tracking_queue = Queue(maxsize=64)
+        self.tracking_queue = Queue(maxsize=128)
         self._hud_frame_queue = Queue(maxsize=2)
         self._hud_decoupled = False
         self._hud_tracker = OpticalFlowBoxTracker(
@@ -216,6 +225,7 @@ class EdgePipeline:
         self._hud_anchor = None
         self._hud_anchor_frame_index = None
         self._hud_emit_times = deque(maxlen=64)
+        self._last_hud_video_time: Optional[float] = None
         self._telemetry_metrics = {"produced": 0, "dropped": 0, "errors": 0}
         self._tracking_metrics = {"produced": 0, "transmitted": 0, "dropped": 0, "errors": 0}
         self._tracking_emit_times = deque(maxlen=64)
@@ -501,7 +511,11 @@ class EdgePipeline:
                 self._hud_frame_queue.join()
                 self._running = False
                 for queue_name, queue, timeout_seconds in (
-                    ("tracking", self.tracking_queue, 8.0),
+                    # The HUD queue carries compact replay samples, not
+                    # evidence. Give the bounded transport enough time to
+                    # finish the intentional 10 Hz source-time timeline at
+                    # EOF, while still bounding a failed backend drain.
+                    ("tracking", self.tracking_queue, 45.0),
                     ("telemetry", self.telemetry_queue, 12.0),
                 ):
                     deadline = time.monotonic() + timeout_seconds
@@ -684,6 +698,14 @@ class EdgePipeline:
                 self._hud_frame_queue.task_done()
 
     def _emit_hud_sample(self, frame, meta, tracks) -> None:
+        current_video_time = float(meta.video_time_seconds)
+        if not hud_sample_is_due(
+            self._last_hud_video_time,
+            current_video_time,
+            self.telemetry_interval,
+        ):
+            return
+        self._last_hud_video_time = current_video_time
         frame_h, frame_w = frame.shape[:2]
         processed_timestamp = time.time()
         self._hud_emit_times.append(processed_timestamp)
@@ -890,6 +912,7 @@ class EdgePipeline:
         self._last_snapshot_telemetry_time = 0.0
         self._last_detector_source_time = None
         self._last_detector_completed_at = None
+        self._last_hud_video_time = None
         self._last_detector_frame_index = None
         self._last_processed_frame_index = None
         with self._hud_state_lock:

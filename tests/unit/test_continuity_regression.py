@@ -7,7 +7,7 @@ import numpy as np
 from queue import Queue
 from shared.schemas import BoundingBox, Point
 from edge.tracking.continuity_guard import TrackContinuityGuard
-from edge.main import EdgePipeline
+from edge.main import EdgePipeline, hud_sample_is_due
 from edge.temporal.event_verifier import EventVerifier
 from edge.temporal.track_features import TrackFeatureTracker
 
@@ -137,3 +137,10 @@ def test_hud_loop_reanchors_against_detector_frame_index():
     assert pipeline._hud_anchor_frame_index == 7
     assert ("reanchor", 7) in pipeline._hud_tracker.calls
     assert emitted == [(8, [])]
+
+
+def test_hud_samples_are_rate_limited_by_source_time():
+    assert hud_sample_is_due(None, 0.0, 0.1)
+    assert not hud_sample_is_due(0.0, 0.08, 0.1)
+    assert hud_sample_is_due(0.0, 0.125, 0.1)
+    assert hud_sample_is_due(9.9, 0.0, 0.1)
