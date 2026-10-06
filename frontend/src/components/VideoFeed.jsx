@@ -584,6 +584,7 @@ export default function VideoFeed({
     if (!video) return undefined;
     let cancelled = false;
     let timer = null;
+    let paintTimer = null;
     let frameCallback = null;
     let pendingSeekListener = null;
 
@@ -597,15 +598,34 @@ export default function VideoFeed({
       updateRect();
     };
 
-    const painted = (sample, done) => {
+    const painted = (sample, target, done) => {
+      let committed = false;
+      let callbackObserved = false;
       const finish = () => {
+        if (committed || cancelled) return;
+        committed = true;
+        if (paintTimer) clearTimeout(paintTimer);
+        paintTimer = null;
         commit(sample);
         done();
       };
       if ('requestVideoFrameCallback' in video) {
-        frameCallback = video.requestVideoFrameCallback(finish);
+        frameCallback = video.requestVideoFrameCallback((_now, metadata) => {
+          callbackObserved = true;
+          const frameTolerance = Math.max(0.01, 0.5 / Number(sample.source_fps || sample.fps_declared || 30));
+          if (Math.abs(Number(metadata.mediaTime) - target) <= frameTolerance) finish();
+        });
+        // Chromium may not invoke a callback for a paused seek. In that case,
+        // seeked + readyState + two paints confirm the sought frame is visible.
+        paintTimer = setTimeout(() => {
+          const frameTolerance = Math.max(0.01, 0.5 / Number(sample.source_fps || sample.fps_declared || 30));
+          if (!callbackObserved && !video.seeking && video.readyState >= 2
+              && Math.abs(Number(video.currentTime) - target) <= frameTolerance) {
+            requestAnimationFrame(() => requestAnimationFrame(finish));
+          }
+        }, 250);
       } else {
-        requestAnimationFrame(finish);
+        requestAnimationFrame(() => requestAnimationFrame(finish));
       }
     };
 
@@ -629,10 +649,10 @@ export default function VideoFeed({
       };
       const onSeeked = () => {
         pendingSeekListener = null;
-        painted(sample, continueAfterPaint);
+        painted(sample, target, continueAfterPaint);
       };
       if (Math.abs(Number(video.currentTime) - target) <= 0.002 && video.readyState >= 2) {
-        painted(sample, continueAfterPaint);
+        painted(sample, target, continueAfterPaint);
       } else {
         pendingSeekListener = onSeeked;
         video.addEventListener('seeked', onSeeked, { once: true });
@@ -644,6 +664,7 @@ export default function VideoFeed({
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      if (paintTimer) clearTimeout(paintTimer);
       if (pendingSeekListener) video.removeEventListener('seeked', pendingSeekListener);
       if (frameCallback != null && 'cancelVideoFrameCallback' in video) {
         video.cancelVideoFrameCallback(frameCallback);

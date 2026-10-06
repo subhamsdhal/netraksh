@@ -1407,7 +1407,7 @@ export default function Dashboard() {
 
       <section className="dashboard-events-card card" aria-label="Latest unified security events">
         <div className="card-header">
-          <div><span className="card-title">Current Run Events</span><span className="dashboard-events-subtitle">{authoritativeRunContext ? `${cameraModels.find((camera) => camera.cameraId === authoritativeRunContext.cameraId)?.friendlyName || authoritativeRunContext.cameraId} · selected run ${String(authoritativeRunContext.analysisSessionId).slice(0, 8)}` : 'WAITING FOR SELECTED RUN'} · {Math.min(displayEvents.length, 10)} event{displayEvents.length === 1 ? '' : 's'}</span></div>
+          <div><span className="card-title">Current Run Events</span><span className="dashboard-events-subtitle">{authoritativeRunContext ? `${cameraModels.find((camera) => camera.cameraId === authoritativeRunContext.cameraId)?.friendlyName || authoritativeRunContext.cameraId} · selected run ${String(authoritativeRunContext.analysisSessionId).slice(0, 8)}` : 'WAITING FOR SELECTED RUN'} · {displayEvents.length} event{displayEvents.length === 1 ? '' : 's'}</span></div>
           {configuredCameraIds.length > 1 && <div className="dashboard-event-filters" role="group" aria-label="Event camera filter">
             {configuredCameraIds.map((cameraId) => <button key={cameraId} className={`btn btn-sm ${reliabilityScopeCameraId === cameraId ? 'btn-primary' : 'btn-outline'}`} onClick={() => setSelectedCameraId(cameraId)}>{cameraId === 'cam-border-01' ? 'CAM 1' : 'CAM 2'}</button>)}
           </div>}
