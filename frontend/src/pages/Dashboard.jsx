@@ -11,7 +11,7 @@ import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, completedRunMetrics, completedRunSummaryIdentity, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, latestEventAtOrBeforeFrame, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, selectedRunContext, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring, uploadedRunComparison } from '../utils/dashboardScope';
 import { canReuseRestoredMedia, updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
-import { analysisLifecyclePresentation, applyReplayResult, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, fetchWithTimeout, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 import { replayTimelineAssessment } from '../utils/trackingTimeline';
 
@@ -620,9 +620,19 @@ export default function Dashboard() {
         }));
         try {
           recordRestoreDiagnostic({ stage: 'PREPARATION_CHECK_PENDING' });
-          const preparationResponse = await authFetch(`/api/dashboard/video/preparation/current?camera_id=${encodeURIComponent(cameraId)}`);
-          recordRestoreDiagnostic({ stage: 'PREPARATION_CHECK_COMPLETE', http_status: preparationResponse.status });
-          if (preparationResponse.ok && mounted) {
+          let preparationResponse = null;
+          try {
+            preparationResponse = await fetchWithTimeout(
+              authFetch,
+              `/api/dashboard/video/preparation/current?camera_id=${encodeURIComponent(cameraId)}`,
+              5000,
+            );
+            recordRestoreDiagnostic({ stage: 'PREPARATION_CHECK_COMPLETE', http_status: preparationResponse.status });
+          } catch (error) {
+            if (error?.name !== 'AbortError') throw error;
+            recordRestoreDiagnostic({ stage: 'PREPARATION_CHECK_TIMEOUT', timeout_ms: 5000 });
+          }
+          if (preparationResponse?.ok && mounted) {
             const preparation = await preparationResponse.json();
             const preparationState = String(preparation?.state || '').toUpperCase();
             if (preparation?.available && !['READY', 'FAILED'].includes(preparationState)) {

@@ -38,6 +38,16 @@ export function restoringSourceState() {
   return { restoring: true, runState: 'RESTORING' };
 }
 
+export async function fetchWithTimeout(fetcher, path, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetcher(path, { signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export function sourceStateFromPreparation(job) {
   if (!job?.available || !job?.preparation_job_id || !job?.camera_id) return null;
   const preparationState = String(job.state || 'UPLOADED').toUpperCase();

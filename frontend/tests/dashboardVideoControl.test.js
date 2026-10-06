@@ -1,7 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
-import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, claimUploadAutoStart, durableHeartbeat, lifecycleAction, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, claimUploadAutoStart, durableHeartbeat, fetchWithTimeout, lifecycleAction, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
 
 describe('dashboard video control ownership', () => {
+  it('aborts a stalled read-only restore preflight after the timeout', async () => {
+    let requestSignal;
+    const fetcher = vi.fn((_path, { signal }) => new Promise((_resolve, reject) => {
+      requestSignal = signal;
+      signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    }));
+
+    await expect(fetchWithTimeout(fetcher, '/read-only', 5)).rejects.toMatchObject({ name: 'AbortError' });
+    expect(requestSignal.aborted).toBe(true);
+  });
+
   it('replaces a stale browser session with the bundled source contract', () => {
     expect(sourceStateFromCurrentVideo({
       available: true,
