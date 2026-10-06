@@ -147,6 +147,7 @@ describe('detection-synchronized analyzed playback', () => {
     const overlay = container.querySelector('svg[aria-label="Detection-synchronized tracking overlay"]');
     const viewToggle = container.querySelector('button[title="View source preview"]');
     expect(Number(overlay.style.zIndex)).toBeGreaterThan(Number(viewToggle.style.zIndex));
+    expect(viewToggle.style.background).toContain('0.4');
 
     const ordinary = renderFeed({
       sourceRunState: 'COMPLETED',

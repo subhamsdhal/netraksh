@@ -1130,7 +1130,7 @@ export default function VideoFeed({
         style={{
           position: 'absolute', top: '0.4rem', right: '0.4rem',
           zIndex: 8,
-          background: viewState === 'COMPLETED_REPLAY_UNAVAILABLE' ? 'rgba(69,26,3,0.96)' : hudVisible ? 'rgba(6,78,59,0.96)' : 'rgba(2,6,23,0.96)',
+          background: viewState === 'COMPLETED_REPLAY_UNAVAILABLE' ? 'rgba(69,26,3,0.4)' : hudVisible ? 'rgba(6,78,59,0.4)' : 'rgba(2,6,23,0.4)',
           border: `1px solid ${viewState === 'COMPLETED_REPLAY_UNAVAILABLE' ? '#f59e0b' : hudVisible ? '#4ade80' : '#64748b'}`,
           borderRadius: '0.2rem',
           padding: '0.22rem 0.45rem',
