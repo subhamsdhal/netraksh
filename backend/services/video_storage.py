@@ -35,6 +35,21 @@ def control_key(camera_id: str) -> str:
     return f"video-control/{_safe_camera_id(camera_id)}.json"
 
 
+def preparation_job_key(camera_id: str, job_id: str) -> str:
+    return f"video-preparation/{_safe_camera_id(camera_id)}/{_safe_session_id(job_id)}.json"
+
+
+def preparation_control_key(camera_id: str) -> str:
+    return f"video-preparation/{_safe_camera_id(camera_id)}/current.json"
+
+
+def preparation_upload_key(camera_id: str, job_id: str, suffix: str) -> str:
+    normalized_suffix = suffix.lower()
+    if not normalized_suffix.startswith(".") or not normalized_suffix[1:].isalnum():
+        raise ValueError("Invalid video suffix")
+    return f"video-preparation/{_safe_camera_id(camera_id)}/{_safe_session_id(job_id)}/original{normalized_suffix}"
+
+
 def media_key(camera_id: str, session_id: str, *, preview: bool, suffix: str) -> str:
     normalized_suffix = suffix.lower()
     if not normalized_suffix.startswith(".") or not normalized_suffix[1:].isalnum():
@@ -94,6 +109,103 @@ def store_uploaded_session(
 
 def get_uploaded_session(camera_id: str, session_id: str) -> dict[str, Any] | None:
     return _get_json(session_metadata_key(camera_id, session_id))
+
+
+def create_preparation_job(
+    *,
+    camera_id: str,
+    job_id: str,
+    source_path: Path,
+    source_name: str,
+    content_type: str,
+) -> dict[str, Any]:
+    """Persist the received original and an authoritative recoverable job."""
+    suffix = source_path.suffix.lower()
+    raw_key = preparation_upload_key(camera_id, job_id, suffix)
+    now = time.time()
+    job = {
+        "preparation_job_id": _safe_session_id(job_id),
+        "upload_intent_id": _safe_session_id(job_id),
+        "session_id": _safe_session_id(job_id),
+        "camera_id": _safe_camera_id(camera_id),
+        "source_name": source_name,
+        "content_type": content_type,
+        "source_suffix": suffix,
+        "raw_object_key": raw_key,
+        "state": "UPLOADING",
+        "created_at": now,
+        "updated_at": now,
+        "error": None,
+    }
+    _put_json(preparation_job_key(camera_id, job_id), job)
+    _put_json(preparation_control_key(camera_id), {
+        "camera_id": _safe_camera_id(camera_id),
+        "preparation_job_id": _safe_session_id(job_id),
+        "upload_intent_id": _safe_session_id(job_id),
+        "updated_at": now,
+    })
+    get_evidence_storage().put_file(raw_key, str(source_path), content_type)
+    return update_preparation_job(camera_id, job_id, {"state": "UPLOADED"})
+
+
+def get_preparation_job(camera_id: str, job_id: str) -> dict[str, Any] | None:
+    return _get_json(preparation_job_key(camera_id, job_id))
+
+
+def get_current_preparation_job(camera_id: str) -> dict[str, Any] | None:
+    current = _get_json(preparation_control_key(camera_id))
+    if not current or not current.get("preparation_job_id"):
+        return None
+    return get_preparation_job(camera_id, current["preparation_job_id"])
+
+
+def update_preparation_job(camera_id: str, job_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+    job = get_preparation_job(camera_id, job_id)
+    if job is None:
+        raise FileNotFoundError("Video preparation job was not found")
+    job.update(changes)
+    job["updated_at"] = time.time()
+    _put_json(preparation_job_key(camera_id, job_id), job)
+    return job
+
+
+def preparation_is_current(camera_id: str, job_id: str) -> bool:
+    current = _get_json(preparation_control_key(camera_id)) or {}
+    return current.get("preparation_job_id") == _safe_session_id(job_id)
+
+
+def retry_preparation_job(camera_id: str, job_id: str) -> dict[str, Any]:
+    """Requeue the current failed job without changing its upload identity."""
+    job = get_preparation_job(camera_id, job_id)
+    if job is None:
+        raise FileNotFoundError("Video preparation job was not found")
+    if not preparation_is_current(camera_id, job_id):
+        raise ValueError("Only the current video preparation job can be retried")
+    if str(job.get("state", "")).upper() != "FAILED":
+        raise ValueError("Only a failed video preparation job can be retried")
+    raw_key = job.get("raw_object_key")
+    if not raw_key or not get_evidence_storage().object_exists(raw_key):
+        raise FileNotFoundError("The received upload is no longer available for retry")
+    return update_preparation_job(camera_id, job_id, {
+        "state": "UPLOADED",
+        "error": None,
+        "retry_count": int(job.get("retry_count") or 0) + 1,
+    })
+
+
+def download_preparation_upload(camera_id: str, job_id: str, destination: Path) -> dict[str, Any]:
+    job = get_preparation_job(camera_id, job_id)
+    if job is None or not job.get("raw_object_key"):
+        raise FileNotFoundError("Video preparation upload was not found")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    get_evidence_storage().get_file(job["raw_object_key"], str(destination))
+    return job
+
+
+def delete_preparation_upload(camera_id: str, job_id: str) -> None:
+    job = get_preparation_job(camera_id, job_id)
+    if job and job.get("raw_object_key"):
+        get_evidence_storage().delete_object(job["raw_object_key"])
 
 
 def activate_session(camera_id: str, session_id: str) -> dict[str, Any]:

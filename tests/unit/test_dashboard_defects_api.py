@@ -116,6 +116,147 @@ def test_durable_upload_stores_only_the_normalized_mp4(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_browser_upload_returns_after_durable_receipt_before_normalization(tmp_path, monkeypatch):
+    job_id = "1e1b5fd6-02bd-4e35-b8ab-52e98b67be1b"
+    accepted = []
+    scheduled = []
+    monkeypatch.setattr(dashboard, "_videos_dir", lambda: tmp_path)
+    monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
+    monkeypatch.setattr(dashboard, "_ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr(dashboard, "_ffprobe_bin", lambda: "ffprobe")
+    monkeypatch.setattr(dashboard, "_normalize_video", lambda *_args: pytest.fail("normalization must not run in upload request"))
+
+    def accept(**kwargs):
+        accepted.append({**kwargs, "bytes": kwargs["source_path"].read_bytes()})
+        return {
+            "preparation_job_id": kwargs["job_id"],
+            "upload_intent_id": kwargs["job_id"],
+            "session_id": kwargs["job_id"],
+            "camera_id": kwargs["camera_id"],
+            "source_name": kwargs["source_name"],
+            "state": "UPLOADED",
+        }
+
+    monkeypatch.setattr(dashboard, "create_preparation_job", accept)
+    monkeypatch.setattr(dashboard, "_ensure_preparation_task", lambda camera_id, jid: scheduled.append((camera_id, jid)))
+
+    result = asyncio.run(dashboard.upload_dashboard_video(
+        _video_upload("vid 1.mp4", b"\x00\x00\x00\x18ftypmp42large-source"),
+        camera_id="cam-border-01",
+        upload_intent_id=job_id,
+        _user={},
+    ))
+
+    assert result["source_state"] == "UPLOADED"
+    assert result["preparation_job_id"] == job_id
+    assert accepted[0]["bytes"].endswith(b"large-source")
+    assert scheduled == [("cam-border-01", job_id)]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_preparation_job_persists_stages_and_auto_starts_exactly_once(tmp_path, monkeypatch):
+    job_id = "6cd3454a-16d0-44f2-bca4-b54df8709651"
+    job = {
+        "preparation_job_id": job_id,
+        "upload_intent_id": job_id,
+        "session_id": job_id,
+        "camera_id": "cam-border-01",
+        "source_name": "vid 1.mp4",
+        "source_suffix": ".mp4",
+        "state": "UPLOADED",
+    }
+    stages = []
+    starts = []
+    wakes = []
+    monkeypatch.setattr(dashboard, "_videos_dir", lambda: tmp_path)
+    monkeypatch.setattr(dashboard, "get_preparation_job", lambda *_args: dict(job))
+    monkeypatch.setattr(dashboard, "download_preparation_upload", lambda _camera, _job, path: path.write_bytes(b"video"))
+    monkeypatch.setattr(dashboard, "_ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr(dashboard, "_ffprobe_bin", lambda: "ffprobe")
+    monkeypatch.setattr(dashboard, "_probe_video", lambda *_args: {
+        "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"},
+        "streams": [{"codec_type": "video", "codec_name": "h264", "pix_fmt": "yuv420p", "width": 960, "height": 540}],
+    })
+    monkeypatch.setattr(dashboard, "store_uploaded_session", lambda **_kwargs: None)
+    monkeypatch.setattr(dashboard, "preparation_is_current", lambda *_args: True)
+    monkeypatch.setattr(dashboard, "activate_session", lambda *_args: {"source_generation": 9})
+    monkeypatch.setattr(dashboard, "start_active_session", lambda *_args: (starts.append(job_id) or {"analysis_generation": 4, "analysis_state": "WAKING"}, True))
+
+    async def wake(camera_id):
+        wakes.append(camera_id)
+        return "ready"
+
+    def update(_camera, _job, changes):
+        stages.append(changes["state"])
+        job.update(changes)
+        return dict(job)
+
+    monkeypatch.setattr(dashboard, "_wake_edge_service", wake)
+    monkeypatch.setattr(dashboard, "update_preparation_job", update)
+    monkeypatch.setattr(dashboard, "delete_preparation_upload", lambda *_args: None)
+
+    asyncio.run(dashboard._run_preparation_job("cam-border-01", job_id))
+
+    assert stages == ["VALIDATING", "NORMALIZING", "STORING", "FINALIZING", "READY"]
+    assert starts == [job_id]
+    assert wakes == ["cam-border-01"]
+    assert job["analysis_generation"] == 4
+
+
+def test_preparation_failure_is_persisted_and_visible(tmp_path, monkeypatch):
+    job_id = "59919824-c970-4087-a7bf-66c76fe22d76"
+    job = {
+        "preparation_job_id": job_id,
+        "camera_id": "cam-border-01",
+        "source_suffix": ".mp4",
+        "state": "UPLOADED",
+    }
+    monkeypatch.setattr(dashboard, "_videos_dir", lambda: tmp_path)
+    monkeypatch.setattr(dashboard, "_ffmpeg_bin", lambda: "ffmpeg")
+    monkeypatch.setattr(dashboard, "_ffprobe_bin", lambda: "ffprobe")
+    monkeypatch.setattr(dashboard, "get_preparation_job", lambda *_args: dict(job))
+    monkeypatch.setattr(
+        dashboard, "download_preparation_upload",
+        lambda *_args: (_ for _ in ()).throw(OSError("temporary object-store interruption")),
+    )
+
+    def update(_camera, _job, changes):
+        job.update(changes)
+        return dict(job)
+
+    monkeypatch.setattr(dashboard, "update_preparation_job", update)
+
+    asyncio.run(dashboard._run_preparation_job("cam-border-01", job_id))
+
+    assert job["state"] == "FAILED"
+    assert job["error"] == "VIDEO PREPARATION FAILED"
+    assert dashboard._public_preparation(job)["available"] is True
+
+
+def test_retry_endpoint_requeues_same_job_and_schedules_once(monkeypatch):
+    job_id = "35fa0330-2635-45af-88bd-58062339d915"
+    scheduled = []
+    monkeypatch.setattr(dashboard, "retry_preparation_job", lambda camera, job: {
+        "preparation_job_id": job,
+        "upload_intent_id": job,
+        "session_id": job,
+        "camera_id": camera,
+        "state": "UPLOADED",
+        "retry_count": 1,
+    })
+    monkeypatch.setattr(dashboard, "_ensure_preparation_task", lambda camera, job: scheduled.append((camera, job)))
+
+    result = asyncio.run(dashboard.retry_video_preparation(
+        job_id,
+        camera_id="cam-border-01",
+        _user={},
+    ))
+
+    assert result["preparation_job_id"] == job_id
+    assert result["retry_count"] == 1
+    assert scheduled == [("cam-border-01", job_id)]
+
+
 def test_compatible_mp4_skips_normalization_and_registers_once(tmp_path, monkeypatch):
     stored = []
     activated = []

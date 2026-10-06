@@ -177,6 +177,11 @@ class EvidenceStorageBackend(ABC):
         with open(file_path, "rb") as source:
             self.put_object(object_key, source.read(), content_type)
 
+    def get_file(self, object_key: str, file_path: str) -> None:
+        """Download an object to a file without retaining the object in RAM."""
+        with open(file_path, "wb") as destination:
+            destination.write(self.get_object(object_key))
+
 
 class LocalFilesystemStorage(EvidenceStorageBackend):
     def __init__(self, clips_dir: str):
@@ -232,6 +237,15 @@ class LocalFilesystemStorage(EvidenceStorageBackend):
             shutil.copyfile(file_path, safe_path)
         except Exception as e:
             raise StorageUploadError(f"Failed to copy local object: {str(e)}")
+
+    def get_file(self, object_key: str, file_path: str) -> None:
+        import shutil
+
+        safe_path = self._get_safe_path(object_key)
+        if not os.path.exists(safe_path):
+            raise EvidenceNotFoundError(f"Evidence file {object_key} not found.")
+        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+        shutil.copyfile(safe_path, file_path)
 
     def get_object(self, object_key: str) -> bytes:
         safe_path = self._get_safe_path(object_key)
@@ -312,6 +326,15 @@ class S3Storage(EvidenceStorageBackend):
             )
         except self._ClientError as e:
             raise StorageUploadError(f"Failed to upload file to S3: {str(e)}")
+
+    def get_file(self, object_key: str, file_path: str) -> None:
+        try:
+            self.s3.download_file(self.bucket, object_key, file_path)
+        except self._ClientError as e:
+            status, code = _log_s3_failure("download_file", e)
+            if _is_missing_s3_error(status, code):
+                raise EvidenceNotFoundError(f"S3 Object {object_key} not found.")
+            raise
 
     def get_object(self, object_key: str) -> bytes:
         try:

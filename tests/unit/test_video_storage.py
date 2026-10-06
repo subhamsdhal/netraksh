@@ -12,17 +12,25 @@ from backend.services.evidence_storage import EvidenceNotFoundError
 class MemoryStorage:
     def __init__(self):
         self.objects = {}
+        self.file_put_observations = []
 
     def put_object(self, key, data, content_type="application/octet-stream"):
         self.objects[key] = bytes(data)
 
     def put_file(self, key, file_path, content_type="application/octet-stream"):
+        self.file_put_observations.append((key, dict(self.objects)))
         self.objects[key] = Path(file_path).read_bytes()
 
     def get_object(self, key):
         if key not in self.objects:
             raise EvidenceNotFoundError(key)
         return self.objects[key]
+
+    def get_file(self, key, file_path):
+        Path(file_path).write_bytes(self.get_object(key))
+
+    def delete_object(self, key):
+        self.objects.pop(key, None)
 
     def generate_signed_url(self, key, expires_in=900):
         return f"https://storage.example.test/{key}?signed=yes"
@@ -54,6 +62,72 @@ def test_uploaded_video_state_uses_logical_object_keys(monkeypatch, tmp_path):
     assert active["scenario"] == "paused"
     assert active["source_mode"] == "durable"
     assert video_storage.get_active_session("cam-border-01")["session_id"] == session_id
+
+
+def test_preparation_job_persists_original_and_stage_across_process_state(monkeypatch, tmp_path):
+    storage = MemoryStorage()
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)
+    job_id = str(uuid.uuid4())
+    source = tmp_path / "vid 1.mp4"
+    source.write_bytes(b"large-video-stream")
+
+    created = video_storage.create_preparation_job(
+        camera_id="cam-border-01",
+        job_id=job_id,
+        source_path=source,
+        source_name="vid 1.mp4",
+        content_type="video/mp4",
+    )
+    assert created["state"] == "UPLOADED"
+    assert video_storage.get_current_preparation_job("cam-border-01")["preparation_job_id"] == job_id
+    raw_key, objects_before_raw_upload = storage.file_put_observations[-1]
+    persisted_job = json.loads(objects_before_raw_upload[video_storage.preparation_job_key("cam-border-01", job_id)])
+    assert raw_key == created["raw_object_key"]
+    assert persisted_job["state"] == "UPLOADING"
+
+    video_storage.update_preparation_job("cam-border-01", job_id, {"state": "NORMALIZING"})
+    assert video_storage.get_preparation_job("cam-border-01", job_id)["state"] == "NORMALIZING"
+    recovered = tmp_path / "recovered.mp4"
+    video_storage.download_preparation_upload("cam-border-01", job_id, recovered)
+    assert recovered.read_bytes() == b"large-video-stream"
+
+
+def test_newer_preparation_intent_supersedes_without_overwriting_identity(monkeypatch, tmp_path):
+    storage = MemoryStorage()
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)
+    source = tmp_path / "same.mp4"
+    source.write_bytes(b"same-bytes")
+    first = str(uuid.uuid4())
+    second = str(uuid.uuid4())
+    for job_id in (first, second):
+        video_storage.create_preparation_job(
+            camera_id="cam-checkpoint-01", job_id=job_id, source_path=source,
+            source_name="vid 2.mp4", content_type="video/mp4",
+        )
+    assert video_storage.preparation_is_current("cam-checkpoint-01", first) is False
+    assert video_storage.preparation_is_current("cam-checkpoint-01", second) is True
+
+
+def test_failed_current_preparation_can_retry_without_a_new_identity(monkeypatch, tmp_path):
+    storage = MemoryStorage()
+    monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)
+    source = tmp_path / "vid 1.mp4"
+    source.write_bytes(b"same-received-upload")
+    job_id = str(uuid.uuid4())
+    video_storage.create_preparation_job(
+        camera_id="cam-border-01", job_id=job_id, source_path=source,
+        source_name="vid 1.mp4", content_type="video/mp4",
+    )
+    video_storage.update_preparation_job("cam-border-01", job_id, {
+        "state": "FAILED", "error": "temporary preparation failure",
+    })
+
+    retried = video_storage.retry_preparation_job("cam-border-01", job_id)
+
+    assert retried["preparation_job_id"] == job_id
+    assert retried["state"] == "UPLOADED"
+    assert retried["error"] is None
+    assert retried["retry_count"] == 1
 
 
 def test_each_distinct_upload_session_gets_a_new_source_generation(monkeypatch, tmp_path):

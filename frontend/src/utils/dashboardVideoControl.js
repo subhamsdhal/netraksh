@@ -38,6 +38,27 @@ export function restoringSourceState() {
   return { restoring: true, runState: 'RESTORING' };
 }
 
+export function sourceStateFromPreparation(job) {
+  if (!job?.available || !job?.preparation_job_id || !job?.camera_id) return null;
+  const preparationState = String(job.state || 'UPLOADED').toUpperCase();
+  const analysisState = String(job.analysis_state || '').toUpperCase();
+  const ready = preparationState === 'READY';
+  return {
+    restoring: false,
+    sourceMode: 'durable',
+    sourceId: job.session_id || job.preparation_job_id,
+    sourceName: job.source_name || 'Uploaded video',
+    runState: ready && analysisState ? analysisState : preparationState,
+    analysisState: ready && analysisState ? analysisState : preparationState,
+    analysisGeneration: Number.isFinite(Number(job.analysis_generation)) ? Number(job.analysis_generation) : 0,
+    sourceGeneration: Number.isFinite(Number(job.source_generation)) ? Number(job.source_generation) : null,
+    uploadIntentId: job.upload_intent_id || job.preparation_job_id,
+    preparationJobId: job.preparation_job_id,
+    preparationState,
+    scenario: ready ? 'normal' : 'paused',
+  };
+}
+
 export function lifecycleAction(sourceState) {
   const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
   // A stale WAKING/paused record is repaired by START / ANALYZE. STOP would
@@ -50,9 +71,21 @@ export function analysisLifecyclePresentation(sourceState, mediaState = {}, cont
   const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
   const uploadStage = String(mediaState?.uploadStage || '').toUpperCase();
 
-  if (['VALIDATING', 'PREPARING', 'QUEUED_FOR_NORMALIZATION', 'NORMALIZING', 'ACTIVATING'].includes(lifecycle)
-    || ['VALIDATING', 'PREPARING', 'NORMALIZING'].includes(uploadStage)) {
+  if (lifecycle === 'UPLOADED' || uploadStage === 'UPLOADED') {
+    return { label: 'UPLOAD COMPLETE', badge: 'UPLOADED', tone: 'active', retry: false };
+  }
+  if (lifecycle === 'VALIDATING' || uploadStage === 'VALIDATING') {
+    return { label: 'VALIDATING VIDEO...', badge: 'VALIDATING', tone: 'active', retry: false };
+  }
+  if (['PREPARING', 'QUEUED_FOR_NORMALIZATION', 'NORMALIZING'].includes(lifecycle)
+    || ['PREPARING', 'NORMALIZING'].includes(uploadStage)) {
     return { label: 'PREPARING VIDEO...', badge: 'PREPARING', tone: 'active', retry: false };
+  }
+  if (lifecycle === 'STORING' || uploadStage === 'STORING') {
+    return { label: 'STORING VIDEO...', badge: 'STORING', tone: 'active', retry: false };
+  }
+  if (['FINALIZING', 'ACTIVATING'].includes(lifecycle) || ['FINALIZING', 'ACTIVATING'].includes(uploadStage)) {
+    return { label: 'FINALIZING VIDEO...', badge: 'FINALIZING', tone: 'active', retry: false };
   }
   if (mediaState?.isUploading || ['UPLOADING', 'SELECTING'].includes(lifecycle) || uploadStage === 'UPLOADING') {
     return { label: 'UPLOADING...', badge: 'UPLOADING', tone: 'active', retry: false };

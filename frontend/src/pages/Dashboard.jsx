@@ -11,7 +11,7 @@ import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, completedRunSummaryIdentity, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, selectReliabilityEvent, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring } from '../utils/dashboardScope';
 import { canReuseRestoredMedia, updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
-import { analysisLifecyclePresentation, applyReplayResult, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo } from '../utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 import { replayTimelineAssessment } from '../utils/trackingTimeline';
 
@@ -146,6 +146,80 @@ export default function Dashboard() {
   const updateCameraMedia = (cameraId, patch) => {
     if (!cameraId) return;
     setCameraMedia((current) => updateCameraMediaState(current, cameraId, patch));
+  };
+
+  const waitForPreparation = async (cameraId, jobId, requestIsCurrent, { notFoundGraceMs = 0 } = {}) => {
+    const startedAt = Date.now();
+    const deadline = startedAt + (20 * 60 * 1000);
+    let lastTransportError = null;
+    while (Date.now() < deadline && requestIsCurrent()) {
+      try {
+        const response = await authFetch(`/api/dashboard/video/preparation/${encodeURIComponent(jobId)}?camera_id=${encodeURIComponent(cameraId)}`);
+        if (response.status === 404 && Date.now() - startedAt < notFoundGraceMs) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          continue;
+        }
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({}));
+          throw new Error(detail.detail || `VIDEO PREPARATION STATUS FAILED — HTTP ${response.status}`);
+        }
+        const job = await response.json();
+        const sourceState = sourceStateFromPreparation(job);
+        if (!sourceState) throw new Error('VIDEO PREPARATION IDENTITY IS INVALID');
+        const stage = String(job.state || 'UPLOADED').toUpperCase();
+        setSlotSources(current => ({ ...current, [cameraId]: sourceState }));
+        updateCameraMedia(cameraId, {
+          mediaUrl: null,
+          mediaType: 'video',
+          sessionId: job.session_id || jobId,
+          isUploading: false,
+          uploadStage: stage === 'READY' ? null : stage,
+          uploadProgress: null,
+          uploadError: stage === 'FAILED' ? (job.error || 'VIDEO PREPARATION FAILED') : null,
+        });
+        if (stage === 'FAILED') throw new Error(job.error || 'VIDEO PREPARATION FAILED');
+        if (stage === 'READY') return job;
+        lastTransportError = null;
+      } catch (error) {
+        lastTransportError = error;
+        if (Date.now() - startedAt >= notFoundGraceMs && !String(error?.message || '').includes('Failed to fetch')) throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+    if (!requestIsCurrent()) return null;
+    throw lastTransportError || new Error('VIDEO PREPARATION TIMED OUT');
+  };
+
+  const hydratePreparedUpload = async (cameraId, prepared, requestIsCurrent) => {
+    if (!prepared || !requestIsCurrent()) return false;
+    const preparedSource = sourceStateFromPreparation(prepared);
+    if (!preparedSource) throw new Error('VIDEO PREPARATION COMPLETED WITHOUT A VALID SOURCE');
+    setSlotSources(current => ({ ...current, [cameraId]: preparedSource }));
+    updateCameraMedia(cameraId, {
+      mediaUrl: null,
+      sessionId: prepared.session_id,
+      isUploading: false,
+      uploadStage: null,
+      uploadProgress: null,
+      uploadError: null,
+      analysisStartFailed: false,
+    });
+    if (prepared.preview_url) {
+      try {
+        const mediaResponse = await authFetch(prepared.preview_url);
+        if (!mediaResponse.ok) throw new Error('PREVIEW LOAD FAILED — VIDEO IS STILL STORED');
+        const blobUrl = URL.createObjectURL(await mediaResponse.blob());
+        if (!requestIsCurrent()) {
+          URL.revokeObjectURL(blobUrl);
+          return false;
+        }
+        updateCameraMedia(cameraId, { mediaUrl: blobUrl, uploadError: null });
+      } catch (error) {
+        console.error('Preview load error:', error);
+        if (requestIsCurrent()) updateCameraMedia(cameraId, { mediaUrl: null, uploadError: 'PREVIEW LOAD FAILED — VIDEO IS STILL STORED' });
+      }
+    }
+    return true;
   };
 
   const requestScenario = async (cameraId, payload, onPhase = () => {}, sourceStateOverride = null) => {
@@ -543,6 +617,45 @@ export default function Dashboard() {
       await Promise.all(visibleCameraIds.filter(Boolean).map(async (cameraId) => {
         let authoritativeResponse = false;
         try {
+          const preparationResponse = await authFetch(`/api/dashboard/video/preparation/current?camera_id=${encodeURIComponent(cameraId)}`);
+          if (preparationResponse.ok && mounted) {
+            const preparation = await preparationResponse.json();
+            const preparationState = String(preparation?.state || '').toUpperCase();
+            if (preparation?.available && !['READY', 'FAILED'].includes(preparationState)) {
+              const preparingSource = sourceStateFromPreparation(preparation);
+              if (preparingSource) {
+                setSlotSources(current => ({ ...current, [cameraId]: preparingSource }));
+                updateCameraMedia(cameraId, {
+                  mediaUrl: null,
+                  sessionId: preparation.session_id || preparation.preparation_job_id,
+                  isUploading: false,
+                  uploadStage: preparationState,
+                  uploadProgress: null,
+                  uploadError: null,
+                });
+                const prepared = await waitForPreparation(
+                  cameraId,
+                  preparation.preparation_job_id,
+                  () => mounted,
+                );
+                if (prepared && mounted) await hydratePreparedUpload(cameraId, prepared, () => mounted);
+                return;
+              }
+            }
+            if (preparation?.available && preparationState === 'FAILED') {
+              const failedSource = sourceStateFromPreparation(preparation);
+              if (failedSource) setSlotSources(current => ({ ...current, [cameraId]: failedSource }));
+              updateCameraMedia(cameraId, {
+                mediaUrl: null,
+                sessionId: preparation.session_id || preparation.preparation_job_id,
+                isUploading: false,
+                uploadStage: 'ERROR',
+                uploadProgress: null,
+                uploadError: preparation.error || 'VIDEO PREPARATION FAILED',
+              });
+              return;
+            }
+          }
           const response = await authFetch(`/api/dashboard/video/current?camera_id=${encodeURIComponent(cameraId)}`);
           if (!response.ok || !mounted) return;
           authoritativeResponse = true;
@@ -820,6 +933,7 @@ export default function Dashboard() {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('camera_id', cameraId);
+    formData.append('upload_intent_id', uploadRequestId);
     let uploaded;
     try {
       const res = await authUpload('/api/dashboard/video/upload', formData, {
@@ -827,7 +941,7 @@ export default function Dashboard() {
         onProgress: (progress) => {
           if (!requestIsCurrent()) return;
           updateCameraMedia(cameraId, {
-            uploadStage: progress >= 100 ? 'PREPARING' : 'UPLOADING',
+            uploadStage: 'UPLOADING',
             uploadProgress: progress,
           });
         },
@@ -841,99 +955,41 @@ export default function Dashboard() {
       uploaded = await res.json();
     } catch (error) {
       if (!requestIsCurrent() || error?.name === 'AbortError') return;
-      // The server may have accepted a request even when the browser loses the
-      // response. Keep the replacement context visible instead of resurrecting
-      // the old bundled source; the operator can retry after checking current
-      // sessions rather than silently creating a second upload.
       console.error('Upload error:', error);
-      setSlotSources((current) => ({
-        ...current,
-        [cameraId]: { ...current[cameraId], sourceMode: 'durable', runState: 'ERROR' },
-      }));
-      updateCameraMedia(cameraId, {
-        mediaUrl: null,
-        isUploading: false,
-        uploadStage: 'ERROR',
-        uploadProgress: null,
-        uploadError: error instanceof TypeError && error.message === 'Failed to fetch'
-          ? 'UPLOAD CONNECTION INTERRUPTED'
-          : (error.message || 'VIDEO UPLOAD FAILED'),
-      });
-      delete uploadRequestsRef.current[cameraId];
-      return;
-    }
-
-    // The 200 response is the authoritative READY acknowledgement: durable
-    // storage and camera-scoped activation have both completed server-side.
-    const sessionId = uploaded.session_id || null;
-    const sourceName = uploaded.source_name || file.name;
-    setSlotSources((current) => ({
-      ...current,
-      [cameraId]: {
-        sourceMode: 'durable',
-        sourceId: sessionId,
-        sourceName,
-        runState: sessionId && uploaded.source_state === 'READY' ? 'READY' : (sessionId ? 'ACTIVATING' : 'ERROR'),
-      },
-    }));
-    updateCameraMedia(cameraId, {
-      mediaUrl: null,
-      sessionId,
-      isUploading: false,
-      uploadStage: null,
-      uploadProgress: null,
-      uploadError: sessionId ? null : 'VIDEO STORED BUT NO SESSION ID WAS RETURNED',
-    });
-    if (!sessionId) {
-      delete uploadRequestsRef.current[cameraId];
-      return;
-    }
-
-    const readySource = {
-      sourceMode: 'durable', sourceId: sessionId, sourceName,
-      runState: 'READY', analysisState: 'READY', scenario: 'paused',
-      sourceGeneration: Number.isFinite(Number(uploaded.source_generation)) ? Number(uploaded.source_generation) : null,
-      uploadIntentId: uploaded.upload_intent_id || sessionId,
-    };
-    setSlotSources((current) => ({ ...current, [cameraId]: readySource }));
-
-    // Claim exactly one automatic START for this concrete browser upload and
-    // authoritative durable source. No effect observes generic READY state,
-    // so polling, websocket repeats, remounts and restored sources are inert.
-    const autoStart = await runUploadAutoStart({
-      claims: uploadAutoStartClaimsRef.current,
-      cameraId,
-      sourceState: readySource,
-      uploadRequestId,
-      start: handleStartAnalysis,
-    });
-    if (autoStart.attempted) {
-      const outcome = autoStart.outcome;
-      if (!outcome?.ok) {
-        setSlotSources((current) => ({ ...current, [cameraId]: readySource }));
-        updateCameraMedia(cameraId, {
-          isUploading: false,
-          uploadStage: null,
-          uploadProgress: null,
-          analysisStartFailed: true,
-          uploadError: outcome?.duplicate ? 'ANALYSIS START ALREADY PENDING' : (outcome?.error || 'SOURCE READY — AUTOMATIC ANALYSIS START FAILED'),
-        });
-      }
-    }
-
-    // Preview is useful but never authoritative. A redirect/blob
-    // failure must not clear the stored session or its source identity.
-    if (uploaded.preview_url) {
+      // The client owns the upload-intent UUID. If the response was lost after
+      // durable receipt, recover that exact job instead of creating another upload.
       try {
-        const mediaRes = await authFetch(uploaded.preview_url);
-        if (!mediaRes.ok) throw new Error('PREVIEW LOAD FAILED — VIDEO IS STILL STORED');
-        const blobUrl = URL.createObjectURL(await mediaRes.blob());
-        if (requestIsCurrent()) updateCameraMedia(cameraId, { mediaUrl: blobUrl, uploadError: null });
-      } catch (error) {
-        console.error('Preview load error:', error);
-        if (requestIsCurrent()) updateCameraMedia(cameraId, { mediaUrl: null, uploadError: 'PREVIEW LOAD FAILED — VIDEO IS STILL STORED' });
+        uploaded = await waitForPreparation(
+          cameraId,
+          uploadRequestId,
+          requestIsCurrent,
+          { notFoundGraceMs: 12000 },
+        );
+      } catch (recoveryError) {
+        if (!requestIsCurrent()) return;
+        setSlotSources((current) => ({
+          ...current,
+          [cameraId]: { ...current[cameraId], sourceMode: 'durable', runState: 'ERROR' },
+        }));
+        updateCameraMedia(cameraId, {
+          mediaUrl: null,
+          isUploading: false,
+          uploadStage: 'ERROR',
+          uploadProgress: null,
+          uploadError: error instanceof TypeError && error.message === 'Failed to fetch'
+            ? 'UPLOAD CONNECTION INTERRUPTED BEFORE DURABLE RECEIPT'
+            : (recoveryError.message || error.message || 'VIDEO UPLOAD FAILED'),
+        });
+        delete uploadRequestsRef.current[cameraId];
+        return;
       }
     }
+
+    if (!uploaded?.preparation_job_id) throw new Error('VIDEO UPLOAD ACCEPTED WITHOUT A PREPARATION JOB ID');
+    if (String(uploaded.state || uploaded.source_state || '').toUpperCase() !== 'READY') {
+      uploaded = await waitForPreparation(cameraId, uploaded.preparation_job_id, requestIsCurrent);
+    }
+    await hydratePreparedUpload(cameraId, uploaded, requestIsCurrent);
     if (requestIsCurrent()) delete uploadRequestsRef.current[cameraId];
   };
 

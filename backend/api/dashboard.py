@@ -25,7 +25,6 @@ Security:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import asyncio
 import json
@@ -49,14 +48,22 @@ from backend.security.auth import require_edge_auth, require_operator_or_admin
 from backend.services.video_storage import (
     activate_bundled_source,
     activate_session,
+    create_preparation_job,
+    delete_preparation_upload,
+    download_preparation_upload,
     get_active_session,
+    get_current_preparation_job,
+    get_preparation_job,
     get_valid_active_session,
     get_uploaded_session,
+    preparation_is_current,
+    retry_preparation_job,
     signed_media_url,
     start_active_session,
     store_uploaded_session,
     complete_active_session,
     reconcile_inactive_control,
+    update_preparation_job,
     update_active_session,
 )
 
@@ -113,6 +120,19 @@ _BUNDLED_CAMERA_IDS = frozenset({"cam-border-01", "cam-checkpoint-01"})
 # blocking FastAPI's event loop, so health/readiness/WebSocket traffic remains
 # responsive while a second upload waits its turn.
 _NORMALIZATION_SEMAPHORE = asyncio.Semaphore(1)
+_preparation_tasks: dict[str, asyncio.Task] = {}
+
+
+_PREPARATION_TERMINAL_STATES = frozenset({"READY", "FAILED"})
+
+
+def _public_preparation(job: dict | None) -> dict:
+    if not job:
+        return {"available": False}
+    return {
+        key: value for key, value in job.items()
+        if key not in {"raw_object_key", "content_type"}
+    } | {"available": True}
 
 
 def _videos_dir() -> Path:
@@ -1042,13 +1062,191 @@ async def get_demo_telemetry(_user=Depends(require_operator_or_admin)):
 # POST /api/dashboard/video/upload
 # ---------------------------------------------------------------------------
 
-@router.post("/video/upload", status_code=status.HTTP_200_OK)
+
+async def _run_preparation_job(camera_id: str, job_id: str) -> None:
+    """Prepare one durable upload independently of the browser request."""
+    job = await asyncio.to_thread(get_preparation_job, camera_id, job_id)
+    if not job or str(job.get("state", "")).upper() in _PREPARATION_TERMINAL_STATES:
+        return
+
+    vdir = _videos_dir()
+    vdir.mkdir(parents=True, exist_ok=True)
+    suffix = str(job.get("source_suffix") or ".mp4").lower()
+    incoming_path = vdir / f"preparation_{job_id}{suffix}"
+    normalized_path = vdir / f"prepared_{job_id}.mp4"
+    ffmpeg = _ffmpeg_bin()
+    ffprobe = _ffprobe_bin()
+    started = perf_counter()
+    try:
+        if not ffmpeg or not ffprobe:
+            raise HTTPException(status_code=503, detail="Cloud video normalization is temporarily unavailable")
+
+        if not incoming_path.is_file():
+            await asyncio.to_thread(download_preparation_upload, camera_id, job_id, incoming_path)
+
+        await asyncio.to_thread(update_preparation_job, camera_id, job_id, {"state": "VALIDATING"})
+        validation_started = perf_counter()
+        probe_result = await asyncio.to_thread(_probe_video, incoming_path, ffprobe)
+        validation_ms = (perf_counter() - validation_started) * 1000
+
+        await asyncio.to_thread(update_preparation_job, camera_id, job_id, {"state": "NORMALIZING"})
+        normalization_started = perf_counter()
+        compatible_fast_path = _compatible_mp4_fast_path(incoming_path, probe_result)
+        async with _NORMALIZATION_SEMAPHORE:
+            if compatible_fast_path:
+                prepared_path = incoming_path
+            else:
+                await asyncio.to_thread(_normalize_video, incoming_path, normalized_path, ffmpeg)
+                prepared_path = normalized_path
+        normalization_ms = (perf_counter() - normalization_started) * 1000
+
+        await asyncio.to_thread(update_preparation_job, camera_id, job_id, {"state": "STORING"})
+        storage_started = perf_counter()
+        await asyncio.to_thread(
+            store_uploaded_session,
+            camera_id=camera_id,
+            session_id=job_id,
+            source_path=prepared_path,
+            preview_path=None,
+            source_name=job.get("source_name") or prepared_path.name,
+            content_type="video/mp4",
+        )
+        storage_ms = (perf_counter() - storage_started) * 1000
+
+        await asyncio.to_thread(update_preparation_job, camera_id, job_id, {"state": "FINALIZING"})
+        if not await asyncio.to_thread(preparation_is_current, camera_id, job_id):
+            await asyncio.to_thread(update_preparation_job, camera_id, job_id, {
+                "state": "FAILED",
+                "error": "UPLOAD SUPERSEDED BY A NEWER SOURCE",
+            })
+            return
+
+        finalization_started = perf_counter()
+        activated = await asyncio.to_thread(activate_session, camera_id, job_id) or {}
+        active, generation_created = await asyncio.to_thread(start_active_session, camera_id, job_id)
+        edge_status = await _wake_edge_service(camera_id)
+        finalization_ms = (perf_counter() - finalization_started) * 1000
+        normalized_size = prepared_path.stat().st_size
+        total_ready_ms = (perf_counter() - started) * 1000
+        ready = await asyncio.to_thread(update_preparation_job, camera_id, job_id, {
+            "state": "READY",
+            "error": None,
+            "preview_url": f"/api/dashboard/video/media/{job_id}?camera_id={camera_id}",
+            "normalized_name": f"uploaded_{job_id}.mp4",
+            "normalized_size_bytes": normalized_size,
+            "normalization_performed": not compatible_fast_path,
+            "source_generation": activated.get("source_generation"),
+            "analysis_generation": active.get("analysis_generation"),
+            "analysis_state": active.get("analysis_state", "WAKING"),
+            "auto_start_created": generation_created,
+            "edge_status": edge_status,
+            "timings_ms": {
+                "validation": round(validation_ms, 1),
+                "normalization": round(normalization_ms, 1),
+                "storage": round(storage_ms, 1),
+                "finalization": round(finalization_ms, 1),
+                "preparation_total": round(total_ready_ms, 1),
+            },
+        })
+        _demo_state.setdefault("uploaded_sources", {}).setdefault(camera_id, {})[job_id] = {
+            "source_name": ready["normalized_name"],
+            "original_name": ready.get("source_name"),
+            "preview_name": None,
+        }
+        await asyncio.to_thread(delete_preparation_upload, camera_id, job_id)
+        logger.info(
+            "[DashboardPreparationTiming] camera_id=%s job=%s bytes=%s validation_ms=%.1f "
+            "normalization_ms=%.1f storage_ms=%.1f finalization_ms=%.1f total_ms=%.1f normalization=%s",
+            camera_id, job_id[:8], normalized_size, validation_ms, normalization_ms,
+            storage_ms, finalization_ms, total_ready_ms,
+            "skipped-compatible" if compatible_fast_path else "performed",
+        )
+    except HTTPException as exc:
+        logger.warning("[DashboardPreparation] job=%s failed status=%s", job_id[:8], exc.status_code)
+        await asyncio.to_thread(update_preparation_job, camera_id, job_id, {
+            "state": "FAILED",
+            "error": str(exc.detail or "VIDEO PREPARATION FAILED"),
+        })
+    except Exception:
+        logger.exception("[DashboardPreparation] job=%s failed", job_id[:8])
+        try:
+            await asyncio.to_thread(update_preparation_job, camera_id, job_id, {
+                "state": "FAILED",
+                "error": "VIDEO PREPARATION FAILED",
+            })
+        except Exception:
+            logger.exception("[DashboardPreparation] job=%s failure state could not be persisted", job_id[:8])
+    finally:
+        incoming_path.unlink(missing_ok=True)
+        normalized_path.unlink(missing_ok=True)
+        current_task = asyncio.current_task()
+        if _preparation_tasks.get(job_id) is current_task:
+            _preparation_tasks.pop(job_id, None)
+
+
+def _ensure_preparation_task(camera_id: str, job_id: str) -> asyncio.Task | None:
+    existing = _preparation_tasks.get(job_id)
+    if existing and not existing.done():
+        return existing
+    task = asyncio.create_task(_run_preparation_job(camera_id, job_id))
+    _preparation_tasks[job_id] = task
+    return task
+
+
+@router.get("/video/preparation/current")
+async def get_current_video_preparation(
+    camera_id: str,
+    _user=Depends(require_operator_or_admin),
+):
+    job = await asyncio.to_thread(get_current_preparation_job, camera_id)
+    if job and str(job.get("state", "")).upper() not in _PREPARATION_TERMINAL_STATES:
+        _ensure_preparation_task(camera_id, job["preparation_job_id"])
+    return _public_preparation(job)
+
+
+@router.get("/video/preparation/{job_id}")
+async def get_video_preparation(
+    job_id: str,
+    camera_id: str,
+    _user=Depends(require_operator_or_admin),
+):
+    try:
+        canonical_job_id = str(uuid.UUID(job_id))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid preparation job ID") from exc
+    job = await asyncio.to_thread(get_preparation_job, camera_id, canonical_job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Video preparation job was not found")
+    if str(job.get("state", "")).upper() not in _PREPARATION_TERMINAL_STATES:
+        _ensure_preparation_task(camera_id, canonical_job_id)
+    return _public_preparation(job)
+
+
+@router.post("/video/preparation/{job_id}/retry", status_code=status.HTTP_202_ACCEPTED)
+async def retry_video_preparation(
+    job_id: str,
+    camera_id: str,
+    _user=Depends(require_operator_or_admin),
+):
+    try:
+        canonical_job_id = str(uuid.UUID(job_id))
+        job = await asyncio.to_thread(retry_preparation_job, camera_id, canonical_job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    _ensure_preparation_task(camera_id, canonical_job_id)
+    return _public_preparation(job)
+
+
+@router.post("/video/upload", status_code=status.HTTP_202_ACCEPTED)
 async def upload_dashboard_video(
     file: UploadFile = File(...),
     camera_id: str | None = Form(None),
+    upload_intent_id: str | None = Form(None),
     _user=Depends(require_operator_or_admin),
 ):
-    """Validate and normalize one upload for both browser and edge analysis."""
+    """Receive an upload, persist it, and prepare it outside this request."""
     request_started = perf_counter()
     content_type = (file.content_type or "").lower()
     # Browsers on Windows sometimes omit the MIME type.  The extension, magic
@@ -1077,7 +1275,15 @@ async def upload_dashboard_video(
 
     vdir = _videos_dir()
     vdir.mkdir(parents=True, exist_ok=True)
-    new_session_id = str(uuid.uuid4())
+    try:
+        intent_value = (
+            upload_intent_id
+            if isinstance(upload_intent_id, str) and upload_intent_id.strip()
+            else None
+        )
+        new_session_id = str(uuid.UUID(intent_value)) if intent_value else str(uuid.uuid4())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid upload intent ID") from exc
     incoming_path = vdir / f"incoming_{new_session_id}{ext}"
     normalized_name = f"uploaded_{new_session_id}.mp4"
     normalized_path = vdir / normalized_name
@@ -1113,6 +1319,36 @@ async def upload_dashboard_video(
 
         if durable and (not ffmpeg or not ffprobe):
             raise HTTPException(status_code=503, detail="Cloud video normalization is temporarily unavailable")
+
+        if durable and intent_value:
+            persistence_started = perf_counter()
+            job = await asyncio.to_thread(
+                create_preparation_job,
+                camera_id=camera_id,
+                job_id=new_session_id,
+                source_path=incoming_path,
+                source_name=original_name,
+                content_type=content_type or "video/mp4",
+            )
+            persistence_ms = (perf_counter() - persistence_started) * 1000
+            _ensure_preparation_task(camera_id, new_session_id)
+            logger.info(
+                "[DashboardUploadAccepted] camera_id=%s job=%s bytes=%s receive_ms=%.1f persistence_ms=%.1f",
+                camera_id, new_session_id[:8], total, receive_ms, persistence_ms,
+            )
+            return {
+                **_public_preparation(job),
+                "status": "accepted",
+                "source_state": "UPLOADED",
+                "session_id": new_session_id,
+                "upload_intent_id": new_session_id,
+                "preparation_job_id": new_session_id,
+                "camera_id": camera_id,
+                "source_name": original_name,
+                "receive_ms": round(receive_ms, 1),
+                "persistence_ms": round(persistence_ms, 1),
+                "message": "Video upload accepted; preparation continues asynchronously.",
+            }
 
         queue_wait_started = perf_counter()
         probe_result = None
