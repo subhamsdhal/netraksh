@@ -129,6 +129,25 @@ class AsyncDetectorWorker:
             except Exception as exc:  # pragma: no cover - exercised by integration failure path
                 error = f"{type(exc).__name__}: {exc}"
                 logger.error("[HybridTracker] Detector keyframe failed: %s", error)
+            runtime = getattr(self.detector, "_runtime", None)
+            logger.info(
+                "[Detector Trace] frame=%d shape=%sx%s condition=%s threshold=%.3f "
+                "input=%s candidates=%d threshold_pass=%d nms=%d raw=%d tracks=%d "
+                "tracker_output=%d error=%s",
+                job.frame_index,
+                job.detector_frame.shape[1] if getattr(job.detector_frame, "shape", None) else "?",
+                job.detector_frame.shape[0] if getattr(job.detector_frame, "shape", None) else "?",
+                job.condition.condition,
+                job.confidence_threshold,
+                getattr(runtime, "last_input_shape", None),
+                getattr(runtime, "last_candidate_count", 0),
+                getattr(runtime, "last_threshold_count", 0),
+                getattr(runtime, "last_nms_count", 0),
+                len(getattr(self.detector, "last_raw_detections", [])),
+                len(tracks),
+                getattr(self.detector, "last_tracker_output_count", 0),
+                error or "none",
+            )
             elapsed_ms = (time.perf_counter() - started) * 1000.0
             runtime_timings = getattr(getattr(self.detector, "_runtime", None), "last_stage_ms", {})
             tracker_ms = float(getattr(self.detector, "last_tracker_ms", 0.0))

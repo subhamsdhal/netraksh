@@ -668,8 +668,14 @@ class EdgePipeline:
                         detector_tracks, detector_frame, detector_index = self._hud_anchor
                         self._hud_tracker.reset()
                         self._hud_tracker.observe(detector_frame, detector_index)
-                        self._hud_tracker.reanchor(detector_tracks, detector_index, detector_frame)
+                        anchored = self._hud_tracker.reanchor(detector_tracks, detector_index, detector_frame)
                         self._hud_anchor_frame_index = detector_index
+                        logger.info(
+                            "[HUD Trace] anchor_frame=%d detector_tracks=%d anchored_tracks=%d",
+                            detector_index,
+                            len(detector_tracks),
+                            len(anchored),
+                        )
                     tracks = self._hud_tracker.observe(frame, meta.frame_index)
                 self._emit_hud_sample(frame, meta, tracks)
             except Exception as exc:

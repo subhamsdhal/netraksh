@@ -51,6 +51,10 @@ class DetectorRuntime(ABC):
         self._fps_measurements: List[float] = []
         self._last_fps_report = time.time()
         self.last_stage_ms: Dict[str, float] = {}
+        self.last_input_shape = None
+        self.last_candidate_count = 0
+        self.last_threshold_count = 0
+        self.last_nms_count = 0
 
     @abstractmethod
     def load(self) -> None:
@@ -245,6 +249,7 @@ class BaseONNXRuntime(DetectorRuntime):
         im = im.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
         im = np.ascontiguousarray(im, dtype=np.float32) / 255.0
         im = np.expand_dims(im, axis=0)
+        self.last_input_shape = tuple(int(value) for value in im.shape)
         
         return im, r, (left, top)
 
@@ -283,11 +288,13 @@ class BaseONNXRuntime(DetectorRuntime):
         # valid person/vehicle because an unsupported class happened to win.
         supported_ids = np.asarray(sorted(_YOLO_CLASS_MAP), dtype=np.int64)
         supported_scores = preds[:, 4:][:, supported_ids]
+        self.last_candidate_count = int(len(supported_scores))
         supported_argmax = np.argmax(supported_scores, axis=1)
         class_ids = supported_ids[supported_argmax]
         confidences = supported_scores[np.arange(len(supported_scores)), supported_argmax]
         
         mask = confidences > conf_thresh
+        self.last_threshold_count = int(np.count_nonzero(mask))
         boxes = boxes[mask]
         class_ids = class_ids[mask]
         confidences = confidences[mask]
@@ -305,6 +312,7 @@ class BaseONNXRuntime(DetectorRuntime):
             conf_thresh,
             0.45  # NMS threshold
         )
+        self.last_nms_count = int(len(indices))
         
         detections = []
         if len(indices) > 0:
