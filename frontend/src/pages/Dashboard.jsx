@@ -683,6 +683,9 @@ export default function Dashboard() {
             analysis_state: state.analysis_state || null,
             has_preview_url: Boolean(state.preview_url),
             session_id: state.session_id || null,
+            latest_analysis_session_id: state.latest_analysis_session_id || null,
+            source_generation: state.source_generation ?? null,
+            analysis_generation: state.analysis_generation ?? null,
           });
           const restoredSource = sourceStateFromCurrentVideo(state);
           if (restoredSource) {
@@ -853,15 +856,41 @@ export default function Dashboard() {
     visibleCameraIds.filter(Boolean).forEach(async (cameraId) => {
       const source = slotSources[cameraId];
       const identity = completedRunSummaryIdentity(cameraId, source, scopedLiveTracks[cameraId]);
-      if (!identity) return;
+      const recordSummaryDiagnostic = (diagnostic) => {
+        if (!mounted) return;
+        setSourceRestoreDiagnostics(current => ({
+          ...current,
+          [cameraId]: { ...current[cameraId], ...diagnostic },
+        }));
+      };
+      if (!identity) {
+        recordSummaryDiagnostic({ stage: 'RUN_SUMMARY_SKIPPED_NO_IDENTITY' });
+        return;
+      }
+      recordSummaryDiagnostic({
+        stage: 'RUN_SUMMARY_FETCH_PENDING',
+        summary_camera_id: identity.cameraId,
+        summary_stream_id: identity.streamId,
+        summary_analysis_session_id: identity.analysisSessionId,
+        summary_analysis_generation: identity.analysisGeneration,
+      });
       setRunSummaryLoading(current => ({ ...current, [cameraId]: true }));
       const params = new URLSearchParams({ camera_id: identity.cameraId, stream_id: identity.streamId });
       if (identity.analysisGeneration != null) params.set('analysis_generation', String(identity.analysisGeneration));
       try {
         const response = await authFetch(`/system/analysis-runs/${encodeURIComponent(identity.analysisSessionId)}?${params.toString()}`);
         const summary = response.ok ? await response.json() : null;
+        recordSummaryDiagnostic({
+          stage: 'RUN_SUMMARY_FETCH_COMPLETE',
+          summary_http_status: response.status,
+          summary_available: Boolean(summary),
+          tracking_sample_count: summary?.tracking_sample_count ?? null,
+          final_frame_index: summary?.final_frame_index ?? null,
+          final_video_time: summary?.final_video_time ?? null,
+        });
         if (mounted) setRunSummaries(current => ({ ...current, [cameraId]: summary }));
-      } catch (_) {
+      } catch (error) {
+        recordSummaryDiagnostic({ stage: 'RUN_SUMMARY_FETCH_ERROR', summary_error_name: error?.name || 'Error' });
         if (mounted) setRunSummaries(current => ({ ...current, [cameraId]: null }));
       } finally {
         if (mounted) setRunSummaryLoading(current => ({ ...current, [cameraId]: false }));

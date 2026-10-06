@@ -84,9 +84,13 @@ describe('dashboard video control ownership', () => {
     const staleBrowserSource = { sourceMode: 'durable', sourceId: 'stale', sourceName: 'cam 1.mp4', runState: 'COMPLETED' };
     const backendSource = sourceStateFromCurrentVideo({
       available: true, source_mode: 'durable', session_id: '94efecfd', source_name: 'cam 2.mp4',
-      analysis_state: 'COMPLETED', analysis_generation: 4, scenario: 'paused',
+      analysis_state: 'COMPLETED', analysis_generation: 4, latest_analysis_session_id: 'run-94efecfd',
+      source_generation: 7, scenario: 'paused',
     });
-    expect(backendSource).toMatchObject({ sourceId: '94efecfd', sourceName: 'cam 2.mp4', analysisState: 'COMPLETED', analysisGeneration: 4 });
+    expect(backendSource).toMatchObject({
+      sourceId: '94efecfd', sourceName: 'cam 2.mp4', analysisState: 'COMPLETED',
+      analysisGeneration: 4, sourceGeneration: 7, latestAnalysisSessionId: 'run-94efecfd',
+    });
     expect(backendSource).not.toEqual(staleBrowserSource);
     expect(restoringSourceState()).toEqual({ restoring: true, runState: 'RESTORING' });
   });
