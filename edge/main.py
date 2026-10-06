@@ -202,12 +202,12 @@ class EdgePipeline:
         self._hud_frame_queue = Queue(maxsize=2)
         self._hud_decoupled = False
         self._hud_tracker = OpticalFlowBoxTracker(
-            max_width=int(os.environ.get("IMAGE_TRACKER_MAX_WIDTH", "360")),
+            max_width=int(os.environ.get("IMAGE_TRACKER_MAX_WIDTH", "280")),
             history_frames=int(os.environ.get("TRACKING_HISTORY_FRAMES", "180")),
             max_detector_age_frames=int(os.environ.get("TRACK_MAX_DETECTOR_AGE_FRAMES", "144")),
-            max_points=int(os.environ.get("IMAGE_TRACKER_MAX_POINTS", "20")),
-            flow_win_size=int(os.environ.get("IMAGE_TRACKER_FLOW_WIN_SIZE", "17")),
-            backward_check_interval=int(os.environ.get("IMAGE_TRACKER_BACKWARD_CHECK_INTERVAL", "4")),
+            max_points=int(os.environ.get("IMAGE_TRACKER_MAX_POINTS", "16")),
+            flow_win_size=int(os.environ.get("IMAGE_TRACKER_FLOW_WIN_SIZE", "13")),
+            backward_check_interval=int(os.environ.get("IMAGE_TRACKER_BACKWARD_CHECK_INTERVAL", "6")),
         )
         self._hud_state_lock = threading.Lock()
         self._hud_anchor = None
@@ -246,12 +246,12 @@ class EdgePipeline:
         )
         self.detector_worker = AsyncDetectorWorker(self.detector)
         self.visual_tracker = OpticalFlowBoxTracker(
-            max_width=int(os.environ.get("IMAGE_TRACKER_MAX_WIDTH", "360")),
+            max_width=int(os.environ.get("IMAGE_TRACKER_MAX_WIDTH", "280")),
             history_frames=int(os.environ.get("TRACKING_HISTORY_FRAMES", "180")),
             max_detector_age_frames=int(os.environ.get("TRACK_MAX_DETECTOR_AGE_FRAMES", "144")),
-            max_points=int(os.environ.get("IMAGE_TRACKER_MAX_POINTS", "20")),
-            flow_win_size=int(os.environ.get("IMAGE_TRACKER_FLOW_WIN_SIZE", "17")),
-            backward_check_interval=int(os.environ.get("IMAGE_TRACKER_BACKWARD_CHECK_INTERVAL", "4")),
+            max_points=int(os.environ.get("IMAGE_TRACKER_MAX_POINTS", "16")),
+            flow_win_size=int(os.environ.get("IMAGE_TRACKER_FLOW_WIN_SIZE", "13")),
+            backward_check_interval=int(os.environ.get("IMAGE_TRACKER_BACKWARD_CHECK_INTERVAL", "6")),
         )
         self._last_detector_source_time: Optional[float] = None
         self._last_detector_completed_at: Optional[float] = None
@@ -456,11 +456,10 @@ class EdgePipeline:
             1,
             int(os.environ.get(
                 "TRACKING_TRANSPORT_WORKERS",
-                # A large burst of concurrent HTTP clients overloads the
-                # hosted backend and turns otherwise valid HUD samples into
-                # read timeouts.  Twelve workers sustain the target cadence
-                # without recreating the prior 32-client burst.
-                "12" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
+                # Keep the hosted transport below the backend's burst limit
+                # while leaving enough parallelism to carry the lightweight
+                # HUD samples at the required live cadence.
+                "16" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
             )),
         )
         tracking_threads = []
