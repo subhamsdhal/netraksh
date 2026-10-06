@@ -652,6 +652,13 @@ export default function VideoFeed({
         timer = setTimeout(pump, 40);
         return;
       }
+      // A restored source can still be at HAVE_METADATA when its first sample
+      // is time zero. Assigning currentTime=0 then emits no seeked event, so
+      // wait for a decodable first frame before entering the frame-locked loop.
+      if (video.readyState < 2) {
+        timer = setTimeout(pump, 100);
+        return;
+      }
       video.pause();
       const target = Math.max(0, Number(sample.video_time));
       setFramePending(true);
@@ -843,7 +850,7 @@ export default function VideoFeed({
         muted
         controls={!hudVisible}
         playsInline
-        preload="metadata"
+        preload={isDurableSource ? 'auto' : 'metadata'}
         onLoadedMetadata={(e) => {
           e.target.playbackRate = 1.0;
           if (isDurableSource && hudVisible) e.target.pause();

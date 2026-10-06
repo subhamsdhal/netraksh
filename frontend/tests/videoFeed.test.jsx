@@ -236,6 +236,24 @@ describe('detection-synchronized analyzed playback', () => {
     expect(video.currentTime).toBe(6);
   });
 
+  it('waits for decodable media when the first restored sample is at time zero', async () => {
+    const onAnalyzedSample = vi.fn();
+    const timeline = [sample({ frame_index: 0, video_time: 0 }), sample({ frame_index: 10, video_time: 0.4 })];
+    const { container } = renderFeed({
+      sourceRunState: 'COMPLETED', telemetryStatus: 'COMPLETED',
+      completedTimeline: timeline,
+      completedSummary: { ...scope, final_video_time: 0.4 }, onAnalyzedSample,
+    });
+    const video = wireVideo(container.querySelector('video'));
+    let ready = 1;
+    Object.defineProperty(video, 'readyState', { configurable: true, get: () => ready });
+    await new Promise(resolve => setTimeout(resolve, 130));
+    expect(onAnalyzedSample).not.toHaveBeenCalledWith(expect.objectContaining({ frame_index: 0 }));
+    ready = 4;
+    fireEvent.loadedData(video);
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenCalledWith(expect.objectContaining({ frame_index: 0 })));
+  });
+
   it('does not call a restored durable source NO VIDEO SOURCE while transport is absent', () => {
     render(<VideoFeed
       cameraId="cam-border-01"
