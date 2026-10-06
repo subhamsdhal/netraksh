@@ -1349,6 +1349,7 @@ export default function Dashboard() {
                     completedTimeline={completedSummary?.tracking_timeline_json || []}
                     completedSummary={completedSummary}
                     completedSummaryLoading={Boolean(runSummaryLoading[cameraId])}
+                    diagnosticsEnabled={role?.toUpperCase() === 'ADMIN'}
                     sourceRunState={displayRunState}
                     sourceRestoring={Boolean(sourceState?.restoring)}
                     onAnalyzedSample={(sample) => setPresentedTelemetry(current => {
@@ -1488,6 +1489,7 @@ export default function Dashboard() {
               completedTimeline={runSummaries[activeCameraId]?.tracking_timeline_json || []}
               completedSummary={runSummaries[activeCameraId] || null}
               completedSummaryLoading={Boolean(runSummaryLoading[activeCameraId])}
+              diagnosticsEnabled={role?.toUpperCase() === 'ADMIN'}
               sourceRunState={slotSources[activeCameraId]?.runState || null}
               onVideoEnded={() => updateCameraMedia(activeCameraId, { playbackEnded: true })}
             />

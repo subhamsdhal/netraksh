@@ -206,6 +206,7 @@ export default function VideoFeed({
   completedTimeline = [],
   completedSummary = null,
   completedSummaryLoading = false,
+  diagnosticsEnabled = false,
   sourceRunState,
   sourceRestoring = false,
   onAnalyzedSample,
@@ -1246,6 +1247,86 @@ export default function VideoFeed({
             {uploadLabel}
           </span>
         </div>
+      )}
+
+      {diagnosticsEnabled && displayedSample && (
+        <details
+          aria-label="ADMIN frame diagnostics"
+          style={{
+            position: 'absolute', right: '0.35rem', bottom: '2rem', zIndex: 22,
+            maxWidth: 'min(92%, 34rem)', color: '#e2e8f0',
+            background: 'rgba(2,6,23,0.96)', border: '1px solid #64748b',
+            borderRadius: '0.25rem', font: '0.58rem ui-monospace, monospace',
+          }}
+        >
+          <summary style={{ cursor: 'pointer', padding: '0.3rem 0.45rem' }}>
+            ADMIN FRAME DIAGNOSTICS · READ ONLY
+          </summary>
+          <pre style={{ maxHeight: '55vh', overflow: 'auto', whiteSpace: 'pre-wrap', padding: '0.45rem', margin: 0 }}>
+            {JSON.stringify({
+              run: {
+                camera_id: displayedSample.camera_id,
+                analysis_session_id: displayedSample.analysis_session_id,
+                stream_id: displayedSample.stream_id,
+                analysis_generation: displayedSample.analysis_generation,
+                source_generation: displayedSample.source_generation,
+                expected_source_id: expectedSessionId,
+                expected_generation: expectedGeneration,
+                expected_source_generation: expectedSourceGeneration,
+              },
+              sample: {
+                sequence: displayedSample.sequence,
+                frame_index: displayedSample.frame_index,
+                detector_frame_index: displayedSample.detector_frame_index ?? null,
+                source_time_seconds: displayedSample.video_time,
+                source_timestamp: displayedSample.source_timestamp ?? null,
+                processed_timestamp: displayedSample.processed_timestamp ?? null,
+                source_dimensions: [displayedSample.frame_width, displayedSample.frame_height],
+                bbox_format: displayedSample.bbox_format,
+                coordinate_space: displayedSample.coordinate_space,
+                detection_method: displayedSample.detection_method,
+                counts: {
+                  persons: displayedSample.person_count,
+                  vehicles: displayedSample.vehicle_count,
+                  tracks: displayedSample.track_count,
+                },
+                raw_detector_outputs: 'NOT PERSISTED FOR THIS HISTORICAL RUN',
+              },
+              display: {
+                intrinsic_video_dimensions: [videoRect.vw, videoRect.vh],
+                container_dimensions: [videoRect.cw, videoRect.ch],
+                rendered_video_rect: {
+                  left: videoRect.left, top: videoRect.top,
+                  width: videoRect.width, height: videoRect.height,
+                },
+              },
+              tracks: (displayedSample.tracks || []).map(track => {
+                const x = Number(track.bbox_x);
+                const y = Number(track.bbox_y);
+                const width = Number(track.bbox_w);
+                const height = Number(track.bbox_h);
+                const left = videoRect.left + Math.max(0, x) * videoRect.width;
+                const top = videoRect.top + Math.max(0, y) * videoRect.height;
+                const right = videoRect.left + Math.min(1, x + width) * videoRect.width;
+                const bottom = videoRect.top + Math.min(1, y + height) * videoRect.height;
+                return {
+                  track_id: track.track_id,
+                  class: track.object_class || track.class_name || track.detection_class || track.class_id || 'unknown',
+                  confidence: track.confidence ?? null,
+                  last_detection_confidence: track.last_detection_confidence ?? null,
+                  detector_confirmed: track.detector_confirmed ?? null,
+                  confidence_semantics: track.confidence_semantics ?? null,
+                  tracker_state: track.tracker_state ?? null,
+                  matched_current_frame: track.matched_current_frame ?? null,
+                  bbox_normalized_xywh: [track.bbox_x, track.bbox_y, track.bbox_w, track.bbox_h],
+                  bbox_display_container_xywh: [left, top, right - left, bottom - top],
+                  intersects_rendered_video: right > videoRect.left && bottom > videoRect.top
+                    && left < videoRect.left + videoRect.width && top < videoRect.top + videoRect.height,
+                };
+              }),
+            }, null, 2)}
+          </pre>
+        </details>
       )}
 
     </div>

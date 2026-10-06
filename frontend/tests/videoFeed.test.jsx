@@ -108,6 +108,52 @@ describe('detection-synchronized analyzed playback', () => {
     expect(screen.getByText('FRAME 12 · 0.40s')).toBeInTheDocument();
   });
 
+  it('exposes only persisted, read-only sample diagnostics when explicitly enabled for admins', async () => {
+    const vehicle = track({
+      track_id: 10,
+      class_name: 'car',
+      detection_class: 'car',
+      confidence: 0.61,
+      bbox_x: 0.7,
+      bbox_y: 0.6,
+      bbox_w: 0.2,
+      bbox_h: 0.25,
+      detector_confirmed: true,
+      confidence_semantics: 'TRACKER_PROPAGATED',
+      last_detection_confidence: 0.61,
+    });
+    const timelineSample = sample({
+      tracks: [track(), vehicle],
+      person_count: 1,
+      vehicle_count: 1,
+      track_count: 2,
+    });
+    const { container } = renderFeed({
+      diagnosticsEnabled: true,
+      sourceRunState: 'COMPLETED',
+      telemetryStatus: 'COMPLETED',
+      completedTimeline: [timelineSample],
+      completedSummary: { ...scope, final_video_time: 0.4, tracking_sample_count: 1 },
+    });
+    const video = wireVideo(container.querySelector('video'));
+    fireEvent.seeked(video);
+
+    await waitFor(() => expect(container.querySelector('[aria-label="ADMIN frame diagnostics"]')).toBeInTheDocument());
+    const diagnosticText = container.querySelector('[aria-label="ADMIN frame diagnostics"]').textContent;
+    expect(diagnosticText).toContain('NOT PERSISTED FOR THIS HISTORICAL RUN');
+    expect(diagnosticText).toContain('TRACKER_PROPAGATED');
+    expect(diagnosticText).toContain('bbox_normalized_xywh');
+    expect(diagnosticText).toContain('bbox_display_container_xywh');
+
+    const ordinary = renderFeed({
+      sourceRunState: 'COMPLETED',
+      telemetryStatus: 'COMPLETED',
+      completedTimeline: [timelineSample],
+      completedSummary: { ...scope, final_video_time: 0.4, tracking_sample_count: 1 },
+    });
+    expect(ordinary.container.querySelector('[aria-label="ADMIN frame diagnostics"]')).not.toBeInTheDocument();
+  });
+
   it('presents a paused seek when requestVideoFrameCallback never fires', async () => {
     HTMLMediaElement.prototype.requestVideoFrameCallback = vi.fn(() => 1);
     const onAnalyzedSample = vi.fn();
