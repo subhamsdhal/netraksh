@@ -458,9 +458,9 @@ class EdgePipeline:
                 "TRACKING_TRANSPORT_WORKERS",
                 # A large burst of concurrent HTTP clients overloads the
                 # hosted backend and turns otherwise valid HUD samples into
-                # read timeouts.  Eight workers sustain the target cadence
-                # while preserving bounded, lossy transport semantics.
-                "8" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
+                # read timeouts.  Twelve workers sustain the target cadence
+                # without recreating the prior 32-client burst.
+                "12" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
             )),
         )
         tracking_threads = []
