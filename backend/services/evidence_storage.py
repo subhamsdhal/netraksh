@@ -280,6 +280,7 @@ class S3Storage(EvidenceStorageBackend):
     def __init__(self, endpoint: str, bucket: str, access_key: str, secret_key: str, region: str):
         try:
             import boto3
+            from boto3.exceptions import S3UploadFailedError
             from botocore.config import Config
             from botocore.exceptions import ClientError as _ClientError
         except ImportError:
@@ -288,6 +289,7 @@ class S3Storage(EvidenceStorageBackend):
                 "Install it with: pip install boto3==1.34.0"
             )
         self._ClientError = _ClientError
+        self._S3UploadFailedError = S3UploadFailedError
         self.bucket = bucket
         self.s3 = boto3.client(
             's3',
@@ -304,6 +306,34 @@ class S3Storage(EvidenceStorageBackend):
                 s3={"addressing_style": "path"},
             ) if endpoint else None,
         )
+        if endpoint and ".supabase.co" in endpoint.lower():
+            # Supabase implements S3 multipart uploads, but deliberately does
+            # not implement Content-MD5/checksum request headers. Botocore
+            # injects Content-MD5 for streaming PutObject and UploadPart
+            # requests, so remove those compatibility-only headers after
+            # botocore has prepared the request and before SigV4 signs it.
+            for operation in (
+                "PutObject",
+                "CreateMultipartUpload",
+                "UploadPart",
+                "CompleteMultipartUpload",
+            ):
+                self.s3.meta.events.register(
+                    f"before-sign.s3.{operation}",
+                    self._strip_unsupported_checksum_headers,
+                )
+
+    @staticmethod
+    def _strip_unsupported_checksum_headers(request, **_kwargs) -> None:
+        for header in (
+            "Content-MD5",
+            "x-amz-sdk-checksum-algorithm",
+            "x-amz-checksum-crc32",
+            "x-amz-checksum-crc32c",
+            "x-amz-checksum-sha1",
+            "x-amz-checksum-sha256",
+        ):
+            request.headers.pop(header, None)
 
     def put_object(self, object_key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
         try:
@@ -318,18 +348,15 @@ class S3Storage(EvidenceStorageBackend):
 
     def put_file(self, object_key: str, file_path: str, content_type: str = "application/octet-stream") -> None:
         try:
-            # The application caps uploads at 200 MiB. Use one bounded,
-            # streaming PutObject below that limit because some S3-compatible
-            # providers reject boto3's automatic multipart UploadPart flow.
-            with open(file_path, "rb") as source:
-                self.s3.put_object(
-                    Bucket=self.bucket,
-                    Key=object_key,
-                    Body=source,
-                    ContentLength=os.path.getsize(file_path),
-                    ContentType=content_type,
-                )
-        except (self._ClientError, OSError) as e:
+            # Large server-side uploads use the provider's supported multipart
+            # API so each bounded part can be retried independently.
+            self.s3.upload_file(
+                file_path,
+                self.bucket,
+                object_key,
+                ExtraArgs={"ContentType": content_type},
+            )
+        except (self._ClientError, self._S3UploadFailedError, OSError) as e:
             raise StorageUploadError(f"Failed to upload file to S3: {str(e)}")
 
     def get_file(self, object_key: str, file_path: str) -> None:

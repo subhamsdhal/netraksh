@@ -39,7 +39,7 @@ class MemoryStorage:
         return key in self.objects
 
 
-def test_s3_file_transfer_streams_without_managed_multipart(tmp_path):
+def test_s3_file_transfer_uses_multipart_upload_and_streaming_download(tmp_path):
     source = tmp_path / "large.mp4"
     source.write_bytes(b"bounded-stream")
     destination = tmp_path / "downloaded.mp4"
@@ -53,6 +53,7 @@ def test_s3_file_transfer_streams_without_managed_multipart(tmp_path):
     class Client:
         def __init__(self):
             self.puts = []
+            self.uploads = []
 
         def put_object(self, **kwargs):
             assert not isinstance(kwargs["Body"], (bytes, bytearray))
@@ -62,7 +63,7 @@ def test_s3_file_transfer_streams_without_managed_multipart(tmp_path):
             return {"Body": Body()}
 
         def upload_file(self, *_args, **_kwargs):
-            pytest.fail("managed multipart upload must not be used")
+            self.uploads.append((_args, _kwargs))
 
         def download_file(self, *_args, **_kwargs):
             pytest.fail("managed multipart download must not be used")
@@ -71,12 +72,17 @@ def test_s3_file_transfer_streams_without_managed_multipart(tmp_path):
     storage.bucket = "private-test-bucket"
     storage.s3 = Client()
     storage._ClientError = RuntimeError
+    storage._S3UploadFailedError = RuntimeError
 
     storage.put_file("video/original.mp4", str(source), "video/mp4")
     storage.get_file("video/original.mp4", str(destination))
 
-    assert storage.s3.puts[0]["ContentLength"] == len(b"bounded-stream")
-    assert storage.s3.puts[0]["Body"] == b"bounded-stream"
+    assert storage.s3.uploads == [
+        (
+            (str(source), "private-test-bucket", "video/original.mp4"),
+            {"ExtraArgs": {"ContentType": "video/mp4"}},
+        )
+    ]
     assert destination.read_bytes() == b"bounded-stream"
 
 

@@ -145,3 +145,26 @@ def test_s3_custom_endpoint_uses_path_style_addressing():
 
     assert storage.s3.meta.config.s3["addressing_style"] == "path"
     assert storage.s3.meta.config.signature_version == "s3v4"
+
+
+def test_supabase_s3_strips_unsupported_checksum_headers_before_signing():
+    storage = S3Storage(
+        endpoint="https://project-ref.storage.supabase.co/storage/v1/s3",
+        bucket="test-bucket",
+        access_key="test",
+        secret_key="test",
+        region="ap-south-1",
+    )
+
+    class Request:
+        headers = {
+            "Content-MD5": "unsupported",
+            "x-amz-sdk-checksum-algorithm": "CRC32",
+            "x-amz-checksum-crc32": "unsupported",
+            "Content-Type": "video/mp4",
+        }
+
+    request = Request()
+    storage._strip_unsupported_checksum_headers(request)
+
+    assert request.headers == {"Content-Type": "video/mp4"}
