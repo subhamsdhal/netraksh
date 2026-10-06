@@ -1,7 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
-import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, claimUploadAutoStart, durableHeartbeat, fetchWithTimeout, lifecycleAction, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, canReanalyzeSource, claimUploadAutoStart, durableHeartbeat, fetchWithTimeout, lifecycleAction, reanalyzeRequestPayload, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
 
 describe('dashboard video control ownership', () => {
+  it('offers reanalysis only for a completed durable Camera 1 source', () => {
+    const completed = { sourceMode: 'durable', sourceId: 'stored-camera-1-video', analysisState: 'COMPLETED' };
+    expect(canReanalyzeSource('cam-border-01', completed)).toBe(true);
+    expect(reanalyzeRequestPayload('cam-border-01', completed, 'request-1')).toEqual({
+      camera_id: 'cam-border-01',
+      video_session_id: 'stored-camera-1-video',
+      request_id: 'request-1',
+    });
+    expect(reanalyzeRequestPayload('cam-border-01', completed, 'request-1')).not.toHaveProperty('file');
+    expect(canReanalyzeSource('cam-checkpoint-01', completed)).toBe(false);
+    expect(canReanalyzeSource('cam-border-01', { ...completed, analysisState: 'ACTIVE' })).toBe(false);
+    expect(canReanalyzeSource('cam-border-01', { ...completed, sourceMode: 'bundled' })).toBe(false);
+    expect(canReanalyzeSource('cam-border-01', { ...completed, sourceId: null })).toBe(false);
+    expect(reanalyzeRequestPayload('cam-border-01', completed, '')).toBeNull();
+  });
+
   it('aborts a stalled read-only restore preflight after the timeout', async () => {
     let requestSignal;
     const fetcher = vi.fn((_path, { signal }) => new Promise((_resolve, reject) => {

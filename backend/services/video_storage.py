@@ -328,11 +328,21 @@ def reconcile_inactive_control(camera_id: str, telemetry: dict[str, Any] | None 
     return current
 
 
-def start_active_session(camera_id: str, session_id: str) -> tuple[dict[str, Any], bool]:
+def start_active_session(
+    camera_id: str,
+    session_id: str,
+    *,
+    request_id: str | None = None,
+) -> tuple[dict[str, Any], bool]:
     """Atomically begin one durable analysis generation, or return its in-flight run."""
     current = get_valid_active_session(camera_id)
     if current is None or current.get("session_id") != session_id:
         raise FileNotFoundError("Video session is not the active durable source")
+    # A deliberate reanalysis request may be retried after a lost response.
+    # Persist its identity with the control record so the same click can never
+    # advance the source to another generation, even after the first run ends.
+    if request_id and current.get("last_start_request_id") == request_id:
+        return current, False
     lifecycle = str(current.get("analysis_state") or "READY").upper()
     scenario = str(current.get("scenario") or "paused").lower()
     # An in-flight generation is idempotent only when its control fields agree.
@@ -362,6 +372,8 @@ def start_active_session(camera_id: str, session_id: str) -> tuple[dict[str, Any
         "latest_analysis_session_id": None,
         "final_frame_index": None,
     })
+    if request_id:
+        current["last_start_request_id"] = request_id
     _put_json(control_key(camera_id), current)
     return {**current, "control_repaired": False}, True
 

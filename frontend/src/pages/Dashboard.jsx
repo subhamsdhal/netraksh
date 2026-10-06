@@ -11,7 +11,7 @@ import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, completedRunMetrics, completedRunSummaryIdentity, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, latestEventAtOrBeforeFrame, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, selectedRunContext, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring, uploadedRunComparison } from '../utils/dashboardScope';
 import { canReuseRestoredMedia, updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
-import { analysisLifecyclePresentation, applyReplayResult, fetchWithTimeout, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, canReanalyzeSource, fetchWithTimeout, reanalyzeRequestPayload, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 import { replayTimelineAssessment } from '../utils/trackingTimeline';
 import { adminDiagnosticsEnabled as isAdminDiagnosticsEnabled } from '../utils/adminDiagnostics';
@@ -135,6 +135,8 @@ export default function Dashboard() {
   const uploadRequestsRef = useRef({});
   const uploadAutoStartClaimsRef = useRef(new Set());
   const startRequestsRef = useRef({});
+  const reanalyzeRequestsRef = useRef(new Set());
+  const reanalyzeRequestIdsRef = useRef({});
   const wakeTimeoutsRef = useRef({});
   // This is a request lifecycle, not a mount latch.  A cold backend must not
   // consume the only prewarm attempt before it can accept the POST.
@@ -320,6 +322,73 @@ export default function Dashboard() {
     setControlRequests((current) => ({ ...current, [cameraId]: false }));
     delete startRequestsRef.current[startKey];
     return outcome;
+  };
+
+  const handleReanalyze = async (cameraId, sourceState) => {
+    if (!canReanalyzeSource(cameraId, sourceState)) {
+      return { ok: false, error: 'REANALYZE REQUIRES A COMPLETED CAMERA 1 DURABLE SOURCE' };
+    }
+    const requestKey = `${cameraId}:${sourceState.sourceId}`;
+    if (reanalyzeRequestsRef.current.has(requestKey)) {
+      return { ok: false, duplicate: true, error: 'REANALYSIS REQUEST ALREADY PENDING' };
+    }
+    if (!reanalyzeRequestIdsRef.current[requestKey]) {
+      if (!globalThis.crypto?.randomUUID) {
+        updateCameraMedia(cameraId, { reanalyzeStartFailed: true, uploadError: 'REANALYZE UNAVAILABLE — SECURE REQUEST ID GENERATION FAILED' });
+        return { ok: false, error: 'Secure request ID generation is unavailable' };
+      }
+      reanalyzeRequestIdsRef.current[requestKey] = globalThis.crypto.randomUUID();
+    }
+    const requestId = reanalyzeRequestIdsRef.current[requestKey];
+    reanalyzeRequestsRef.current.add(requestKey);
+    setSelectedCameraId(cameraId);
+    setControlRequests((current) => ({ ...current, [cameraId]: true }));
+    updateCameraMedia(cameraId, { uploadError: null, reanalyzeStartFailed: false, controlStatus: 'REANALYZE REQUEST READY' });
+
+    try {
+      const payload = reanalyzeRequestPayload(cameraId, sourceState, requestId);
+      if (!payload) throw new Error('REANALYZE SOURCE IDENTITY IS INVALID');
+      const response = await authFetch('/api/dashboard/video/reanalyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result.detail || `REANALYZE FAILED — HTTP ${response.status}`);
+      }
+
+      resetCameraContext(cameraId);
+      setRunSummaries((current) => ({ ...current, [cameraId]: null }));
+      setSlotSources((current) => ({
+        ...current,
+        [cameraId]: applyReplayResult(current[cameraId] || sourceState, result),
+      }));
+      updateCameraMedia(cameraId, {
+        edgeStatus: ['ready', 'waking'].includes(String(result.edge_status || '').toLowerCase()) ? 'WAKING' : 'WAITING',
+        isUploading: false,
+        uploadError: null,
+        reanalyzeStartFailed: false,
+        analysisStartFailed: false,
+        playbackEnded: false,
+      });
+      reanalyzeRequestIdsRef.current[requestKey] = null;
+      window.dispatchEvent(new CustomEvent('netraksh:edge-wake', { detail: { cameraId, status: 'WAKING' } }));
+      clearTimeout(wakeTimeoutsRef.current[cameraId]);
+      wakeTimeoutsRef.current[cameraId] = setTimeout(() => {
+        updateCameraMedia(cameraId, { edgeStatus: 'TIMEOUT', uploadError: 'AI WORKER COLD START TIMED OUT — RETRY REANALYSIS' });
+      }, 305_000);
+      return { ok: true, result };
+    } catch (error) {
+      updateCameraMedia(cameraId, {
+        reanalyzeStartFailed: true,
+        uploadError: error?.message || 'REANALYZE FAILED — REQUEST DID NOT COMPLETE',
+      });
+      return { ok: false, error: error?.message || 'REANALYZE FAILED' };
+    } finally {
+      reanalyzeRequestsRef.current.delete(requestKey);
+      setControlRequests((current) => ({ ...current, [cameraId]: false }));
+    }
   };
 
   useEffect(() => {
@@ -1320,7 +1389,15 @@ export default function Dashboard() {
                 : lifecycle || (telemetryAvailable ? 'LIVE' : 'LOADED');
           const mediaState = cameraId ? (cameraMedia[cameraId] || {}) : {};
           const uploadState = visibleUploadState(mediaState, sourceState);
-          const analysisPresentation = analysisLifecyclePresentation(sourceState, mediaState, Boolean(controlRequests[cameraId]));
+          const reanalyzeInFlight = Boolean(controlRequests[cameraId]);
+          const reanalysisActive = ['STARTING', 'WAKING', 'ACTIVE', 'LIVE', 'RUNNING'].includes(lifecycle);
+          const baseAnalysisPresentation = analysisLifecyclePresentation(sourceState, mediaState, reanalyzeInFlight);
+          const analysisPresentation = mediaState.reanalyzeStartFailed
+            ? { label: 'REANALYZE FAILED', badge: 'REANALYZE FAILED', tone: 'failed', retry: false }
+            : baseAnalysisPresentation;
+          const showReanalyzeControl = cameraId === 'cam-border-01'
+            && sourceState?.sourceMode === 'durable'
+            && (canReanalyzeSource(cameraId, sourceState) || reanalyzeInFlight || reanalysisActive || mediaState.reanalyzeStartFailed);
           const presentedSample = cameraId ? (presentedTelemetry[cameraId] || null) : null;
           const isDemoReplay = Boolean(telemetry?.demo_replay || sourceState?.sourceMode === 'bundled');
           const statusLabel = analysisPresentation.badge;
@@ -1380,6 +1457,14 @@ export default function Dashboard() {
                     <button type="button" className="btn btn-sm btn-outline" disabled={uploadState.isUploading} onClick={() => triggerUpload(cameraId)}>{sourceState?.sourceName ? 'REPLACE VIDEO' : 'ADD VIDEO'}</button>
                     <span className={`dashboard-analysis-state is-${analysisPresentation.tone}`} role="status">{analysisPresentation.label}</span>
                     {analysisPresentation.retry && <button type="button" className="btn btn-sm btn-outline" data-action="retry-analysis" data-camera-id={cameraId} disabled={Boolean(controlRequests[cameraId])} onClick={() => handleStartAnalysis(cameraId, sourceState, 'retry')}>RETRY ANALYSIS</button>}
+                    {showReanalyzeControl && <button
+                      type="button"
+                      className="btn btn-sm btn-outline"
+                      data-action="reanalyze-existing-source"
+                      data-camera-id={cameraId}
+                      disabled={reanalyzeInFlight || reanalysisActive}
+                      onClick={() => handleReanalyze(cameraId, sourceState)}
+                    >{reanalyzeInFlight ? 'STARTING REANALYSIS…' : reanalysisActive ? 'ANALYZING…' : mediaState.reanalyzeStartFailed ? 'RETRY REANALYZE' : 'REANALYZE'}</button>}
                   </div>}
                   <select
                     aria-label={`Select camera slot ${slotIndex + 1}`}

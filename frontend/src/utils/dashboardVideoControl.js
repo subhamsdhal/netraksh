@@ -130,6 +130,22 @@ export function analysisLifecyclePresentation(sourceState, mediaState = {}, cont
   return { label: 'ADD / REPLACE VIDEO', badge: 'IDLE', tone: 'ready', retry: false };
 }
 
+export function canReanalyzeSource(cameraId, sourceState) {
+  return cameraId === 'cam-border-01'
+    && sourceState?.sourceMode === 'durable'
+    && Boolean(sourceState.sourceId)
+    && String(sourceState.analysisState || sourceState.runState || '').toUpperCase() === 'COMPLETED';
+}
+
+export function reanalyzeRequestPayload(cameraId, sourceState, requestId) {
+  if (!canReanalyzeSource(cameraId, sourceState) || !requestId) return null;
+  return {
+    camera_id: cameraId,
+    video_session_id: sourceState.sourceId,
+    request_id: requestId,
+  };
+}
+
 // Auto-start authority exists only inside the browser event that completed a
 // new upload. Restored/polled READY sources never have an uploadRequestId, so
 // they cannot accidentally create a run after refresh or reconnect.

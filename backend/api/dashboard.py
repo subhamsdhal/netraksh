@@ -43,8 +43,8 @@ from sqlalchemy.orm import Session
 
 from backend.config import settings
 from backend.database.session import get_db
-from backend.models.orm import AnalysisRunSummary
-from backend.security.auth import require_edge_auth, require_operator_or_admin
+from backend.models.orm import AnalysisRunSummary, Camera
+from backend.security.auth import audit, enforce_command_access, require_edge_auth, require_operator_or_admin
 from backend.services.video_storage import (
     activate_bundled_source,
     activate_session,
@@ -944,6 +944,142 @@ async def post_video_scenario(
             edge_status,
         )
     return {"status": "success", "state": _demo_state, "edge_status": edge_status}
+
+
+@router.post("/video/reanalyze")
+async def reanalyze_existing_video(
+    payload: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user=Depends(require_operator_or_admin),
+):
+    """Start one new generation from an already stored, completed video source.
+
+    This deliberately has no upload path: the requested session must still be
+    the camera's current durable source and its existing object must exist.
+    """
+    camera_id = str(payload.get("camera_id") or "").strip()
+    raw_source_session_id = str(payload.get("video_session_id") or "").strip()
+    raw_request_id = str(payload.get("request_id") or "").strip()
+    try:
+        source_session_id = str(uuid.UUID(raw_source_session_id))
+        request_id = str(uuid.UUID(raw_request_id))
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=422, detail="Valid video_session_id and request_id values are required")
+    if not camera_id:
+        raise HTTPException(status_code=422, detail="camera_id and video_session_id are required")
+    if not _durable_video_enabled():
+        raise HTTPException(status_code=409, detail="Reanalysis requires a durable stored video source")
+    if not settings.AUDIT_LOG_ENABLED:
+        raise HTTPException(status_code=503, detail="Reanalysis requires audit logging")
+
+    # Lock the camera row while changing its durable source-control record.
+    # This serializes competing start requests across backend instances.
+    camera = (
+        db.query(Camera)
+        .filter(Camera.id == camera_id, Camera.is_active.is_(True))
+        .with_for_update()
+        .one_or_none()
+    )
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera was not found or is inactive")
+    enforce_command_access(_user, camera.owning_command_id)
+
+    active = get_valid_active_session(camera_id)
+    if active is None or active.get("session_id") != source_session_id:
+        raise HTTPException(status_code=409, detail="The requested video is not the current durable source")
+    metadata = get_uploaded_session(camera_id, source_session_id)
+    if (
+        not metadata
+        or metadata.get("camera_id") != camera_id
+        or metadata.get("session_id") != source_session_id
+        or metadata.get("source_object_key") != active.get("source_object_key")
+    ):
+        raise HTTPException(status_code=409, detail="The current durable source could not be verified")
+
+    # A retried identical request returns its original generation and never
+    # starts a second run, regardless of whether that run is still active.
+    if active.get("last_start_request_id") == request_id:
+        return {
+            "status": "success",
+            "camera_id": camera_id,
+            "source_mode": "durable",
+            "source_session_id": source_session_id,
+            "analysis_generation": active.get("analysis_generation"),
+            "analysis_state": active.get("analysis_state"),
+            "analysis_session_id": active.get("latest_analysis_session_id"),
+            "scenario": active.get("scenario"),
+            "request_id": request_id,
+            "idempotent_replay": True,
+            "edge_status": "not_requested",
+        }
+
+    lifecycle = str(active.get("analysis_state") or "").upper()
+    if lifecycle in {"WAKING", "ACTIVE", "STARTING", "STOPPING"}:
+        raise HTTPException(status_code=409, detail="An analysis run is already active for this source")
+    if lifecycle != "COMPLETED":
+        raise HTTPException(status_code=409, detail="Only a completed durable source can be reanalyzed")
+
+    try:
+        started, created_generation = start_active_session(
+            camera_id,
+            source_session_id,
+            request_id=request_id,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not created_generation:
+        if started.get("last_start_request_id") == request_id:
+            return {
+                "status": "success",
+                "camera_id": camera_id,
+                "source_mode": "durable",
+                "source_session_id": source_session_id,
+                "analysis_generation": started.get("analysis_generation"),
+                "analysis_state": started.get("analysis_state"),
+                "analysis_session_id": started.get("latest_analysis_session_id"),
+                "scenario": started.get("scenario"),
+                "request_id": request_id,
+                "idempotent_replay": True,
+                "edge_status": "not_requested",
+            }
+        raise HTTPException(status_code=409, detail="A competing analysis start is already in progress")
+
+    audit(
+        db,
+        "ANALYSIS_RESTARTED_FROM_EXISTING_SOURCE",
+        user_id=getattr(_user, "id", None),
+        resource_type="video_source",
+        resource_id=source_session_id,
+        ip_address=request.client.host if request.client else "unknown",
+        detail=(
+            f"camera_id={camera_id}; analysis_generation={started.get('analysis_generation')}; "
+            f"request_id={request_id}"
+        ),
+    )
+    edge_status = await _wake_edge_service(camera_id)
+    logger.info(
+        "[Dashboard] Reanalysis accepted from existing source camera_id=%s source_session=%s generation=%s edge_status=%s",
+        camera_id,
+        source_session_id[:8],
+        started.get("analysis_generation"),
+        edge_status,
+    )
+    return {
+        "status": "success",
+        "camera_id": camera_id,
+        "source_mode": "durable",
+        "source_session_id": source_session_id,
+        "analysis_generation": started.get("analysis_generation"),
+        "analysis_state": started.get("analysis_state"),
+        # The edge creates a new analysis_session_id when it consumes this
+        # generation; telemetry publishes that run identity after startup.
+        "analysis_session_id": started.get("latest_analysis_session_id"),
+        "scenario": started.get("scenario"),
+        "request_id": request_id,
+        "idempotent_replay": False,
+        "edge_status": edge_status,
+    }
 
 
 @router.post("/video/internal-complete")
