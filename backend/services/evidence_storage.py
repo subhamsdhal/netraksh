@@ -333,7 +333,8 @@ class S3Storage(EvidenceStorageBackend):
             "x-amz-checksum-sha1",
             "x-amz-checksum-sha256",
         ):
-            request.headers.pop(header, None)
+            if header in request.headers:
+                del request.headers[header]
 
     def put_object(self, object_key: str, data: bytes, content_type: str = "application/octet-stream") -> None:
         try:

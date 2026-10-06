@@ -1,4 +1,5 @@
 import pytest
+from botocore.awsrequest import HTTPHeaders
 from botocore.stub import Stubber
 import boto3
 from botocore.exceptions import ClientError
@@ -157,14 +158,13 @@ def test_supabase_s3_strips_unsupported_checksum_headers_before_signing():
     )
 
     class Request:
-        headers = {
-            "Content-MD5": "unsupported",
-            "x-amz-sdk-checksum-algorithm": "CRC32",
-            "x-amz-checksum-crc32": "unsupported",
-            "Content-Type": "video/mp4",
-        }
+        headers = HTTPHeaders()
 
     request = Request()
+    request.headers["Content-MD5"] = "unsupported"
+    request.headers["x-amz-sdk-checksum-algorithm"] = "CRC32"
+    request.headers["x-amz-checksum-crc32"] = "unsupported"
+    request.headers["Content-Type"] = "video/mp4"
     storage._strip_unsupported_checksum_headers(request)
 
-    assert request.headers == {"Content-Type": "video/mp4"}
+    assert dict(request.headers.items()) == {"Content-Type": "video/mp4"}
