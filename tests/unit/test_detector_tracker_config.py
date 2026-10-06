@@ -6,7 +6,13 @@ touches ultralytics; that only happens in .load().
 """
 import os
 
-from edge.detection.detector import DetectionTracker, _DEFAULT_TRACKER_CONFIG
+from edge.detection.detector import (
+    DetectionTracker,
+    _DEFAULT_TRACKER_CONFIG,
+    _NumpyByteTracker,
+)
+from edge.detection.runtime import DetectionResult
+from shared.schemas import BoundingBox
 
 
 class TestTrackerConfigResolution:
@@ -35,3 +41,33 @@ class TestTrackerConfigResolution:
         with open(_DEFAULT_TRACKER_CONFIG) as f:
             content = f.read()
         assert "track_buffer: 120" in content  # ultralytics' own default is 30
+
+
+class TestNumpyByteTrackerAssociation:
+    def test_match_thresh_is_a_cost_limit_for_moving_detections(self):
+        tracker = _NumpyByteTracker({
+            "track_high_thresh": 0.25,
+            "track_low_thresh": 0.1,
+            "new_track_thresh": 0.25,
+            "track_buffer": 120,
+            "match_thresh": 0.8,
+        })
+        first = DetectionResult(BoundingBox(x1=100, y1=100, x2=200, y2=300), 0.9, 0)
+        shifted = DetectionResult(BoundingBox(x1=120, y1=100, x2=220, y2=300), 0.9, 0)
+
+        initial_tracks = tracker.update([first])
+        next_tracks = tracker.update([shifted])
+
+        assert len(initial_tracks) == len(next_tracks) == 1
+        assert next_tracks[0].track_id == initial_tracks[0].track_id
+
+    def test_class_mismatch_does_not_reuse_a_track(self):
+        tracker = _NumpyByteTracker({"match_thresh": 0.8})
+        person = DetectionResult(BoundingBox(x1=100, y1=100, x2=200, y2=300), 0.9, 0)
+        vehicle = DetectionResult(BoundingBox(x1=100, y1=100, x2=200, y2=300), 0.9, 2)
+
+        initial_tracks = tracker.update([person])
+        next_tracks = tracker.update([vehicle])
+
+        assert len(initial_tracks) == len(next_tracks) == 1
+        assert next_tracks[0].track_id != initial_tracks[0].track_id

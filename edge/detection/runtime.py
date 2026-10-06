@@ -165,9 +165,15 @@ class BaseONNXRuntime(DetectorRuntime):
         super().__init__(model_path)
         self.providers = providers
         self.session = None
+        constrained_cloud = os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true"
+        default_input_size = (
+            "640"
+            if not constrained_cloud or os.environ.get("CAMERA_ID") == "cam-border-01"
+            else "320"
+        )
         self.input_size = max(160, int(os.environ.get(
             "DETECTOR_INPUT_SIZE",
-            "320" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "640",
+            default_input_size,
         )))
 
     def load(self) -> None:

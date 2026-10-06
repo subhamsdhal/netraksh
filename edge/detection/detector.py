@@ -107,7 +107,11 @@ class _NumpyByteTracker:
             for j, det in enumerate(detections):
                 if track.cls != det.class_id:
                     ious[i, j] = 0.0
-        return _lap_matches(1.0 - ious, 1.0 - threshold)
+        # ByteTrack's match_thresh is a maximum association cost (distance),
+        # not a minimum IoU. With the shipped value 0.8, accepting only
+        # 1 - 0.8 would require IoU >= 0.8 and cause IDs to churn whenever a
+        # person moves or the detector slightly changes a box between frames.
+        return _lap_matches(1.0 - ious, threshold)
 
     def _update_track(self, track: _NumpyTrack, det: DetectionResult) -> None:
         previous = track.bbox.copy()

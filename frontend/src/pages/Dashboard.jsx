@@ -14,6 +14,7 @@ import { canReuseRestoredMedia, updateCameraMediaState, uploadResultIsCurrent, v
 import { analysisLifecyclePresentation, applyReplayResult, fetchWithTimeout, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 import { replayTimelineAssessment } from '../utils/trackingTimeline';
+import { adminDiagnosticsEnabled as isAdminDiagnosticsEnabled } from '../utils/adminDiagnostics';
 
 // Reads structured scores from the event instead of string-parsing the reason.
 function parseDecisionReason(ev) {
@@ -103,6 +104,7 @@ export default function Dashboard() {
   const [latestEvent, setLatestEvent] = useState(null);
   const [showWhy, setShowWhy] = useState(false);
   const { role } = useAuth();
+  const diagnosticsEnabled = isAdminDiagnosticsEnabled(role, window.location.search);
   const canUpload = role && (role.toUpperCase() === 'ADMIN' || role.toUpperCase() === 'OPERATOR');
 
   // Every source-specific value is keyed by camera. A single media URL or
@@ -1361,7 +1363,7 @@ export default function Dashboard() {
                   <h2>{title}</h2>
                   <p>{cameraId ? `${cameraId.toUpperCase()} · ${locationLabel}` : 'No source selected'}</p>
                   {sourceState?.restoring && <p className="dashboard-source-name">RESTORING CLOUD SOURCE...</p>}
-                  {role?.toUpperCase() === 'ADMIN' && sourceRestoreDiagnostics[cameraId] && <details aria-label={`ADMIN source restore diagnostics ${cameraId}`}>
+                  {diagnosticsEnabled && sourceRestoreDiagnostics[cameraId] && <details aria-label={`ADMIN source restore diagnostics ${cameraId}`}>
                     <summary>ADMIN SOURCE RESTORE DIAGNOSTICS · READ ONLY</summary>
                     <pre style={{ maxHeight: '10rem', overflow: 'auto', fontSize: '0.55rem' }}>
                       {JSON.stringify(sourceRestoreDiagnostics[cameraId], null, 2)}
@@ -1419,7 +1421,7 @@ export default function Dashboard() {
                     completedTimeline={completedSummary?.tracking_timeline_json || []}
                     completedSummary={completedSummary}
                     completedSummaryLoading={Boolean(runSummaryLoading[cameraId])}
-                    diagnosticsEnabled={role?.toUpperCase() === 'ADMIN'}
+                    diagnosticsEnabled={diagnosticsEnabled}
                     sourceRunState={displayRunState}
                     sourceRestoring={Boolean(sourceState?.restoring)}
                     onAnalyzedSample={(sample) => setPresentedTelemetry(current => {
@@ -1559,7 +1561,7 @@ export default function Dashboard() {
               completedTimeline={runSummaries[activeCameraId]?.tracking_timeline_json || []}
               completedSummary={runSummaries[activeCameraId] || null}
               completedSummaryLoading={Boolean(runSummaryLoading[activeCameraId])}
-              diagnosticsEnabled={role?.toUpperCase() === 'ADMIN'}
+              diagnosticsEnabled={diagnosticsEnabled}
               sourceRunState={slotSources[activeCameraId]?.runState || null}
               onVideoEnded={() => updateCameraMedia(activeCameraId, { playbackEnded: true })}
             />

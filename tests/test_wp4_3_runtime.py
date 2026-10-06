@@ -33,6 +33,25 @@ def test_create_runtime_onnx_cpu(mock_env):
     assert isinstance(rt, ONNXRuntimeCPU)
     assert "CPUExecutionProvider" in rt.providers
 
+def test_constrained_camera1_defaults_to_higher_detection_resolution(mock_env):
+    os.environ["EDGE_CONSTRAINED_CLOUD"] = "true"
+    os.environ["CAMERA_ID"] = "cam-border-01"
+
+    assert ONNXRuntimeCPU("dummy.onnx").input_size == 640
+
+def test_other_constrained_cameras_keep_resource_limited_resolution(mock_env):
+    os.environ["EDGE_CONSTRAINED_CLOUD"] = "true"
+    os.environ["CAMERA_ID"] = "cam-checkpoint-01"
+
+    assert ONNXRuntimeCPU("dummy.onnx").input_size == 320
+
+def test_explicit_detector_input_size_remains_authoritative(mock_env):
+    os.environ["EDGE_CONSTRAINED_CLOUD"] = "true"
+    os.environ["CAMERA_ID"] = "cam-border-01"
+    os.environ["DETECTOR_INPUT_SIZE"] = "480"
+
+    assert ONNXRuntimeCPU("dummy.onnx").input_size == 480
+
 def test_create_runtime_onnx_cuda(mock_env):
     os.environ["DETECTOR_RUNTIME"] = "onnx_cuda"
     rt = create_runtime()
