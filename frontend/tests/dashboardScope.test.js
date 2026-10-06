@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   deriveDashboardMode, filterLiveEvents, selectReliabilityEvent,
-  shouldAcceptTelemetry, telemetryStatusAt, latestEventForSession, formatLatestEvent,
+  shouldAcceptTelemetry, shouldDispatchAnalyzedSample, telemetryStatusAt, latestEventForSession, formatLatestEvent,
   frameResponseMatchesTelemetry,
   isActiveTelemetry,
   telemetryForSource,
@@ -211,6 +211,17 @@ describe('camera telemetry correctness', () => {
   it('rejects a delayed packet from an older session', () => {
     const current = { analysis_session_id: 'new', processed_timestamp: 200 };
     expect(shouldAcceptTelemetry(current, { analysis_session_id: 'old', processed_timestamp: 199 })).toBe(false);
+  });
+
+  it('delivers a late exact-frame detector sample without regressing latest card telemetry', () => {
+    const current = { camera_id: 'cam-border-01', stream_id: 'source-1', analysis_session_id: 'run-1',
+      analysis_generation: 1, source_generation: 2, frame_index: 100, sequence: 10, processed_timestamp: 200 };
+    const detector = { ...current, frame_index: 80, sequence: 11, visualization_only: true };
+    expect(shouldAcceptTelemetry(current, detector)).toBe(false);
+    expect(shouldDispatchAnalyzedSample(current, detector)).toBe(true);
+    expect(shouldDispatchAnalyzedSample(current, { ...detector, analysis_session_id: 'old-run', processed_timestamp: 199 })).toBe(false);
+    expect(shouldDispatchAnalyzedSample(current, { ...detector, source_generation: 1 })).toBe(false);
+    expect(shouldDispatchAnalyzedSample(current, { ...detector, camera_id: 'cam-checkpoint-01' })).toBe(false);
   });
 
   it('uses measured cadence for live, stale, and offline transitions', () => {

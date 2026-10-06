@@ -273,6 +273,23 @@ export function latestEventAtOrBeforeFrame(events = [], context = null) {
     ), null);
 }
 
+export function shouldDispatchAnalyzedSample(current, incoming) {
+  if (!incoming?.camera_id || !incoming.stream_id
+      || !incoming.analysis_session_id) return false;
+  if (!incoming.visualization_only) return shouldAcceptTelemetry(current, incoming);
+  if (!current) return true;
+  if (current.camera_id !== incoming.camera_id) return false;
+  if (current.stream_id !== incoming.stream_id
+      || current.analysis_session_id !== incoming.analysis_session_id
+      || Number(current.analysis_generation) !== Number(incoming.analysis_generation)
+      || Number(current.source_generation) !== Number(incoming.source_generation)) {
+    return shouldAcceptTelemetry(current, incoming);
+  }
+  // Detector inference finishes later than the source frame it analyzed.
+  // Its exact-frame HUD sample remains valid even after a newer summary frame.
+  return true;
+}
+
 export function completedRunMetrics(cameraId, source, telemetry, presented, summary) {
   const completed = lifecycleStatus(source, telemetry) === 'COMPLETED';
   const sessionId = analysisSessionIdForSource(telemetry, source);

@@ -15,7 +15,7 @@
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { authFetch, getToken, logout } from '../services/auth';
-import { shouldAcceptTelemetry } from '../utils/dashboardScope';
+import { shouldAcceptTelemetry, shouldDispatchAnalyzedSample } from '../utils/dashboardScope';
 
 export default function useWebSocket(url, { fetchInitial = true } = {}) {
   const [events,   setEvents]   = useState([]);
@@ -271,13 +271,15 @@ export default function useWebSocket(url, { fetchInitial = true } = {}) {
               if (Number.isFinite(tel.timestamp) && tel.timestamp * 1000 < telemetryResetAt.current) break;
               // Out-of-order / duplicate suppression
               const state = telemetryToState(tel, Date.now());
-              if (!shouldAcceptTelemetry(latestTelemetry.current[cid], state)) break;
+              const current = latestTelemetry.current[cid];
+              if (shouldDispatchAnalyzedSample(current, state)) {
+                window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: state }));
+              }
+              if (!shouldAcceptTelemetry(current, state)) break;
               latestTelemetry.current[cid] = state;
               setLastTelemetryAt(Date.now());
-              // The video HUD consumes visualization-only samples directly
-              // and imperatively.  Keep React card updates bounded so a 10 Hz
-              // tracker never rerenders the full Dashboard tree at 10 Hz.
-              window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: state }));
+              // The HUD receives exact-frame detector samples independently
+              // of summary-frame monotonicity. Keep React cards bounded.
               const now = Date.now();
               if (!tel.visualization_only || now - (lastUiTelemetryAt.current[cid] || 0) >= 250) {
                 lastUiTelemetryAt.current[cid] = now;
