@@ -24,6 +24,7 @@ import { authFetch } from '../services/auth';
 import { frameResponseMatchesTelemetry } from '../utils/dashboardScope';
 import {
   acceptedAnalyzedTimeline,
+  nearestAnalyzedSampleIndex,
   analyzedSampleAcceptance,
   analyzedSampleIsNewer,
   analyzedSampleMatchesScope,
@@ -216,6 +217,9 @@ export default function VideoFeed({
   const trackingTimelineRef = useRef([]);
   const trackingRunRef = useRef(null);
   const playbackCursorRef = useRef(0);
+  const [replayPlaying, setReplayPlaying] = useState(true);
+  const [replayRevision, setReplayRevision] = useState(0);
+  const [framePending, setFramePending] = useState(false);
 
   // Measured geometry of the letterboxed video frame within its container.
   const [videoRect, setVideoRect] = useState({
@@ -306,6 +310,7 @@ export default function VideoFeed({
     trackingRunRef.current = null;
     playbackCursorRef.current = 0;
     trackingTimelineRef.current = [];
+    setReplayPlaying(true);
     setHudVisible(true);
     setTrackingModeActive(false);
     displayedSampleRef.current = null;
@@ -339,9 +344,13 @@ export default function VideoFeed({
       setHudVisible(false);
       return;
     }
-    trackingRunRef.current = restored[0].analysis_session_id;
+    const restoredRun = restored[0].analysis_session_id;
+    if (trackingRunRef.current !== restoredRun) {
+      playbackCursorRef.current = 0;
+      setReplayPlaying(true);
+    }
+    trackingRunRef.current = restoredRun;
     trackingTimelineRef.current = restored;
-    playbackCursorRef.current = 0;
     setTrackingModeActive(true);
     setHudVisible(true);
   }, [cameraId, completedRun, completedSummaryLoading, completedTimeline, expectedGeneration, expectedSessionId, expectedSourceGeneration, replayAssessment.ready]);
@@ -574,6 +583,8 @@ export default function VideoFeed({
     const rect = containedMediaRect(cw, ch, vw, vh);
     setVideoRect({ ...rect, cw, ch, vw, vh });
   }, [displayedSample?.frame_width, displayedSample?.frame_height, liveTracksData?.frame_width, liveTracksData?.frame_height, showAnalyzedFrame]);
+  const updateRectRef = useRef(updateRect);
+  updateRectRef.current = updateRect;
 
   // Default analyzed playback is frame-locked. The browser video is paused,
   // sought to the accepted detector sample's source time, painted, and only
@@ -593,9 +604,10 @@ export default function VideoFeed({
       const visibleSample = { ...sample, visible_timestamp: Date.now() / 1000 };
       displayedSampleRef.current = visibleSample;
       setDisplayedSample(visibleSample);
+      setFramePending(false);
       setAnalyzedFrameStatus(completedRun ? 'ANALYZED REPLAY' : 'ANALYZED LIVE STREAM');
       onAnalyzedSampleRef.current?.(visibleSample);
-      updateRect();
+      updateRectRef.current();
     };
 
     const painted = (sample, target, done) => {
@@ -632,18 +644,31 @@ export default function VideoFeed({
       const timeline = trackingTimelineRef.current;
       const sample = timeline[playbackCursorRef.current];
       if (!sample) {
-        if (completedRun) return;
+        if (completedRun) {
+          setReplayPlaying(false);
+          playbackCursorRef.current = Math.max(0, timeline.length - 1);
+          return;
+        }
         timer = setTimeout(pump, 40);
         return;
       }
       video.pause();
       const target = Math.max(0, Number(sample.video_time));
+      setFramePending(true);
+      onAnalyzedSampleRef.current?.(null);
       const continueAfterPaint = () => {
-        playbackCursorRef.current += 1;
-        const next = trackingTimelineRef.current[playbackCursorRef.current];
+        if (!replayPlaying) return;
+        const next = trackingTimelineRef.current[playbackCursorRef.current + 1];
+        if (!next) {
+          setReplayPlaying(false);
+          return;
+        }
         const sourceGap = next ? Math.max(0, Number(next.video_time) - target) : 0;
-        const delay = completedRun ? Math.min(750, Math.max(80, sourceGap * 1000)) : 0;
-        timer = setTimeout(pump, delay);
+        const delay = completedRun ? Math.min(400, Math.max(150, sourceGap * 400)) : 0;
+        timer = setTimeout(() => {
+          playbackCursorRef.current += 1;
+          pump();
+        }, delay);
       };
       const onSeeked = () => {
         pendingSeekListener = null;
@@ -668,7 +693,7 @@ export default function VideoFeed({
         video.cancelVideoFrameCallback(frameCallback);
       }
     };
-  }, [completedRun, hudVisible, updateRect, useTrackingTimeline]);
+  }, [completedRun, hudVisible, useTrackingTimeline, replayPlaying, replayRevision]);
 
   useEffect(() => {
     setVideoError(false);
@@ -886,7 +911,7 @@ export default function VideoFeed({
         data-frame-index={displayedSample?.frame_index ?? ''}
         data-source-time={Number.isFinite(displayedSample?.video_time) ? displayedSample.video_time : ''}
         style={{
-          display: (showAnalyzedFrame || (useTrackingTimeline && hudVisible)) ? 'block' : 'none',
+          display: !framePending && (showAnalyzedFrame || (useTrackingTimeline && hudVisible)) ? 'block' : 'none',
           position: 'absolute', inset: 0,
           width: '100%', height: '100%',
           zIndex: 10, pointerEvents: 'none',
@@ -1032,7 +1057,7 @@ export default function VideoFeed({
         </div>
       )}
 
-      {hudVisible && displayedSample && (
+      {hudVisible && !framePending && displayedSample && (
         <div style={{
           position: 'absolute', left: '0.45rem', bottom: '0.45rem', zIndex: 20,
           padding: '0.25rem 0.45rem', border: '1px solid rgba(74,222,128,0.55)',
@@ -1073,13 +1098,20 @@ export default function VideoFeed({
             if (!nextVisible && activeRunIdentity) manualSourceRunRef.current = activeRunIdentity;
             if (nextVisible) manualSourceRunRef.current = null;
             sourcePreviewSelectedRef.current = !nextVisible;
-            if (nextVisible) playbackCursorRef.current = Math.max(0, trackingTimelineRef.current.length - 1);
             const video = videoRef.current;
             if (video) {
-              if (nextVisible) video.pause();
-              else video.play().catch(() => {});
+              if (nextVisible) {
+                playbackCursorRef.current = nearestAnalyzedSampleIndex(trackingTimelineRef.current, video.currentTime);
+                setReplayPlaying(true);
+                setReplayRevision(value => value + 1);
+                video.pause();
+              } else {
+                const currentTime = displayedSampleRef.current?.video_time;
+                if (Number.isFinite(currentTime)) video.currentTime = currentTime;
+                video.play().catch(() => {});
+              }
             }
-            onAnalyzedSampleRef.current?.(nextVisible ? displayedSampleRef.current : null);
+            onAnalyzedSampleRef.current?.(null);
             return nextVisible;
           });
         }}
@@ -1105,6 +1137,45 @@ export default function VideoFeed({
       >
         <Activity size={8} /> {hudVisible ? 'VIEW SOURCE' : 'VIEW ANALYZED'}
       </button>
+
+      {completedRun && useTrackingTimeline && hudVisible && trackingTimelineRef.current.length > 0 && (
+        <div
+          aria-label="Analyzed replay controls"
+          style={{ position: 'absolute', bottom: '0.35rem', left: '50%', transform: 'translateX(-50%)',
+            zIndex: 21, display: 'flex', alignItems: 'center', gap: '0.3rem', padding: '0.2rem 0.35rem',
+            background: 'rgba(2,6,23,0.88)', border: '1px solid rgba(74,222,128,0.5)',
+            borderRadius: '0.2rem', color: '#4ade80', font: '0.6rem ui-monospace, monospace' }}
+        >
+          <button type="button" aria-label="Previous analyzed frame" onClick={() => {
+            setReplayPlaying(false);
+            playbackCursorRef.current = Math.max(0, playbackCursorRef.current - 1);
+            setReplayRevision(value => value + 1);
+          }}>‹</button>
+          <button type="button" aria-label={replayPlaying ? 'Pause analyzed replay' : 'Play analyzed replay'}
+            onClick={() => {
+              if (!replayPlaying && playbackCursorRef.current >= trackingTimelineRef.current.length - 1) {
+                playbackCursorRef.current = 0;
+              }
+              setReplayPlaying(value => !value);
+              setReplayRevision(value => value + 1);
+            }}>{replayPlaying ? '❚❚' : '▶'}</button>
+          <button type="button" aria-label="Next analyzed frame" onClick={() => {
+            setReplayPlaying(false);
+            playbackCursorRef.current = Math.min(trackingTimelineRef.current.length - 1, playbackCursorRef.current + 1);
+            setReplayRevision(value => value + 1);
+          }}>›</button>
+          <input type="range" aria-label="Seek analyzed replay" min="0"
+            max={trackingTimelineRef.current.length - 1}
+            value={Math.max(0, trackingTimelineRef.current.findIndex(item => item.frame_index === displayedSample?.frame_index))}
+            onChange={event => {
+              setReplayPlaying(false);
+              playbackCursorRef.current = Number(event.target.value);
+              setReplayRevision(value => value + 1);
+            }}
+            style={{ width: '5.5rem' }} />
+          <span>{Number(displayedSample?.video_time ?? 0).toFixed(1)}s / {Number(trackingTimelineRef.current.at(-1)?.video_time ?? 0).toFixed(1)}s</span>
+        </div>
+      )}
 
       {/* ── Telemetry Status Indicator ── */}
       {telemetryStatus !== undefined && (

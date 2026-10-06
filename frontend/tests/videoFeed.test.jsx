@@ -206,6 +206,36 @@ describe('detection-synchronized analyzed playback', () => {
     expect(onStartAnalysis).not.toHaveBeenCalled();
   });
 
+  it('enters analyzed replay near the current source time instead of the final frame', async () => {
+    const onAnalyzedSample = vi.fn();
+    const timeline = [0, 1, 2, 3, 4, 5, 6, 7, 8].map((time, index) => sample({
+      sequence: index + 1, frame_index: index * 30, video_time: time,
+    }));
+    const { container } = renderFeed({
+      sourceRunState: 'COMPLETED', telemetryStatus: 'COMPLETED',
+      completedTimeline: timeline,
+      completedSummary: { ...scope, final_video_time: 8 }, onAnalyzedSample,
+    });
+    const video = wireVideo(container.querySelector('video'));
+    await waitFor(() => expect(screen.getByTitle('View source preview')).toBeEnabled());
+    fireEvent.click(screen.getByTitle('View source preview'));
+    video.currentTime = 4.8;
+    fireEvent.click(screen.getByTitle('View analyzed frames'));
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({
+      frame_index: 150, video_time: 5,
+    })));
+    expect(video.currentTime).toBe(5);
+    expect(screen.getByRole('button', { name: 'Pause analyzed replay' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Pause analyzed replay' }));
+    expect(screen.getByRole('button', { name: 'Play analyzed replay' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Next analyzed frame' }));
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({
+      frame_index: 180, video_time: 6,
+    })));
+    fireEvent.click(screen.getByTitle('View source preview'));
+    expect(video.currentTime).toBe(6);
+  });
+
   it('does not call a restored durable source NO VIDEO SOURCE while transport is absent', () => {
     render(<VideoFeed
       cameraId="cam-border-01"

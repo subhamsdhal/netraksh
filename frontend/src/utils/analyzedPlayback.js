@@ -132,6 +132,24 @@ export function acceptedAnalyzedTimeline(timeline, scope = {}, options = {}) {
   )).slice(-1800);
 }
 
+// acceptedAnalyzedTimeline is ordered by source time. A source-to-analyzed
+// switch must select its nearest authoritative sample, never the final one.
+export function nearestAnalyzedSampleIndex(timeline, sourceTime) {
+  if (!timeline?.length) return 0;
+  if (!Number.isFinite(sourceTime) || sourceTime <= Number(timeline[0].video_time)) return 0;
+  let low = 0;
+  let high = timeline.length;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (Number(timeline[mid].video_time) < sourceTime) low = mid + 1;
+    else high = mid;
+  }
+  if (low >= timeline.length) return timeline.length - 1;
+  if (low === 0) return 0;
+  return sourceTime - Number(timeline[low - 1].video_time)
+    <= Number(timeline[low].video_time) - sourceTime ? low - 1 : low;
+}
+
 export function containedMediaRect(containerWidth, containerHeight, mediaWidth, mediaHeight) {
   if (![containerWidth, containerHeight, mediaWidth, mediaHeight].every(value => Number(value) > 0)) {
     return { left: 0, top: 0, width: 0, height: 0 };

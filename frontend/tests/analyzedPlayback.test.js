@@ -8,7 +8,17 @@ import {
   analyzedSampleMetrics,
   analyzedTrackBoxIsValid,
   containedMediaRect,
+  nearestAnalyzedSampleIndex,
 } from '../src/utils/analyzedPlayback';
+
+it('selects the nearest source-time sample with ordered binary search, including boundaries', () => {
+  const timeline = [0.1, 1.1, 2.1, 5.1, 9.9].map(video_time => ({ video_time }));
+  expect(nearestAnalyzedSampleIndex(timeline, Number.NaN)).toBe(0);
+  expect(nearestAnalyzedSampleIndex(timeline, 0)).toBe(0);
+  expect(nearestAnalyzedSampleIndex(timeline, 1.8)).toBe(2);
+  expect(nearestAnalyzedSampleIndex(timeline, 5.0)).toBe(3);
+  expect(nearestAnalyzedSampleIndex(timeline, 90)).toBe(4);
+});
 
 const sample = (overrides = {}) => ({
   camera_id: 'cam-checkpoint-01',
