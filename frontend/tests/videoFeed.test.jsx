@@ -144,6 +144,9 @@ describe('detection-synchronized analyzed playback', () => {
     expect(diagnosticText).toContain('TRACKER_PROPAGATED');
     expect(diagnosticText).toContain('bbox_normalized_xywh');
     expect(diagnosticText).toContain('bbox_display_container_xywh');
+    const overlay = container.querySelector('svg[aria-label="Detection-synchronized tracking overlay"]');
+    const viewToggle = container.querySelector('button[title="View source preview"]');
+    expect(Number(overlay.style.zIndex)).toBeGreaterThan(Number(viewToggle.style.zIndex));
 
     const ordinary = renderFeed({
       sourceRunState: 'COMPLETED',
