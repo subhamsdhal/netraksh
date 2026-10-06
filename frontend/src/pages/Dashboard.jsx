@@ -115,6 +115,7 @@ export default function Dashboard() {
   // previous browser session: a stale localStorage value can otherwise render
   // a different uploaded file before GET /video/current has answered.
   const [slotSources, setSlotSources] = useState({});
+  const [sourceRestoreDiagnostics, setSourceRestoreDiagnostics] = useState({});
   const [correlationState, setCorrelationState] = useState(null);
   const [runSummaries, setRunSummaries] = useState({});
   const [runSummaryLoading, setRunSummaryLoading] = useState({});
@@ -613,8 +614,14 @@ export default function Dashboard() {
     const restoreScopedSources = async () => {
       await Promise.all(visibleCameraIds.filter(Boolean).map(async (cameraId) => {
         let authoritativeResponse = false;
+        const recordRestoreDiagnostic = (diagnostic) => setSourceRestoreDiagnostics(current => ({
+          ...current,
+          [cameraId]: { ...current[cameraId], ...diagnostic },
+        }));
         try {
+          recordRestoreDiagnostic({ stage: 'PREPARATION_CHECK_PENDING' });
           const preparationResponse = await authFetch(`/api/dashboard/video/preparation/current?camera_id=${encodeURIComponent(cameraId)}`);
+          recordRestoreDiagnostic({ stage: 'PREPARATION_CHECK_COMPLETE', http_status: preparationResponse.status });
           if (preparationResponse.ok && mounted) {
             const preparation = await preparationResponse.json();
             const preparationState = String(preparation?.state || '').toUpperCase();
@@ -653,10 +660,20 @@ export default function Dashboard() {
               return;
             }
           }
+          recordRestoreDiagnostic({ stage: 'CURRENT_SOURCE_LOOKUP_PENDING' });
           const response = await authFetch(`/api/dashboard/video/current?camera_id=${encodeURIComponent(cameraId)}`);
+          recordRestoreDiagnostic({ stage: 'CURRENT_SOURCE_LOOKUP_COMPLETE', http_status: response.status });
           if (!response.ok || !mounted) return;
           authoritativeResponse = true;
           const state = await response.json();
+          recordRestoreDiagnostic({
+            stage: 'CURRENT_SOURCE_AUTHORITY_RECEIVED',
+            available: Boolean(state.available),
+            source_mode: state.source_mode || null,
+            analysis_state: state.analysis_state || null,
+            has_preview_url: Boolean(state.preview_url),
+            session_id: state.session_id || null,
+          });
           const restoredSource = sourceStateFromCurrentVideo(state);
           if (restoredSource) {
             // Commit backend authority before making the control available.
@@ -681,7 +698,9 @@ export default function Dashboard() {
               });
             }
             if (state.preview_url && !reuseLoadedMedia) {
+              recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_PENDING' });
               const mediaResponse = await authFetch(state.preview_url);
+              recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_COMPLETE', http_status: mediaResponse.status });
               if (mediaResponse.ok) {
                 const blobUrl = URL.createObjectURL(await mediaResponse.blob());
                 setCameraMedia((current) => {
@@ -701,6 +720,7 @@ export default function Dashboard() {
                     },
                   };
                 });
+                recordRestoreDiagnostic({ stage: 'PREVIEW_RESTORED' });
               } else if (restoredSource.sourceMode === 'durable') {
                 // Preview transport is independent of durable activation. Do
                 // not replace a valid cloud session with the bundled demo just
@@ -715,12 +735,17 @@ export default function Dashboard() {
                     isUploading: false,
                   },
                 }));
+                recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_FAILED', http_status: mediaResponse.status });
               }
             }
           } else {
             setSlotSources((current) => ({ ...current, [cameraId]: { restoring: false, runState: 'UNAVAILABLE' } }));
+            recordRestoreDiagnostic({ stage: 'NO_AUTHORITATIVE_SOURCE' });
           }
-        } catch (_) { return; /* transport failure remains RESTORING */ }
+        } catch (error) {
+          recordRestoreDiagnostic({ stage: 'REQUEST_FAILED', error_name: error?.name || 'Error' });
+          return; /* transport failure remains RESTORING */
+        }
         if (!mounted || !authoritativeResponse) return;
       }));
     };
@@ -1297,6 +1322,12 @@ export default function Dashboard() {
                   <h2>{title}</h2>
                   <p>{cameraId ? `${cameraId.toUpperCase()} · ${locationLabel}` : 'No source selected'}</p>
                   {sourceState?.restoring && <p className="dashboard-source-name">RESTORING CLOUD SOURCE...</p>}
+                  {role?.toUpperCase() === 'ADMIN' && sourceRestoreDiagnostics[cameraId] && <details aria-label={`ADMIN source restore diagnostics ${cameraId}`}>
+                    <summary>ADMIN SOURCE RESTORE DIAGNOSTICS · READ ONLY</summary>
+                    <pre style={{ maxHeight: '10rem', overflow: 'auto', fontSize: '0.55rem' }}>
+                      {JSON.stringify(sourceRestoreDiagnostics[cameraId], null, 2)}
+                    </pre>
+                  </details>}
                   {!sourceState?.restoring && sourceState?.sourceName && <p className="dashboard-source-name">SOURCE: {sourceState.sourceName}</p>}
                   {!sourceState?.restoring && sourceState?.sourceMode && <p className="dashboard-source-name">MODE: {sourceState.sourceMode === 'durable' ? 'USER UPLOAD' : 'BUNDLED DEMO'} · ANALYSIS: {displayRunState}</p>}
                   <p className="dashboard-source-name">SUPPORTED: MP4 · AVI · MOV · MKV · WEBM · M4V</p>
