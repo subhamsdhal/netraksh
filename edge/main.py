@@ -198,7 +198,10 @@ class EdgePipeline:
         # We need a small bounded queue so if the backend goes down or network
         # is durable/offline-capable. Telemetry is explicitly lossy.
         self.telemetry_queue = Queue(maxsize=2)
-        self.tracking_queue = Queue(maxsize=32)
+        # Keep a little more burst headroom for the lightweight HUD channel.
+        # The queue remains bounded and lossy; this only prevents short hosted
+        # response-latency spikes from erasing an entire visible interval.
+        self.tracking_queue = Queue(maxsize=64)
         self._hud_frame_queue = Queue(maxsize=2)
         self._hud_decoupled = False
         self._hud_tracker = OpticalFlowBoxTracker(
@@ -459,7 +462,10 @@ class EdgePipeline:
                 # Keep the hosted transport below the backend's burst limit
                 # while leaving enough parallelism to carry the lightweight
                 # HUD samples at the required live cadence.
-                "12" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
+                # A smaller hosted fan-out avoids synchronized request bursts
+                # against the backend while still carrying the HUD above the
+                # required live cadence.
+                "6" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
             )),
         )
         tracking_threads = []
@@ -734,7 +740,7 @@ class EdgePipeline:
         import httpx
         verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
         client = httpx.Client(
-            timeout=httpx.Timeout(connect=3.0, read=3.0, write=3.0, pool=3.0),
+            timeout=httpx.Timeout(connect=5.0, read=8.0, write=5.0, pool=5.0),
             verify=verify,
             cert=self.sync_client._client_cert,
         )
