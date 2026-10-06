@@ -117,6 +117,7 @@ def test_hud_loop_reanchors_against_detector_frame_index():
 
         def reanchor(self, tracks, frame_index, frame):
             self.calls.append(("reanchor", frame_index))
+            return []
 
     pipeline = EdgePipeline.__new__(EdgePipeline)
     pipeline._running = False

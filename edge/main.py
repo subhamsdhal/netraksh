@@ -54,7 +54,13 @@ from edge.temporal.track_features import TrackFeatureTracker
 from edge.telemetry import build_frame_snapshot, render_snapshot
 from edge.tracking.continuity_guard import TrackContinuityGuard
 from edge.tracking.continuity_guard import compute_histogram as compute_track_histogram
-from edge.tracking.hybrid_tracker import AsyncDetectorWorker, DetectorJob, OpticalFlowBoxTracker
+from edge.tracking.hybrid_tracker import (
+    AsyncDetectorWorker,
+    DetectorJob,
+    OpticalFlowBoxTracker,
+    box_center_error,
+    box_iou,
+)
 from edge.runtime_diagnostics import log_runtime_checkpoint
 from shared.constants import (
     ABSTAIN_SNAPSHOT_INTERVAL_SECONDS,
@@ -216,10 +222,10 @@ class EdgePipeline:
         self._hud_tracker = OpticalFlowBoxTracker(
             max_width=int(os.environ.get("IMAGE_TRACKER_MAX_WIDTH", "280")),
             history_frames=int(os.environ.get("TRACKING_HISTORY_FRAMES", "180")),
-            max_detector_age_frames=int(os.environ.get("TRACK_MAX_DETECTOR_AGE_FRAMES", "144")),
+            max_detector_age_frames=int(os.environ.get("TRACK_MAX_DETECTOR_AGE_FRAMES", "24")),
             max_points=int(os.environ.get("IMAGE_TRACKER_MAX_POINTS", "16")),
             flow_win_size=int(os.environ.get("IMAGE_TRACKER_FLOW_WIN_SIZE", "13")),
-            backward_check_interval=int(os.environ.get("IMAGE_TRACKER_BACKWARD_CHECK_INTERVAL", "6")),
+            backward_check_interval=int(os.environ.get("IMAGE_TRACKER_BACKWARD_CHECK_INTERVAL", "2")),
         )
         self._hud_state_lock = threading.Lock()
         self._hud_anchor = None
@@ -261,10 +267,10 @@ class EdgePipeline:
         self.visual_tracker = OpticalFlowBoxTracker(
             max_width=int(os.environ.get("IMAGE_TRACKER_MAX_WIDTH", "280")),
             history_frames=int(os.environ.get("TRACKING_HISTORY_FRAMES", "180")),
-            max_detector_age_frames=int(os.environ.get("TRACK_MAX_DETECTOR_AGE_FRAMES", "144")),
+            max_detector_age_frames=int(os.environ.get("TRACK_MAX_DETECTOR_AGE_FRAMES", "24")),
             max_points=int(os.environ.get("IMAGE_TRACKER_MAX_POINTS", "16")),
             flow_win_size=int(os.environ.get("IMAGE_TRACKER_FLOW_WIN_SIZE", "13")),
-            backward_check_interval=int(os.environ.get("IMAGE_TRACKER_BACKWARD_CHECK_INTERVAL", "6")),
+            backward_check_interval=int(os.environ.get("IMAGE_TRACKER_BACKWARD_CHECK_INTERVAL", "2")),
         )
         self._last_detector_source_time: Optional[float] = None
         self._last_detector_completed_at: Optional[float] = None
@@ -1092,6 +1098,38 @@ class EdgePipeline:
                 detector_tracks = self._apply_continuity_guard(
                     detector_packet.tracks, detector_packet.job.frame,
                 )
+                flow_at_detector_frame = self.visual_tracker.tracks_at(
+                    detector_packet.job.frame_index,
+                )
+                flow_by_id = {int(track.track_id): track for track in flow_at_detector_frame}
+                detector_age_seconds = max(
+                    0.0,
+                    float(meta.video_time_seconds) - float(detector_packet.job.meta.video_time_seconds),
+                )
+                for detector_track in detector_tracks:
+                    flow_track = flow_by_id.get(int(detector_track.track_id))
+                    if flow_track is None:
+                        continue
+                    flow_box = np.array([
+                        flow_track.bbox.x1, flow_track.bbox.y1,
+                        flow_track.bbox.x2, flow_track.bbox.y2,
+                    ], dtype=np.float32)
+                    detector_box = np.array([
+                        detector_track.bbox.x1, detector_track.bbox.y1,
+                        detector_track.bbox.x2, detector_track.bbox.y2,
+                    ], dtype=np.float32)
+                    logger.info(
+                        "[Flow Reanchor] frame=%d track=%d source_time=%.3f age_s=%.3f "
+                        "iou=%.4f center_error_px=%.2f flow_bbox=%s detector_bbox=%s",
+                        detector_packet.job.frame_index,
+                        detector_track.track_id,
+                        float(detector_packet.job.meta.video_time_seconds),
+                        detector_age_seconds,
+                        box_iou(flow_box, detector_box),
+                        box_center_error(flow_box, detector_box),
+                        [round(float(value), 1) for value in flow_box],
+                        [round(float(value), 1) for value in detector_box],
+                    )
                 tracks = self.visual_tracker.reanchor(
                     detector_tracks,
                     detector_packet.job.frame_index,

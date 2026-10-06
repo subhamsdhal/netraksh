@@ -3,7 +3,14 @@ import time
 import cv2
 import numpy as np
 
-from edge.tracking.hybrid_tracker import AsyncDetectorWorker, DetectorJob, OpticalFlowBoxTracker
+from edge.tracking.hybrid_tracker import (
+    AsyncDetectorWorker,
+    DetectorJob,
+    OpticalFlowBoxTracker,
+    box_center_error,
+    box_iou,
+    flow_bbox_is_sane,
+)
 from shared.constants import DetectionClass, SceneCondition
 from shared.schemas import BoundingBox, TrackData
 
@@ -41,6 +48,43 @@ def test_intermediate_tracker_consumes_image_and_preserves_identity_without_fake
     assert moved[0].confidence_semantics == "LAST_DETECTION_CONFIDENCE"
     assert moved[0].last_detection_confidence == 0.83
     assert moved[0].confidence == 0.83
+
+
+def test_flow_tracker_records_exact_frame_samples_for_detector_comparison():
+    tracker = OpticalFlowBoxTracker(max_width=200, max_detector_age_frames=20)
+    first = _frame(0)
+    tracker.observe(first, 4)
+    tracker.reanchor([_track()], 4, first)
+    observed = tracker.observe(_frame(3), 5)
+    assert [track.track_id for track in tracker.tracks_at(5)] == [track.track_id for track in observed]
+    assert tracker.tracks_at(999) == []
+
+
+def test_flow_geometry_gate_rejects_collapse_and_off_frame_ghosts():
+    previous = np.array([30, 20, 80, 100], dtype=np.float32)
+    assert flow_bbox_is_sane(previous, np.array([32, 21, 82, 101], dtype=np.float32), 200, 120)
+    assert not flow_bbox_is_sane(previous, np.array([78, 21, 82, 101], dtype=np.float32), 200, 120)
+    assert not flow_bbox_is_sane(previous, np.array([260, 21, 310, 101], dtype=np.float32), 200, 120)
+
+
+def test_detector_box_is_shown_when_flow_cannot_seed_then_expires_immediately():
+    tracker = OpticalFlowBoxTracker(max_width=200, max_detector_age_frames=20)
+    first = _frame(0)
+    tracker.observe(first, 0)
+    tracker._seed_points = lambda _gray, _bbox: np.empty((0, 1, 2), dtype=np.float32)
+    anchored = tracker.reanchor([_track()], 0, first)
+    assert len(anchored) == 1
+    assert anchored[0].detector_confirmed is True
+    assert tracker.observe(_frame(1), 1) == []
+
+
+def test_detector_reanchor_metrics_use_real_box_geometry():
+    left = np.array([10, 10, 50, 90], dtype=np.float32)
+    same = left.copy()
+    shifted = np.array([20, 10, 60, 90], dtype=np.float32)
+    assert box_iou(left, same) == 1.0
+    assert box_iou(left, shifted) > 0.0
+    assert box_center_error(left, shifted) == 10.0
 
 
 def test_detector_refresh_reanchors_drift_and_lost_tracks_expire():

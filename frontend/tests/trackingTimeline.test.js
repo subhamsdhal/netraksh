@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendTrackingSample,
-  livePlaybackCorrection,
+  liveAnalysisBufferReady,
   replayTimelineAssessment,
   selectTrackingSample,
   trackingIntervalsMs,
@@ -49,11 +49,11 @@ describe('tracking timeline', () => {
     expect(selectTrackingSample(timeline, 0.7)).toBeNull();
   });
 
-  it('keeps live source playback within the exact HUD pairing tolerance', () => {
-    expect(livePlaybackCorrection(6.38, 6.31)).toBeNull();
-    expect(livePlaybackCorrection(10, 6.38)).toBeCloseTo(6.34, 5);
-    expect(livePlaybackCorrection(0, 0.5)).toBeCloseTo(0.46, 5);
-    expect(livePlaybackCorrection(0, null)).toBeNull();
+  it('waits for a one-second source-time lead before starting live playback', () => {
+    expect(liveAnalysisBufferReady([sample(0, 0)])).toBe(false);
+    expect(liveAnalysisBufferReady([sample(0, 0), sample(8, 0.8)])).toBe(false);
+    expect(liveAnalysisBufferReady([sample(0, 0), sample(10, 1.0)])).toBe(true);
+    expect(liveAnalysisBufferReady([sample(5, 0.5), sample(20, 2.0)])).toBe(false);
   });
 
   it('retains actual moving coordinates and reports source-time cadence', () => {

@@ -26,7 +26,7 @@ import { formatTelemetryAge } from '../utils/systemTruth';
 import { analyzedSampleIsNewer, analyzedSampleMatchesScope, containedMediaRect } from '../utils/analyzedPlayback';
 import {
   appendTrackingSample,
-  livePlaybackCorrection,
+  liveAnalysisBufferReady,
   replayTimelineAssessment,
   selectTrackingSample,
   TRACKING_SAMPLE_TOLERANCE_SECONDS,
@@ -185,7 +185,7 @@ function ScenarioOverlay({ scenario }) {
 // ─── Corner debug HUD (replaces [SUPER DEBUG OVERLAY]) ───────────────────────
 // Hidden by default — operator clicks the tiny [HUD] toggle to reveal it.
 // Low opacity, monospace, bottom-right corner — never blocks the video content.
-function DebugHud({ visible, videoRect, liveTracksData, videoRef, analyzedFrame }) {
+function DebugHud({ visible, videoRect, liveTracksData, videoRef, analyzedFrame, presentedTiming }) {
   if (!visible) return null;
   const vt = videoRef.current;
   return (
@@ -210,8 +210,12 @@ function DebugHud({ visible, videoRect, liveTracksData, videoRef, analyzedFrame 
       {analyzedFrame
         ? `ANALYZED FRAME · SAME SAMPLE\n`
         : vt
-        ? `VID  t=${vt.currentTime?.toFixed(2)}s  RS:${vt.readyState}\n`
+        ? `VID  t=${(presentedTiming?.mediaTime ?? vt.currentTime)?.toFixed(2)}s  RS:${vt.readyState}\n`
         : `VIDEO NOT READY\n`}
+      {presentedTiming?.hudOffsetMs != null
+        ? `HUD OFFSET ${presentedTiming.hudOffsetMs >= 0 ? '+' : ''}${presentedTiming.hudOffsetMs}ms · LEAD ${presentedTiming.hudLeadSeconds >= 0 ? '+' : ''}${presentedTiming.hudLeadSeconds.toFixed(2)}s\n`
+        : `HUD OFFSET — · LEAD —\n`}
+      {`SOURCE FPS ${liveTracksData?.source_fps ?? liveTracksData?.fps_declared ?? '—'} · DETECTOR FPS ${liveTracksData?.detector_fps ?? '—'} · HUD FPS ${liveTracksData?.hud_fps ?? '—'}\n`}
       {`PERSONS ${liveTracksData?.person_count ?? 'NOT REPORTED'}  VEHICLES ${liveTracksData?.vehicle_count ?? 'NOT REPORTED'}  TRACKS ${liveTracksData?.track_count ?? 'NOT REPORTED'}`}
     </div>
   );
@@ -256,6 +260,7 @@ export default function VideoFeed({
   const canvasRef = useRef(null);
   const trackingTimelineRef = useRef([]);
   const trackingRunRef = useRef(null);
+  const livePlaybackStartedRef = useRef(null);
   const lastPresentedAtRef = useRef(0);
 
   // Measured geometry of the letterboxed video frame within its container.
@@ -272,6 +277,7 @@ export default function VideoFeed({
   const [analyzedFrameStatus, setAnalyzedFrameStatus] = useState('WAITING FOR FIRST ANALYZED FRAME');
   const [displayedSample, setDisplayedSample] = useState(null);
   const displayedSampleRef = useRef(null);
+  const [presentedTiming, setPresentedTiming] = useState(null);
   const onAnalyzedSampleRef = useRef(onAnalyzedSample);
   const promotedRunRef = useRef(null);
   const manualSourceRunRef = useRef(null);
@@ -342,10 +348,12 @@ export default function VideoFeed({
     manualSourceRunRef.current = null;
     currentRunRef.current = null;
     trackingRunRef.current = null;
+    livePlaybackStartedRef.current = null;
     trackingTimelineRef.current = [];
     setHudVisible(false);
     setTrackingModeActive(false);
     displayedSampleRef.current = null;
+    setPresentedTiming(null);
     setDisplayedSample(null);
     onAnalyzedSampleRef.current?.(null);
   }, [cameraId, sourceMode, expectedSessionId, expectedGeneration, expectedSourceGeneration]);
@@ -403,16 +411,10 @@ export default function VideoFeed({
       if (trackingRunRef.current && trackingRunRef.current !== incomingRun) return;
       if (!trackingRunRef.current) {
         trackingRunRef.current = incomingRun;
+        livePlaybackStartedRef.current = null;
         trackingTimelineRef.current = [];
         setHudVisible(true);
         setTrackingModeActive(true);
-        const video = videoRef.current;
-        if (video) {
-          video.playbackRate = 1.0;
-          const bufferedStart = Math.max(0, Number(sample.video_time || 0) - 0.5);
-          if (Math.abs(video.currentTime - bufferedStart) > 0.75) video.currentTime = bufferedStart;
-          video.play().catch(() => {});
-        }
       }
       const receivedSample = { ...sample, browser_received_timestamp: Date.now() / 1000 };
       const nextTimeline = appendTrackingSample(
@@ -427,20 +429,18 @@ export default function VideoFeed({
         },
       );
       trackingTimelineRef.current = nextTimeline;
-      // The source preview must follow the authoritative source-time clock.
-      // A free-tier edge can briefly process below real time; without bounded
-      // correction the browser reaches EOF while exact HUD samples are still
-      // mid-video, correctly hiding every box as stale. Keep playback at 1.0x
-      // and seek only when drift exceeds the same tolerance used to pair HUD
-      // samples with painted video frames.
-      if (!completedRun) {
+      // Build a short authoritative source-time lead before starting playback.
+      // Once started, the source remains continuous at 1.0x; stale samples are
+      // hidden by the bounded source-time lookup rather than pausing or seeking.
+      if (!completedRun
+        && livePlaybackStartedRef.current !== incomingRun
+        && liveAnalysisBufferReady(nextTimeline)) {
         const video = videoRef.current;
-        const newestSample = nextTimeline[nextTimeline.length - 1];
-        const correctedTime = livePlaybackCorrection(video?.currentTime, newestSample?.video_time);
         if (video) {
           video.playbackRate = 1.0;
-          if (correctedTime != null) video.currentTime = correctedTime;
-          if (video.paused) video.play().catch(() => {});
+          video.currentTime = Math.max(0, Number(nextTimeline[0].video_time) || 0);
+          livePlaybackStartedRef.current = incomingRun;
+          video.play().catch(() => {});
         }
       }
       setHudVisible(true);
@@ -691,29 +691,42 @@ export default function VideoFeed({
     let handle = null;
     let stopped = false;
     const renderAt = (mediaTime) => {
-      let synchronizedMediaTime = mediaTime;
-      if (!completedRun) {
-        const newestSample = trackingTimelineRef.current[trackingTimelineRef.current.length - 1];
-        const newestTime = Number(newestSample?.video_time);
-        const correctedTime = livePlaybackCorrection(mediaTime, newestTime);
-        if (correctedTime != null && Number(mediaTime) > newestTime) {
-          video.currentTime = correctedTime;
-          if (!video.paused) video.pause();
-          synchronizedMediaTime = correctedTime;
-        }
-      }
       const sample = selectTrackingSample(
         trackingTimelineRef.current,
-        synchronizedMediaTime,
+        mediaTime,
         TRACKING_SAMPLE_TOLERANCE_SECONDS,
       );
+      if (canvasRef.current) {
+        canvasRef.current.dataset.mediaTime = Number(mediaTime).toFixed(3);
+        canvasRef.current.dataset.hudSourceTime = sample
+          ? Number(sample.video_time).toFixed(3)
+          : '';
+        canvasRef.current.dataset.hudOffsetMs = sample
+          ? String(Math.round((Number(sample.video_time) - Number(mediaTime)) * 1000))
+          : '';
+      }
       drawTrackingCanvas(sample);
       const now = performance.now();
-      if (sample && now - lastPresentedAtRef.current >= 100) {
+      if (now - lastPresentedAtRef.current >= 100) {
         lastPresentedAtRef.current = now;
-        const visibleSample = { ...sample, visible_timestamp: Date.now() / 1000 };
-        displayedSampleRef.current = visibleSample;
-        onAnalyzedSampleRef.current?.(visibleSample);
+        const newestSample = trackingTimelineRef.current[trackingTimelineRef.current.length - 1];
+        setPresentedTiming({
+          mediaTime: Number(mediaTime),
+          hudOffsetMs: sample ? Math.round((Number(sample.video_time) - Number(mediaTime)) * 1000) : null,
+          hudLeadSeconds: newestSample
+            ? Number(newestSample.video_time) - Number(mediaTime)
+            : null,
+        });
+        if (sample) {
+          const visibleSample = { ...sample, visible_timestamp: Date.now() / 1000 };
+          displayedSampleRef.current = visibleSample;
+          setDisplayedSample(visibleSample);
+          onAnalyzedSampleRef.current?.(visibleSample);
+        } else if (displayedSampleRef.current) {
+          displayedSampleRef.current = null;
+          setDisplayedSample(null);
+          onAnalyzedSampleRef.current?.(null);
+        }
       }
     };
     const callback = (_now, metadata) => {
@@ -1216,9 +1229,10 @@ export default function VideoFeed({
       <DebugHud
         visible={hudVisible}
         videoRect={videoRect}
-        liveTracksData={showAnalyzedFrame ? displayedSample : liveTracksData}
+        liveTracksData={useTrackingTimeline || showAnalyzedFrame ? displayedSample : liveTracksData}
         videoRef={videoRef}
         analyzedFrame={showAnalyzedFrame}
+        presentedTiming={presentedTiming}
       />
 
       {/* ── Telemetry Status Indicator ── */}

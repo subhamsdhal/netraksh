@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import VideoFeed from '../src/components/VideoFeed';
@@ -9,6 +9,8 @@ vi.mock('../src/services/auth', () => ({ authFetch: vi.fn() }));
 
 describe('per-camera authoritative analyzed frame', () => {
   beforeEach(() => {
+    delete HTMLMediaElement.prototype.requestVideoFrameCallback;
+    delete HTMLMediaElement.prototype.cancelVideoFrameCallback;
     global.ResizeObserver = class { observe() {} disconnect() {} };
     URL.createObjectURL = vi.fn(() => 'blob:analyzed-frame');
     URL.revokeObjectURL = vi.fn();
@@ -56,7 +58,7 @@ describe('per-camera authoritative analyzed frame', () => {
     expect(screen.getByText(/SOURCE PLAYBACK 1.0×/)).toBeInTheDocument();
   });
 
-  it('corrects live source playback when it outruns authoritative HUD time', async () => {
+  it('waits for a source-time lead then keeps live video at 1.0x without seeking or pausing', async () => {
     const { container } = render(<VideoFeed
       cameraId="cam-checkpoint-01"
       mediaUrl="blob:video"
@@ -71,26 +73,62 @@ describe('per-camera authoritative analyzed frame', () => {
       }}
     />);
     const video = container.querySelector('video');
-    Object.defineProperty(video, 'currentTime', { value: 10, writable: true });
+    Object.defineProperty(video, 'currentTime', { value: 5, writable: true });
     Object.defineProperty(video, 'playbackRate', { value: 1, writable: true });
-
-    window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: {
+    const sendSample = (frame, videoTime) => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: {
       camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'run-1',
-      analysis_generation: 1, frame_index: 42, video_time: 6.38, tracks: [],
+      analysis_generation: 1, frame_index: frame, video_time: videoTime, tracks: [],
     } }));
+    for (let frame = 0; frame <= 10; frame += 1) sendSample(frame, frame / 10);
 
-    await waitFor(() => expect(video.currentTime).toBeCloseTo(6.34, 5));
+    await waitFor(() => expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1));
+    expect(video.currentTime).toBeCloseTo(0, 5);
     expect(video.playbackRate).toBe(1);
-    expect(HTMLMediaElement.prototype.play).toHaveBeenCalled();
+    video.currentTime = 0.4;
+    sendSample(11, 1.1);
+    expect(video.currentTime).toBeCloseTo(0.4, 5);
+    expect(video.playbackRate).toBe(1);
+    expect(HTMLMediaElement.prototype.pause).not.toHaveBeenCalled();
+  });
 
-    HTMLMediaElement.prototype.play.mockClear();
-    video.currentTime = 7;
-    window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: {
+  it('selects completed HUD samples and metrics from requestVideoFrameCallback mediaTime', async () => {
+    let presentVideoFrame;
+    HTMLMediaElement.prototype.requestVideoFrameCallback = vi.fn((callback) => {
+      presentVideoFrame = callback;
+      return 1;
+    });
+    HTMLMediaElement.prototype.cancelVideoFrameCallback = vi.fn();
+    const timeline = [0, 1, 2].map((frame) => ({
       camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'run-1',
-      analysis_generation: 1, frame_index: 8, video_time: 1, tracks: [],
-    } }));
-    await waitFor(() => expect(video.currentTime).toBeCloseTo(6.34, 5));
-    expect(HTMLMediaElement.prototype.play).toHaveBeenCalled();
+      analysis_generation: 1, source_generation: 3, frame_index: frame + 1,
+      video_time: frame / 10, source_fps: 24, detector_fps: 2, hud_fps: 10,
+      person_count: 0, vehicle_count: 0, track_count: 0, tracks: [],
+    }));
+    const { container, unmount } = render(<VideoFeed
+      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
+      sourceRunState="COMPLETED" expectedSessionId="source-1" expectedGeneration={1}
+      expectedSourceGeneration={3} telemetryStatus="COMPLETED"
+      completedTimeline={timeline}
+      completedSummary={{
+        camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'run-1',
+        analysis_generation: 1, source_generation: 3, final_video_time: 0.2,
+      }}
+    />);
+    const video = container.querySelector('video');
+    Object.defineProperty(video, 'currentTime', { value: 0.2, writable: true });
+    Object.defineProperty(video, 'playbackRate', { value: 1, writable: true });
+    act(() => presentVideoFrame(0, { mediaTime: 0.14 }));
+    const canvas = screen.getByLabelText('Current source-frame tracking overlay');
+    expect(canvas.dataset.frameIndex).toBe('2');
+    expect(canvas.dataset.mediaTime).toBe('0.140');
+    expect(canvas.dataset.hudSourceTime).toBe('0.100');
+    expect(canvas.dataset.hudOffsetMs).toBe('-40');
+    await waitFor(() => expect(screen.getByText(/HUD OFFSET -40ms · LEAD \+0\.06s/)).toBeInTheDocument());
+    expect(screen.getByText(/SOURCE FPS 24 · DETECTOR FPS 2 · HUD FPS 10/)).toBeInTheDocument();
+    expect(container.querySelector('.dashboard-video-feed')).toHaveTextContent(/PERSONS 0\s+VEHICLES 0\s+TRACKS 0/);
+    expect(video.currentTime).toBeCloseTo(0.2, 5);
+    expect(video.playbackRate).toBe(1);
+    unmount();
   });
 
   it('does not fetch a frame for a stale session', async () => {

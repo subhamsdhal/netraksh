@@ -171,8 +171,53 @@ class _FlowTrack:
     source: TrackData
     bbox: np.ndarray
     points: np.ndarray
+    detector_frame_index: int
     missed: int = 0
     frames_since_detector: int = 0
+
+
+def flow_bbox_is_sane(previous: np.ndarray, candidate: np.ndarray, frame_width: int, frame_height: int) -> bool:
+    """Reject collapsed, malformed, implausibly resized, or unsupported boxes."""
+    if not np.all(np.isfinite(candidate)):
+        return False
+    previous_width = float(previous[2] - previous[0])
+    previous_height = float(previous[3] - previous[1])
+    width = float(candidate[2] - candidate[0])
+    height = float(candidate[3] - candidate[1])
+    if min(previous_width, previous_height, width, height) < 3.0:
+        return False
+    width_ratio = width / previous_width
+    height_ratio = height / previous_height
+    if not (0.65 <= width_ratio <= 1.5 and 0.65 <= height_ratio <= 1.5):
+        return False
+    previous_aspect = previous_width / previous_height
+    aspect = width / height
+    if not (0.67 <= aspect / previous_aspect <= 1.5):
+        return False
+    previous_center = (previous[:2] + previous[2:]) * 0.5
+    center = (candidate[:2] + candidate[2:]) * 0.5
+    if np.linalg.norm(center - previous_center) > max(frame_width, frame_height) * 0.18:
+        return False
+    intersection_width = max(0.0, min(float(candidate[2]), frame_width) - max(float(candidate[0]), 0.0))
+    intersection_height = max(0.0, min(float(candidate[3]), frame_height) - max(float(candidate[1]), 0.0))
+    visible_fraction = (intersection_width * intersection_height) / max(width * height, 1e-6)
+    return visible_fraction >= 0.35
+
+
+def box_iou(left: np.ndarray, right: np.ndarray) -> float:
+    intersection_width = max(0.0, min(float(left[2]), float(right[2])) - max(float(left[0]), float(right[0])))
+    intersection_height = max(0.0, min(float(left[3]), float(right[3])) - max(float(left[1]), float(right[1])))
+    intersection = intersection_width * intersection_height
+    left_area = max(0.0, float(left[2] - left[0])) * max(0.0, float(left[3] - left[1]))
+    right_area = max(0.0, float(right[2] - right[0])) * max(0.0, float(right[3] - right[1]))
+    union = left_area + right_area - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def box_center_error(left: np.ndarray, right: np.ndarray) -> float:
+    left_center = (left[:2] + left[2:]) * 0.5
+    right_center = (right[:2] + right[2:]) * 0.5
+    return float(np.linalg.norm(left_center - right_center))
 
 
 class OpticalFlowBoxTracker:
@@ -183,7 +228,7 @@ class OpticalFlowBoxTracker:
         *,
         max_width: int = 480,
         history_frames: int = 180,
-        max_detector_age_frames: int = 144,
+        max_detector_age_frames: int = 24,
         max_missed_frames: int = 2,
         max_points: int = 20,
         flow_win_size: int = 17,
@@ -197,6 +242,7 @@ class OpticalFlowBoxTracker:
         self.flow_win_size = max(9, int(flow_win_size) | 1)
         self.backward_check_interval = max(1, int(backward_check_interval))
         self._tracks: dict[int, _FlowTrack] = {}
+        self._frame_tracks: dict[int, list[TrackData]] = {}
         self._previous_gray: Optional[np.ndarray] = None
         self._scale = 1.0
         self.current_frame_index: Optional[int] = None
@@ -206,6 +252,7 @@ class OpticalFlowBoxTracker:
     def reset(self) -> None:
         self.history.clear()
         self._tracks.clear()
+        self._frame_tracks.clear()
         self._previous_gray = None
         self.current_frame_index = None
 
@@ -241,12 +288,20 @@ class OpticalFlowBoxTracker:
         self._scale = scale
         self.history.append((int(frame_index), gray))
         if self._previous_gray is not None and self._tracks:
-            self._advance(self._previous_gray, gray)
+            self._advance(self._previous_gray, gray, int(frame_index))
         self._previous_gray = gray
         self.current_frame_index = int(frame_index)
         self.last_update_ms = (time.perf_counter() - started) * 1000.0
         self.update_count += 1
-        return self.current_tracks()
+        tracks = self.current_tracks()
+        self._frame_tracks[int(frame_index)] = tracks
+        while len(self._frame_tracks) > self.history.maxlen:
+            self._frame_tracks.pop(next(iter(self._frame_tracks)))
+        return tracks
+
+    def tracks_at(self, frame_index: int) -> list[TrackData]:
+        """Return image-tracker results captured for an exact source frame."""
+        return list(self._frame_tracks.get(int(frame_index), []))
 
     def reanchor(self, tracks: Iterable[TrackData], detector_frame_index: int, detector_frame: np.ndarray) -> list[TrackData]:
         detector_gray, detector_scale = self._gray(detector_frame)
@@ -259,24 +314,25 @@ class OpticalFlowBoxTracker:
                 track.bbox.y2 * detector_scale,
             ], dtype=np.float32)
             points = self._seed_points(detector_gray, bbox)
-            if len(points) < 2:
-                continue
-            anchored[int(track.track_id)] = _FlowTrack(source=track, bbox=bbox, points=points)
+            anchored[int(track.track_id)] = _FlowTrack(
+                source=track, bbox=bbox, points=points,
+                detector_frame_index=int(detector_frame_index),
+            )
         self._tracks = anchored
         previous = detector_gray
         for history_index, history_gray in self.history:
             if history_index <= int(detector_frame_index):
                 continue
-            self._advance(previous, history_gray)
+            self._advance(previous, history_gray, int(history_index))
             previous = history_gray
         self._previous_gray = previous
         return self.current_tracks()
 
-    def _advance(self, previous: np.ndarray, current: np.ndarray) -> None:
+    def _advance(self, previous: np.ndarray, current: np.ndarray, frame_index: int) -> None:
         next_tracks: dict[int, _FlowTrack] = {}
         h, w = current.shape[:2]
         for track_id, state in self._tracks.items():
-            state.frames_since_detector += 1
+            state.frames_since_detector = max(0, int(frame_index) - state.detector_frame_index)
             if state.frames_since_detector > self.max_detector_age_frames or len(state.points) < 2:
                 continue
             win_size = (self.flow_win_size, self.flow_win_size)
@@ -314,15 +370,22 @@ class OpticalFlowBoxTracker:
                 if state.missed <= self.max_missed_frames:
                     next_tracks[track_id] = state
                 continue
-            displacement = np.median(new_points - old_points, axis=0)
-            if not np.all(np.isfinite(displacement)) or np.linalg.norm(displacement) > max(w, h) * 0.18:
+            displacement_vectors = new_points - old_points
+            displacement = np.median(displacement_vectors, axis=0)
+            if not np.all(np.isfinite(displacement)):
                 continue
-            state.bbox[[0, 2]] += displacement[0]
-            state.bbox[[1, 3]] += displacement[1]
-            state.bbox[[0, 2]] = np.clip(state.bbox[[0, 2]], 0, w - 1)
-            state.bbox[[1, 3]] = np.clip(state.bbox[[1, 3]], 0, h - 1)
-            if state.bbox[2] - state.bbox[0] < 3 or state.bbox[3] - state.bbox[1] < 3:
+            residuals = np.linalg.norm(displacement_vectors - displacement, axis=1)
+            if float(np.median(residuals)) > max(2.0, min(
+                float(state.bbox[2] - state.bbox[0]),
+                float(state.bbox[3] - state.bbox[1]),
+            ) * 0.12):
                 continue
+            candidate = state.bbox.copy()
+            candidate[[0, 2]] += displacement[0]
+            candidate[[1, 3]] += displacement[1]
+            if not flow_bbox_is_sane(state.bbox, candidate, w, h):
+                continue
+            state.bbox = candidate
             state.points = new_points.reshape(-1, 1, 2).astype(np.float32)
             state.missed = 0
             if state.frames_since_detector % 6 == 0:

@@ -1,19 +1,18 @@
 export const TRACKING_TIMELINE_LIMIT = 180;
 export const TRACKING_SAMPLE_TOLERANCE_SECONDS = 0.16;
 export const REPLAY_COVERAGE_TOLERANCE_SECONDS = 0.5;
-export const LIVE_PLAYBACK_BUFFER_SECONDS = 0.04;
+export const LIVE_ANALYSIS_START_BUFFER_SECONDS = 1.0;
 
-export function livePlaybackCorrection(
-  currentTime,
-  sampleTime,
-  toleranceSeconds = TRACKING_SAMPLE_TOLERANCE_SECONDS,
+export function liveAnalysisBufferReady(
+  timeline,
+  bufferSeconds = LIVE_ANALYSIS_START_BUFFER_SECONDS,
 ) {
-  if (currentTime == null || sampleTime == null) return null;
-  const current = Number(currentTime);
-  const sample = Number(sampleTime);
-  if (!Number.isFinite(current) || !Number.isFinite(sample)) return null;
-  if (Math.abs(current - sample) <= toleranceSeconds) return null;
-  return Math.max(0, sample - LIVE_PLAYBACK_BUFFER_SECONDS);
+  if (!Array.isArray(timeline) || timeline.length < 2) return false;
+  const firstTime = Number(timeline[0]?.video_time);
+  const latestTime = Number(timeline[timeline.length - 1]?.video_time);
+  if (!Number.isFinite(firstTime) || !Number.isFinite(latestTime)) return false;
+  return firstTime <= TRACKING_SAMPLE_TOLERANCE_SECONDS
+    && latestTime - firstTime >= Math.max(0, Number(bufferSeconds));
 }
 
 export function trackingSampleMatchesScope(sample, scope) {
