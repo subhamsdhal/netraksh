@@ -7,6 +7,8 @@ import {
   telemetryForSource,
   analysisSessionIdForSource,
   completedRunSummaryIdentity,
+  completedRunMetrics,
+  uploadedRunComparison,
   eventsForCameraRun,
   latestFaceEventForSession,
   latestPlateEventForSession,
@@ -20,6 +22,39 @@ import {
   currentRunEventEmptyState,
   cameraInventoryIsRestoring,
 } from '../src/utils/dashboardScope';
+
+describe('completed Command Center data', () => {
+  const sourceA = { sourceMode: 'durable', sourceId: 'stream-a', latestAnalysisSessionId: 'run-a', runState: 'COMPLETED', sourceName: 'vid 1.mp4' };
+  const sourceB = { sourceMode: 'durable', sourceId: 'stream-b', latestAnalysisSessionId: 'run-b', runState: 'COMPLETED', sourceName: 'vid 2.mp4' };
+  const summaryA = { camera_id: 'cam-border-01', stream_id: 'stream-a', analysis_session_id: 'run-a', final_frame_index: 90, final_video_time: 3, track_count: 4, person_count: 3, completed_at: 100 };
+  const summaryB = { camera_id: 'cam-checkpoint-01', stream_id: 'stream-b', analysis_session_id: 'run-b', final_frame_index: 50, track_count: 2, completed_at: 101 };
+
+  it('restores final values after completion and prefers an exact displayed frame', () => {
+    expect(completedRunMetrics('cam-border-01', sourceA, null, null, summaryA).sample).toBe(summaryA);
+    const displayed = { camera_id: 'cam-border-01', stream_id: 'stream-a', analysis_session_id: 'run-a', frame_index: 42, track_count: 2 };
+    expect(completedRunMetrics('cam-border-01', sourceA, null, displayed, summaryA).sample).toBe(displayed);
+    expect(completedRunMetrics('cam-border-01', sourceA, null, { ...displayed, analysis_session_id: 'old-run' }, summaryA).sample).toBe(summaryA);
+  });
+
+  it('compares two uploaded runs without mixing old events or claiming a shared clock', () => {
+    const comparison = uploadedRunComparison(
+      ['cam-border-01', 'cam-checkpoint-01'],
+      { 'cam-border-01': sourceA, 'cam-checkpoint-01': sourceB },
+      {},
+      { 'cam-border-01': summaryA, 'cam-checkpoint-01': summaryB },
+      [
+        { camera_id: 'cam-border-01', stream_id: 'stream-a', analysis_session_id: 'run-a', event_type: 'LOITERING' },
+        { camera_id: 'cam-border-01', stream_id: 'old-stream', analysis_session_id: 'old-run', event_type: 'INTRUSION' },
+      ],
+    );
+    expect(comparison).toHaveLength(2);
+    expect(comparison[0].sourceName).toBe('vid 1.mp4');
+    expect(comparison[0].events).toHaveLength(1);
+    expect(comparison[0].eventTypes).toEqual(['LOITERING']);
+    expect(comparison[1].events).toHaveLength(0);
+    expect(uploadedRunComparison(['cam-border-01'], { 'cam-border-01': sourceA }, {}, { 'cam-border-01': { ...summaryA, stream_id: 'old-stream' } }, [])).toHaveLength(0);
+  });
+});
 
 describe('dynamic dashboard camera scope', () => {
   it('uses restored durable run identity but never substitutes stream identity', () => {

@@ -1,4 +1,6 @@
 from dataclasses import FrozenInstanceError
+from queue import Queue
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -7,7 +9,8 @@ import pytest
 from edge.telemetry import build_active_track_snapshot, build_frame_snapshot, render_snapshot, telemetry_is_newer
 from backend.api.system import _telemetry_is_newer as backend_telemetry_is_newer
 from shared.constants import DetectionClass
-from shared.schemas import BoundingBox
+from shared.schemas import BoundingBox, TrackingFramePayload
+from edge.main import EdgePipeline
 
 
 def _track(track_id, detection_class, confidence=0.9, matched=True):
@@ -101,3 +104,44 @@ def test_old_session_packet_cannot_replace_new_replay_session():
     assert not telemetry_is_newer(current, {"analysis_session_id": "replay-1", "frame_index": 999, "processed_timestamp": 299})
     assert telemetry_is_newer(current, {"analysis_session_id": "replay-3", "frame_index": 1, "processed_timestamp": 301})
     assert not backend_telemetry_is_newer(current, {"analysis_session_id": "replay-1", "frame_index": 999, "processed_timestamp": 299})
+
+
+def test_decoupled_hud_publishes_detector_confirmed_box_for_exact_detector_frame():
+    pipeline = EdgePipeline.__new__(EdgePipeline)
+    pipeline.camera_id = "cam-border-01"
+    pipeline.stream_id = "analysis-run"
+    pipeline.source_stream_id = "uploaded-source"
+    pipeline.analysis_generation = 2
+    pipeline.source_generation = 3
+    pipeline._hud_state_lock = threading.Lock()
+    pipeline._hud_decoupled = True
+    pipeline._telemetry_sequence = 8
+    pipeline._detector_refresh_interval_ms = 200
+    pipeline._tracking_metrics = {"produced": 0, "dropped": 0, "errors": 0}
+    pipeline.tracking_queue = Queue(maxsize=4)
+    pipeline.metrics = SimpleNamespace(current_fps=lambda: 5.0)
+    pipeline.adapter = SimpleNamespace(source_kind="uploaded", demo_replay=False)
+    detector_frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    packet = SimpleNamespace(
+        job=SimpleNamespace(
+            frame=detector_frame,
+            meta=SimpleNamespace(frame_index=42, timestamp=12.0, video_time_seconds=1.4, fps_declared=30),
+            condition=SimpleNamespace(condition="CLEAR_DAY"),
+        ),
+        detector_ms=180.0,
+    )
+
+    pipeline._emit_hud_sample(detector_frame, packet.job.meta, [_track(7, DetectionClass.PERSON)])
+    assert pipeline.tracking_queue.empty()
+
+    pipeline._emit_detector_sample(packet, [_track(7, DetectionClass.PERSON)])
+
+    payload = pipeline.tracking_queue.get_nowait()
+    assert payload["frame_index"] == payload["detector_frame_index"] == 42
+    assert payload["video_time"] == 1.4
+    assert payload["analysis_session_id"] == "analysis-run"
+    assert payload["stream_id"] == "uploaded-source"
+    assert payload["detection_method"] == "YOLO_BYTE_TRACK"
+    assert payload["tracks"][0]["detector_confirmed"] is True
+    assert (payload["person_count"], payload["vehicle_count"], payload["track_count"]) == (1, 0, 1)
+    assert TrackingFramePayload.model_validate(payload).tracks[0].detector_confirmed is True

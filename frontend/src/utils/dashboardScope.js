@@ -273,6 +273,37 @@ export function latestEventAtOrBeforeFrame(events = [], context = null) {
     ), null);
 }
 
+export function completedRunMetrics(cameraId, source, telemetry, presented, summary) {
+  const completed = lifecycleStatus(source, telemetry) === 'COMPLETED';
+  const sessionId = analysisSessionIdForSource(telemetry, source);
+  const validSummary = completed && summary?.camera_id === cameraId
+    && summary?.stream_id === source?.sourceId
+    && summary?.analysis_session_id === sessionId ? summary : null;
+  const validPresented = presented?.camera_id === cameraId
+    && presented?.stream_id === source?.sourceId
+    && presented?.analysis_session_id === sessionId ? presented : null;
+  return { summary: validSummary, sample: validPresented || validSummary };
+}
+
+export function uploadedRunComparison(cameraIds, sourceStates, telemetryByCamera, summaries, events) {
+  return cameraIds.map(cameraId => {
+    const source = sourceStates[cameraId];
+    const summary = summaries[cameraId];
+    const sessionId = analysisSessionIdForSource(telemetryByCamera[cameraId], source);
+    if (source?.sourceMode !== 'durable' || !summary
+      || summary.camera_id !== cameraId || summary.stream_id !== source.sourceId
+      || summary.analysis_session_id !== sessionId) return null;
+    const runEvents = eventsForCameraRun(events, cameraId, sessionId, source.sourceId);
+    return {
+      cameraId,
+      sourceName: source.sourceName || 'UPLOADED SOURCE',
+      summary,
+      events: runEvents,
+      eventTypes: [...new Set(runEvents.map(event => event.event_type).filter(Boolean))],
+    };
+  }).filter(Boolean).slice(0, 2);
+}
+
 export function latestEventForSession(events = [], cameraId, analysisSessionId, streamId) {
   const scopedEvents = eventsForCameraRun(events, cameraId, analysisSessionId, streamId);
   return scopedEvents.reduce((latest, event) => (

@@ -87,7 +87,7 @@ describe('detection-synchronized analyzed playback', () => {
     const { container } = renderFeed();
     const video = wireVideo(container.querySelector('video'));
     fireEvent.loadedMetadata(video);
-    expect(screen.getByTitle('Show source preview')).toHaveAttribute('data-playback-mode', 'analyzed-sync');
+    expect(screen.getByTitle('View source preview')).toHaveAttribute('data-playback-mode', 'analyzed-sync');
     expect(video).not.toHaveAttribute('controls');
     expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
     expect(HTMLMediaElement.prototype.pause).toHaveBeenCalled();
@@ -144,9 +144,9 @@ describe('detection-synchronized analyzed playback', () => {
     const { container } = renderFeed({ onStartAnalysis, onPauseAnalysis });
     const video = wireVideo(container.querySelector('video'));
     act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: sample() })));
-    await waitFor(() => expect(screen.getByTitle('Show source preview')).toBeEnabled());
-    fireEvent.click(screen.getByTitle('Show source preview'));
-    expect(screen.getByRole('button', { name: /ANALYZED SYNC/ })).toHaveAttribute('data-playback-mode', 'source-preview');
+    await waitFor(() => expect(screen.getByTitle('View source preview')).toBeEnabled());
+    fireEvent.click(screen.getByTitle('View source preview'));
+    expect(screen.getByRole('button', { name: /VIEW ANALYZED/ })).toHaveAttribute('data-playback-mode', 'source-preview');
     expect(video).toHaveAttribute('controls');
     expect(HTMLMediaElement.prototype.play).toHaveBeenCalled();
     expect(onStartAnalysis).not.toHaveBeenCalled();
@@ -154,7 +154,7 @@ describe('detection-synchronized analyzed playback', () => {
     act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', {
       detail: sample({ sequence: 2, frame_index: 13, video_time: 0.45 }),
     })));
-    expect(screen.getByRole('button', { name: /ANALYZED SYNC/ })).toHaveAttribute('data-playback-mode', 'source-preview');
+    expect(screen.getByRole('button', { name: /VIEW ANALYZED/ })).toHaveAttribute('data-playback-mode', 'source-preview');
   });
 
   it('replays an accepted completed timeline in source order without triggering analysis', async () => {

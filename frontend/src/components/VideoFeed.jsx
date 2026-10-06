@@ -1065,7 +1065,7 @@ export default function VideoFeed({
           });
         }}
         disabled={!analyzedViewAvailable}
-        title={analyzedViewAvailable ? (hudVisible ? 'Show source preview' : 'Show analyzed sync') : viewBadge || 'Analyzed view unavailable'}
+        title={analyzedViewAvailable ? (hudVisible ? 'View source preview' : 'View analyzed frames') : viewBadge || 'Analyzed view unavailable'}
         data-playback-mode={hudVisible ? 'analyzed-sync' : 'source-preview'}
         data-view-state={viewState}
         aria-pressed={hudVisible}
@@ -1084,7 +1084,7 @@ export default function VideoFeed({
           display: 'flex', alignItems: 'center', gap: '0.25rem',
         }}
       >
-        <Activity size={8} /> {hudVisible ? 'SOURCE PREVIEW' : 'ANALYZED SYNC'}
+        <Activity size={8} /> {hudVisible ? 'VIEW SOURCE' : 'VIEW ANALYZED'}
       </button>
 
       {/* ── Telemetry Status Indicator ── */}
@@ -1128,8 +1128,8 @@ export default function VideoFeed({
               'rgba(239,68,68,0.85)',
           }}>
             {hudVisible
-              ? (completedRun ? 'ANALYZED REPLAY' : displayedSample ? 'ANALYZED SYNC' : 'AWAITING ANALYZED SAMPLE')
-              : 'SOURCE PREVIEW'}
+              ? (completedRun ? 'CURRENT VIEW: ANALYZED REPLAY' : displayedSample ? 'CURRENT VIEW: ANALYZED SYNC' : 'CURRENT VIEW: AWAITING ANALYZED SAMPLE')
+              : 'CURRENT VIEW: SOURCE PREVIEW'}
           </span>
         </div>
       )}

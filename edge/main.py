@@ -704,6 +704,11 @@ class EdgePipeline:
                 self._hud_frame_queue.task_done()
 
     def _emit_hud_sample(self, frame, meta, tracks) -> None:
+        # The primary analyzed view consumes only exact detector frames.
+        # Publishing high-rate optical-flow frames would fill the lossy
+        # transport queue and evict the detector anchors needed for replay.
+        if self._hud_decoupled:
+            return
         current_video_time = float(meta.video_time_seconds)
         if not hud_sample_is_due(
             self._last_hud_video_time,
@@ -759,6 +764,82 @@ class EdgePipeline:
             "detector_refresh_interval_ms": self._detector_refresh_interval_ms,
             "detector_fps": (1000.0 / self._detector_refresh_interval_ms if self._detector_refresh_interval_ms and self._detector_refresh_interval_ms > 0 else None),
             "hud_fps": measured_hud_fps,
+        }
+        try:
+            if self.tracking_queue.full():
+                self.tracking_queue.get_nowait()
+                self.tracking_queue.task_done()
+                self._tracking_metrics["dropped"] += 1
+            self.tracking_queue.put_nowait(payload)
+            self._tracking_metrics["produced"] += 1
+        except Exception:
+            self._tracking_metrics["errors"] += 1
+
+    def _emit_detector_sample(self, packet, tracks) -> None:
+        """Publish the detector's own source frame, never a later flow frame.
+
+        The decoupled HUD path emits only optical-flow samples. Without this
+        anchor, a detector-only analyzed view has no boxed frames to replay.
+        """
+        frame = packet.job.frame
+        meta = packet.job.meta
+        frame_h, frame_w = frame.shape[:2]
+        processed_timestamp = time.time()
+        snapshot = build_frame_snapshot(
+            camera_id=self.camera_id,
+            analysis_session_id=self.stream_id,
+            frame_index=meta.frame_index,
+            source_timestamp=meta.timestamp,
+            processed_at=processed_timestamp,
+            source_video_time=meta.video_time_seconds,
+            tracks=tracks,
+            frame_width=frame_w,
+            frame_height=frame_h,
+        )
+        # All boxes in this packet were associated by the detector with this
+        # exact image. A rejected malformed box is omitted by the snapshot.
+        with self._hud_state_lock:
+            self._telemetry_sequence += 1
+            sequence = self._telemetry_sequence
+        payload = {
+            "camera_id": self.camera_id,
+            "timestamp": processed_timestamp,
+            "video_time": float(meta.video_time_seconds),
+            "sequence": sequence,
+            "frame_index": int(meta.frame_index),
+            "source_timestamp": float(meta.timestamp),
+            "processed_timestamp": processed_timestamp,
+            "processing_fps": float(self.metrics.current_fps()),
+            "source_fps": float(meta.fps_declared) if meta.fps_declared > 0 else None,
+            "fps_declared": float(meta.fps_declared) if meta.fps_declared > 0 else None,
+            "frame_width": frame_w,
+            "frame_height": frame_h,
+            "stream_id": self.source_stream_id,
+            "analysis_session_id": self.stream_id,
+            "analysis_generation": self.analysis_generation,
+            "source_generation": self.source_generation,
+            "analysis_state": "PROCESSING",
+            "scene_condition": str(packet.job.condition.condition),
+            "detection_method": "YOLO_BYTE_TRACK",
+            "bbox_format": "XYWH",
+            "coordinate_space": "NORMALIZED_FRAME",
+            "source_kind": self.adapter.source_kind,
+            "demo_replay": self.adapter.demo_replay,
+            "person_count": snapshot.person_count,
+            "vehicle_count": snapshot.vehicle_count,
+            "track_count": snapshot.track_count,
+            "active_track_ids": snapshot.active_track_ids,
+            "tracker_output_ids": snapshot.tracker_output_ids,
+            "tracks": snapshot.live_tracks(),
+            "preview_available": False,
+            "visualization_only": True,
+            "detector_frame_index": int(meta.frame_index),
+            "detector_latency_ms": packet.detector_ms,
+            "detector_fps": (
+                1000.0 / self._detector_refresh_interval_ms
+                if self._detector_refresh_interval_ms and self._detector_refresh_interval_ms > 0
+                else None
+            ),
         }
         try:
             if self.tracking_queue.full():
@@ -1099,6 +1180,8 @@ class EdgePipeline:
                 detector_tracks = self._apply_continuity_guard(
                     detector_packet.tracks, detector_packet.job.frame,
                 )
+                if self._hud_decoupled:
+                    self._emit_detector_sample(detector_packet, detector_tracks)
                 flow_at_detector_frame = self.visual_tracker.tracks_at(
                     detector_packet.job.frame_index,
                 )
