@@ -299,6 +299,10 @@ class LiveTelemetryPayload(BaseModel):
     mean_luminance: Optional[float] = None
     enhancement_applied: Optional[bool] = None
     detection_method: Optional[str] = None
+    # Canonical contract for every live/replay overlay. Coordinates are
+    # normalized against the uncropped source frame as XYWH.
+    bbox_format: Literal["XYWH"] = "XYWH"
+    coordinate_space: Literal["NORMALIZED_FRAME"] = "NORMALIZED_FRAME"
     active_track_ids: List[int] = Field(default_factory=list)
     tracker_output_ids: List[int] = Field(default_factory=list)
     raw_detections: List[LiveDetection] = Field(default_factory=list)

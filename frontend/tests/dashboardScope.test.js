@@ -10,6 +10,8 @@ import {
   eventsForCameraRun,
   latestFaceEventForSession,
   latestPlateEventForSession,
+  latestEventAtOrBeforeFrame,
+  selectedRunContext,
   lifecycleStatus,
   operationalCameraIds,
   preferredOperationalCamera,
@@ -391,5 +393,38 @@ describe('camera telemetry correctness', () => {
     expect(frameResponseMatchesTelemetry(telemetry, coherent)).toBe(true);
     coherent.set('X-Frame-Index', '41');
     expect(frameResponseMatchesTelemetry(telemetry, coherent)).toBe(false);
+  });
+
+  it('builds one selected-run and frame context without leaking another camera or generation', () => {
+    const context = selectedRunContext(
+      'cam-border-01',
+      {
+        'cam-border-01': { sourceId: 'stream-1', latestAnalysisSessionId: 'run-2', sourceGeneration: 5, analysisGeneration: 8 },
+        'cam-checkpoint-01': { sourceId: 'stream-2', latestAnalysisSessionId: 'run-9' },
+      },
+      {
+        'cam-border-01': { stream_id: 'stream-1', analysis_session_id: 'run-2' },
+        'cam-checkpoint-01': { stream_id: 'stream-2', analysis_session_id: 'run-9' },
+      },
+      { 'cam-border-01': { frame_index: 120, video_time: 4.8 } },
+    );
+    expect(context).toMatchObject({
+      cameraId: 'cam-border-01', streamId: 'stream-1', analysisSessionId: 'run-2',
+      sourceGeneration: 5, analysisGeneration: 8, frameIndex: 120, videoTime: 4.8,
+    });
+  });
+
+  it('selects a reliability event only from the selected run at or before the visible frame', () => {
+    const context = {
+      cameraId: 'cam-border-01', streamId: 'stream-1', analysisSessionId: 'run-2', videoTime: 4.8,
+    };
+    const events = [
+      { event_id: 'old-run', camera_id: 'cam-border-01', stream_id: 'stream-1', analysis_session_id: 'run-1', video_time: 4.7 },
+      { event_id: 'visible', camera_id: 'cam-border-01', stream_id: 'stream-1', analysis_session_id: 'run-2', video_time: 4.5 },
+      { event_id: 'future', camera_id: 'cam-border-01', stream_id: 'stream-1', analysis_session_id: 'run-2', video_time: 5.0 },
+      { event_id: 'camera-2', camera_id: 'cam-checkpoint-01', stream_id: 'stream-2', analysis_session_id: 'run-9', video_time: 4.6 },
+    ];
+    expect(latestEventAtOrBeforeFrame(events, context)?.event_id).toBe('visible');
+    expect(latestEventAtOrBeforeFrame(events, { ...context, videoTime: 4.0 })).toBeNull();
   });
 });

@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  acceptedAnalyzedTimeline,
+  analyzedSampleAcceptance,
   analyzedSampleIdentity,
   analyzedSampleIsNewer,
   analyzedSampleMatchesScope,
   analyzedSampleMetrics,
+  analyzedTrackBoxIsValid,
   containedMediaRect,
 } from '../src/utils/analyzedPlayback';
 
@@ -21,6 +24,15 @@ const sample = (overrides = {}) => ({
   person_count: 1,
   vehicle_count: 0,
   track_count: 1,
+  frame_width: 1280,
+  frame_height: 720,
+  bbox_format: 'XYWH',
+  coordinate_space: 'NORMALIZED_FRAME',
+  detection_method: 'YOLO_BYTE_TRACK',
+  tracks: [{
+    track_id: 8, class_name: 'person', detection_class: 'person', detector_confirmed: true,
+    bbox_x: 0.2, bbox_y: 0.1, bbox_w: 0.25, bbox_h: 0.5,
+  }],
   ...overrides,
 });
 
@@ -60,5 +72,33 @@ describe('authoritative analyzed playback samples', () => {
     expect(containedMediaRect(1200, 600, 800, 600)).toEqual({
       left: 200, top: 0, width: 800, height: 600,
     });
+  });
+
+  it('accepts only canonical detector-confirmed samples with coherent counts', () => {
+    const scope = { cameraId: 'cam-checkpoint-01', streamId: 'source-2', analysisSessionId: 'run-2', analysisGeneration: 7, sourceGeneration: 3 };
+    expect(analyzedSampleAcceptance(sample(), scope).accepted).toBe(true);
+    expect(analyzedSampleAcceptance(sample({ detection_method: 'OPTICAL_FLOW' }), scope)).toMatchObject({ accepted: false, reason: 'detector-confirmation' });
+    expect(analyzedSampleAcceptance(sample({ person_count: 0 }), scope)).toMatchObject({ accepted: false, reason: 'count-mismatch' });
+    expect(analyzedSampleAcceptance(sample({ bbox_format: 'XYXY' }), scope)).toMatchObject({ accepted: false, reason: 'bbox-contract' });
+    expect(analyzedSampleAcceptance(sample({ frame_index: null }), scope)).toMatchObject({ accepted: false });
+    expect(analyzedSampleAcceptance(sample({ tracks: [{ ...sample().tracks[0], detector_confirmed: undefined }] }), scope)).toMatchObject({ accepted: false, reason: 'detector-confirmation' });
+  });
+
+  it('rejects collapsed, off-frame and implausible boxes', () => {
+    expect(analyzedTrackBoxIsValid(sample().tracks[0])).toBe(true);
+    expect(analyzedTrackBoxIsValid({ bbox_x: 0.2, bbox_y: 0.2, bbox_w: 0, bbox_h: 0.3 })).toBe(false);
+    expect(analyzedTrackBoxIsValid({ bbox_x: 1.2, bbox_y: 0.2, bbox_w: 0.1, bbox_h: 0.3 })).toBe(false);
+    expect(analyzedTrackBoxIsValid({ bbox_x: 0.2, bbox_y: 0.2, bbox_w: 0.001, bbox_h: 0.9 })).toBe(false);
+  });
+
+  it('filters, deduplicates and source-orders accepted replay samples', () => {
+    const scope = { cameraId: 'cam-checkpoint-01', streamId: 'source-2', analysisSessionId: 'run-2', analysisGeneration: 7, sourceGeneration: 3 };
+    const timeline = acceptedAnalyzedTimeline([
+      sample({ frame_index: 44, video_time: 2 }),
+      sample({ frame_index: 43, video_time: 1.9 }),
+      sample({ frame_index: 45, video_time: 2.1, detection_method: 'OPTICAL_FLOW' }),
+    ], scope);
+    expect(timeline.map(item => item.frame_index)).toEqual([43, 44]);
+    expect(timeline[0]).toMatchObject({ analyzed_frame_index: 43, source_frame_index: 43 });
   });
 });

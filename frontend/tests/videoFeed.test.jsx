@@ -1,453 +1,195 @@
 import React from 'react';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import VideoFeed from '../src/components/VideoFeed';
-import { authFetch } from '../src/services/auth';
 
-vi.mock('../src/services/auth', () => ({ authFetch: vi.fn() }));
+const scope = {
+  camera_id: 'cam-checkpoint-01',
+  stream_id: 'source-1',
+  analysis_session_id: 'run-1',
+  analysis_generation: 2,
+  source_generation: 3,
+};
 
-describe('per-camera authoritative analyzed frame', () => {
+const track = (overrides = {}) => ({
+  track_id: 9,
+  class_name: 'person',
+  detection_class: 'person',
+  detector_confirmed: true,
+  confidence: 0.88,
+  bbox_x: 0.2,
+  bbox_y: 0.15,
+  bbox_w: 0.25,
+  bbox_h: 0.5,
+  ...overrides,
+});
+
+const sample = (overrides = {}) => ({
+  ...scope,
+  sequence: 1,
+  frame_index: 12,
+  video_time: 0.4,
+  frame_width: 1280,
+  frame_height: 720,
+  bbox_format: 'XYWH',
+  coordinate_space: 'NORMALIZED_FRAME',
+  detection_method: 'YOLO_BYTE_TRACK',
+  person_count: 1,
+  vehicle_count: 0,
+  track_count: 1,
+  tracks: [track()],
+  ...overrides,
+});
+
+function wireVideo(video) {
+  let time = 0;
+  Object.defineProperty(video, 'currentTime', {
+    configurable: true,
+    get: () => time,
+    set: (value) => {
+      time = Number(value);
+      queueMicrotask(() => video.dispatchEvent(new Event('seeked')));
+    },
+  });
+  Object.defineProperty(video, 'readyState', { configurable: true, value: 4 });
+  Object.defineProperty(video, 'videoWidth', { configurable: true, value: 1280 });
+  Object.defineProperty(video, 'videoHeight', { configurable: true, value: 720 });
+  return video;
+}
+
+const renderFeed = (props = {}) => render(<VideoFeed
+  cameraId="cam-checkpoint-01"
+  mediaUrl="blob:video"
+  sourceMode="durable"
+  expectedSessionId="source-1"
+  expectedGeneration={2}
+  expectedSourceGeneration={3}
+  telemetryStatus="LIVE"
+  {...props}
+/>);
+
+describe('detection-synchronized analyzed playback', () => {
   beforeEach(() => {
-    delete HTMLMediaElement.prototype.requestVideoFrameCallback;
-    delete HTMLMediaElement.prototype.cancelVideoFrameCallback;
     global.ResizeObserver = class { observe() {} disconnect() {} };
-    URL.createObjectURL = vi.fn(() => 'blob:analyzed-frame');
-    URL.revokeObjectURL = vi.fn();
-    global.Image = class {
-      set src(_value) { queueMicrotask(() => this.onload?.()); }
-    };
+    global.requestAnimationFrame = callback => setTimeout(() => callback(performance.now()), 0);
+    global.cancelAnimationFrame = clearTimeout;
     HTMLMediaElement.prototype.play = vi.fn().mockResolvedValue(undefined);
     HTMLMediaElement.prototype.pause = vi.fn();
-    HTMLCanvasElement.prototype.getContext = vi.fn(() => ({
-      setTransform: vi.fn(), clearRect: vi.fn(), fillRect: vi.fn(), strokeRect: vi.fn(),
-      fillText: vi.fn(), measureText: vi.fn(() => ({ width: 40 })),
-    }));
-    const headers = new Headers({
-      'X-Analysis-Session': 'session-1', 'X-Frame-Index': '42',
-      'X-Person-Count': '1', 'X-Vehicle-Count': '1', 'X-Track-Count': '2',
-    });
-    authFetch.mockResolvedValue({ ok: true, headers, blob: async () => new Blob(['jpeg']) });
-  });
-
-  it('plays durable uploads at 1.0x and promotes the image-grounded tracking canvas', async () => {
-    const { container } = render(<VideoFeed
-      cameraId="cam-border-01"
-      mediaUrl="blob:video"
-      sourceMode="durable"
-      expectedSessionId="session-1"
-      telemetryStatus="LIVE"
-      liveTracksData={{
-        camera_id: 'cam-border-01',
-        stream_id: 'session-1',
-        analysis_session_id: 'session-1', frame_index: 42, preview_available: true,
-        person_count: 1, vehicle_count: 1, track_count: 2, tracks: [],
-        frame_width: 768, frame_height: 576,
-      }}
-    />);
-
-    const video = container.querySelector('video');
-    expect(video).toBeInTheDocument();
-    Object.defineProperty(video, 'playbackRate', { value: 1, writable: true });
-    window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: {
-      camera_id: 'cam-border-01', stream_id: 'session-1', analysis_session_id: 'run-1',
-      analysis_generation: null, frame_index: 42, video_time: 0.5, tracks: [],
-    } }));
-    await waitFor(() => expect(screen.getByLabelText('Current source-frame tracking overlay')).toHaveStyle({ display: 'block' }));
-    expect(video.playbackRate).toBe(1);
-    expect(screen.getByText(/SOURCE PLAYBACK 1.0×/)).toBeInTheDocument();
-  });
-
-  it('waits for a source-time lead then keeps live video at 1.0x without seeking or pausing', async () => {
-    const { container } = render(<VideoFeed
-      cameraId="cam-checkpoint-01"
-      mediaUrl="blob:video"
-      sourceMode="durable"
-      expectedSessionId="source-1"
-      expectedGeneration={1}
-      telemetryStatus="LIVE"
-      liveTracksData={{
-        camera_id: 'cam-checkpoint-01', stream_id: 'source-1',
-        analysis_session_id: 'run-1', analysis_generation: 1,
-        frame_index: 42, video_time: 6.38, preview_available: true,
-      }}
-    />);
-    const video = container.querySelector('video');
-    Object.defineProperty(video, 'currentTime', { value: 5, writable: true });
-    Object.defineProperty(video, 'playbackRate', { value: 1, writable: true });
-    const sendSample = (frame, videoTime) => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: {
-      camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'run-1',
-      analysis_generation: 1, frame_index: frame, video_time: videoTime, tracks: [],
-    } }));
-    for (let frame = 0; frame <= 10; frame += 1) sendSample(frame, frame / 10);
-
-    await waitFor(() => expect(HTMLMediaElement.prototype.play).toHaveBeenCalledTimes(1));
-    expect(video.currentTime).toBeCloseTo(0, 5);
-    expect(video.playbackRate).toBe(1);
-    video.currentTime = 0.4;
-    sendSample(11, 1.1);
-    expect(video.currentTime).toBeCloseTo(0.4, 5);
-    expect(video.playbackRate).toBe(1);
-    expect(HTMLMediaElement.prototype.pause).not.toHaveBeenCalled();
-  });
-
-  it('selects completed HUD samples and metrics from requestVideoFrameCallback mediaTime', async () => {
-    let presentVideoFrame;
-    HTMLMediaElement.prototype.requestVideoFrameCallback = vi.fn((callback) => {
-      presentVideoFrame = callback;
+    HTMLMediaElement.prototype.requestVideoFrameCallback = vi.fn(function requestFrame(callback) {
+      queueMicrotask(() => callback(performance.now(), { mediaTime: this.currentTime }));
       return 1;
     });
     HTMLMediaElement.prototype.cancelVideoFrameCallback = vi.fn();
-    const timeline = [0, 1, 2].map((frame) => ({
-      camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'run-1',
-      analysis_generation: 1, source_generation: 3, frame_index: frame + 1,
-      video_time: frame / 10, source_fps: 24, detector_fps: 2, hud_fps: 10,
-      person_count: 0, vehicle_count: 0, track_count: 0, tracks: [],
-    }));
-    const { container, unmount } = render(<VideoFeed
-      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
-      sourceRunState="COMPLETED" expectedSessionId="source-1" expectedGeneration={1}
-      expectedSourceGeneration={3} telemetryStatus="COMPLETED"
-      completedTimeline={timeline}
-      completedSummary={{
-        camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'run-1',
-        analysis_generation: 1, source_generation: 3, final_video_time: 0.2,
-      }}
-    />);
-    const video = container.querySelector('video');
-    Object.defineProperty(video, 'currentTime', { value: 0.2, writable: true });
-    Object.defineProperty(video, 'playbackRate', { value: 1, writable: true });
-    act(() => presentVideoFrame(0, { mediaTime: 0.14 }));
-    const canvas = screen.getByLabelText('Current source-frame tracking overlay');
-    expect(canvas.dataset.frameIndex).toBe('2');
-    expect(canvas.dataset.mediaTime).toBe('0.140');
-    expect(canvas.dataset.hudSourceTime).toBe('0.100');
-    expect(canvas.dataset.hudOffsetMs).toBe('-40');
-    await waitFor(() => expect(screen.getByText(/HUD OFFSET -40ms · LEAD \+0\.06s/)).toBeInTheDocument());
-    expect(screen.getByText(/SOURCE FPS 24 · DETECTOR FPS 2 · HUD FPS 10/)).toBeInTheDocument();
-    expect(container.querySelector('.dashboard-video-feed')).toHaveTextContent(/PERSONS 0\s+VEHICLES 0\s+TRACKS 0/);
-    expect(video.currentTime).toBeCloseTo(0.2, 5);
-    expect(video.playbackRate).toBe(1);
-    unmount();
   });
 
-  it('does not fetch a frame for a stale session', async () => {
-    render(<VideoFeed
-      cameraId="cam-border-01"
-      mediaUrl="blob:video"
-      sourceMode="durable"
-      expectedSessionId="new-session"
-      telemetryStatus="LIVE"
-      liveTracksData={{ stream_id: 'old-session', analysis_session_id: 'old-session', frame_index: 42, preview_available: true }}
-    />);
-    expect(authFetch).not.toHaveBeenCalled();
-    expect(screen.getByText(/SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME/)).toBeInTheDocument();
-    expect(screen.queryByText(/ANALYZED FRAME UNAVAILABLE/i)).not.toBeInTheDocument();
-    expect(screen.getByTitle('WAITING FOR HUD')).toBeDisabled();
+  it('defaults durable media to ANALYZED SYNC without starting browser playback', () => {
+    const { container } = renderFeed();
+    const video = wireVideo(container.querySelector('video'));
+    fireEvent.loadedMetadata(video);
+    expect(screen.getByTitle('Show source preview')).toHaveAttribute('data-playback-mode', 'analyzed-sync');
+    expect(video).not.toHaveAttribute('controls');
+    expect(HTMLMediaElement.prototype.play).not.toHaveBeenCalled();
+    expect(HTMLMediaElement.prototype.pause).toHaveBeenCalled();
   });
 
-  it('does not offer an add-source action while durable authority is restoring', () => {
-    render(<VideoFeed
-      cameraId="cam-border-01"
-      sourceRestoring
-      sourceRunState="RESTORING"
-      canUpload
-    />);
-    expect(screen.getByText('RESTORING STORED SOURCE...')).toBeInTheDocument();
-    expect(screen.queryByText('ADD VIDEO SOURCE')).not.toBeInTheDocument();
-  });
-
-  it('never calls an authoritative stored source NO VIDEO SOURCE when preview transport is absent', () => {
-    render(<VideoFeed
-      cameraId="cam-checkpoint-01"
-      sourceMode="durable"
-      sourceRunState="PAUSED"
-      expectedSessionId="stored-source"
-      telemetryStatus="STALE"
-      canUpload
-    />);
-    expect(screen.getByText('SOURCE STORED · PREVIEW UNAVAILABLE FOR RESTORED SESSION')).toBeInTheDocument();
-    expect(screen.queryByText('NO VIDEO SOURCE')).not.toBeInTheDocument();
-    expect(screen.queryByText('ADD VIDEO SOURCE')).not.toBeInTheDocument();
-  });
-
-  it('shows measured upload progress and never claims normalization before it is known', () => {
-    render(<VideoFeed
-      cameraId="cam-checkpoint-01"
-      isUploading
-      uploadStage="UPLOADING"
-      uploadProgress={63}
-      canUpload
-      sourceMode="durable"
-      sourceRunState="UPLOADING"
-    />);
-    expect(screen.getByText('UPLOADING 63%')).toBeInTheDocument();
-    expect(screen.queryByText(/NORMALIZING/)).not.toBeInTheDocument();
-  });
-
-  it('keeps preview availability separate from source readiness', () => {
-    render(<VideoFeed
-      cameraId="cam-checkpoint-01"
-      sourceMode="durable"
-      sourceRunState="READY"
-      expectedSessionId="ready-source"
-      telemetryStatus="WAITING"
-      canUpload
-    />);
-    expect(screen.getByText('SOURCE STORED · PREVIEW UNAVAILABLE FOR RESTORED SESSION')).toBeInTheDocument();
-    expect(screen.queryByText(/UPLOADING/)).not.toBeInTheDocument();
-  });
-
-  it('names an active restored source as awaiting its current analyzed frame', () => {
-    render(<VideoFeed
-      cameraId="cam-checkpoint-01"
-      sourceMode="durable"
-      sourceRunState="LIVE"
-      expectedSessionId="stored-source"
-      telemetryStatus="OFFLINE"
-      canUpload
-    />);
-    expect(screen.getByText('SOURCE STORED · AWAITING CURRENT-RUN ANALYZED FRAME')).toBeInTheDocument();
-    expect(screen.queryByText('SOURCE STORED · PREVIEW UNAVAILABLE FOR RESTORED SESSION')).not.toBeInTheDocument();
-  });
-
-  it('labels persisted completed telemetry as historical rather than active', () => {
-    render(<VideoFeed
-      cameraId="cam-border-01"
-      sourceMode="durable"
-      sourceRunState="COMPLETED"
-      expectedSessionId="session-1"
-      telemetryStatus="COMPLETED"
-      liveTracksData={{ analysis_session_id: 'session-1', frame_index: 42 }}
-    />);
-    expect(screen.getByText('SOURCE STORED · ANALYSIS COMPLETED')).toBeInTheDocument();
-    expect(screen.queryByText('TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL')).not.toBeInTheDocument();
-  });
-
-  it('does not say a completed source is waiting for its first analyzed frame', () => {
-    render(<VideoFeed
-      cameraId="cam-border-01"
-      mediaUrl="blob:video"
-      sourceMode="durable"
-      sourceRunState="COMPLETED"
-      expectedSessionId="source-1"
-      telemetryStatus="COMPLETED"
-      liveTracksData={{ stream_id: 'source-1', analysis_session_id: 'run-1', frame_index: 42, preview_available: false }}
-    />);
-    expect(screen.getByText('SOURCE REPLAY · HUD NOT AVAILABLE FOR THIS HISTORICAL RUN')).toBeInTheDocument();
-    expect(screen.queryByText('SOURCE PREVIEW · WAITING FOR FIRST ANALYZED FRAME')).not.toBeInTheDocument();
-    expect(screen.queryByText(/ANALYZED FRAME UNAVAILABLE/i)).not.toBeInTheDocument();
-    expect(screen.getByText('HUD UNAVAILABLE')).toBeDisabled();
-  });
-
-  it('settles completed replay loading to an explicit unavailable state', () => {
-    const props = {
-      cameraId: 'cam-border-01', mediaUrl: 'blob:video', sourceMode: 'durable',
-      sourceRunState: 'COMPLETED', expectedSessionId: 'source-1', telemetryStatus: 'COMPLETED',
-      completedSummary: {
-        camera_id: 'cam-border-01', stream_id: 'source-1', analysis_session_id: 'run-1',
-        analysis_generation: 1, final_video_time: 10,
-      },
-    };
-    const { rerender } = render(<VideoFeed {...props} completedSummaryLoading />);
-    expect(screen.getByText('LOADING HUD')).toBeInTheDocument();
-    rerender(<VideoFeed {...props} completedSummaryLoading={false} completedTimeline={[]} />);
-    expect(screen.getByText('HUD UNAVAILABLE')).toBeInTheDocument();
-    expect(screen.queryByText('ANALYZED VIEW PENDING')).not.toBeInTheDocument();
-  });
-
-  it('restores a completed analyzed timeline for replay without starting a new analysis', async () => {
-    const completedTimeline = [{
-      camera_id: 'cam-checkpoint-01', stream_id: 'source-2', analysis_session_id: 'run-2',
-      analysis_generation: 1, source_generation: 9, sequence: 4, frame_index: 12,
-      video_time: 0.5, frame_width: 640, frame_height: 360,
-      person_count: 1, vehicle_count: 0, track_count: 1, tracks: [],
-    }];
-    render(<VideoFeed
-      cameraId="cam-checkpoint-01"
-      mediaUrl="blob:video"
-      sourceMode="durable"
-      sourceRunState="COMPLETED"
-      expectedSessionId="source-2"
-      expectedGeneration={1}
-      expectedSourceGeneration={9}
-      telemetryStatus="COMPLETED"
-      completedTimeline={completedTimeline}
-      completedSummary={{
-        camera_id: 'cam-checkpoint-01', stream_id: 'source-2', analysis_session_id: 'run-2',
-        analysis_generation: 1, source_generation: 9, final_video_time: 0.5,
-      }}
-    />);
-    await waitFor(() => expect(screen.getByText(/COMPLETED RUN · ANALYZED REPLAY/)).toBeInTheDocument());
-    expect(screen.getByText('ANALYZED REPLAY')).toBeInTheDocument();
-    expect(screen.getByLabelText('Current source-frame tracking overlay')).toHaveStyle({ display: 'block' });
-  });
-
-  it('promotes the first exact frame once, respects source preview, and resets for the next run', async () => {
-    authFetch.mockImplementation(async (url) => {
-      const params = new URL(url, 'https://example.test').searchParams;
-      const session = params.get('analysis_session_id');
-      const frame = params.get('frame_index');
-      return {
-        ok: true,
-        headers: new Headers({
-          'X-Analysis-Session': session,
-          'X-Frame-Index': frame,
-          'X-Person-Count': '1', 'X-Vehicle-Count': '0', 'X-Track-Count': '1',
-        }),
-        blob: async () => new Blob(['jpeg']),
-      };
-    });
-    const sample = (run, frame) => ({
-      camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: run,
-      analysis_generation: run === 'run-1' ? 1 : 2, frame_index: frame, preview_available: true,
-      person_count: 1, vehicle_count: 0, track_count: 1,
-      tracks: [{ track_id: 7, class_name: 'person', bbox_x: 0.1, bbox_y: 0.1, bbox_w: 0.2, bbox_h: 0.4 }],
-      frame_width: 960, frame_height: 540,
-    });
-    const { rerender, container } = render(<VideoFeed
-      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
-      expectedSessionId="source-1" expectedGeneration={1} telemetryStatus="LIVE"
-      liveTracksData={sample('run-1', 1)}
-    />);
-    await waitFor(() => expect(screen.getByTitle('Show source preview')).toHaveAttribute('aria-pressed', 'true'));
-    expect(container.querySelector('[data-track-id="7"][data-track-class="person"]')).not.toBeNull();
-    expect(screen.getByText((content) => content.includes('PERSONS 1') && content.includes('VEHICLES 0') && content.includes('TRACKS 1'))).toBeInTheDocument();
-
-    screen.getByTitle('Show source preview').click();
-    await waitFor(() => expect(screen.getByTitle('Show analyzed HUD')).toHaveAttribute('aria-pressed', 'false'));
-    rerender(<VideoFeed
-      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
-      expectedSessionId="source-1" expectedGeneration={1} telemetryStatus="LIVE"
-      liveTracksData={sample('run-1', 2)}
-    />);
-    await waitFor(() => expect(authFetch).toHaveBeenCalledTimes(2));
-    expect(screen.getByTitle('Show analyzed HUD')).toHaveAttribute('aria-pressed', 'false');
-
-    rerender(<VideoFeed
-      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
-      expectedSessionId="source-1" expectedGeneration={2} telemetryStatus="LIVE"
-      liveTracksData={sample('run-2', 1)}
-    />);
-    await waitFor(() => expect(screen.getByTitle('Show source preview')).toHaveAttribute('aria-pressed', 'true'));
-  });
-
-  it('rejects wrong-camera and stale-generation frames before analyzed-view promotion', () => {
-    const { rerender } = render(<VideoFeed
-      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
-      expectedSessionId="source-1" expectedGeneration={3} telemetryStatus="LIVE"
-      liveTracksData={{
-        camera_id: 'cam-border-01', stream_id: 'source-1', analysis_session_id: 'run-1',
-        analysis_generation: 3, frame_index: 1, preview_available: true,
-      }}
-    />);
-    expect(authFetch).not.toHaveBeenCalled();
-    rerender(<VideoFeed
-      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
-      expectedSessionId="source-1" expectedGeneration={3} telemetryStatus="LIVE"
-      liveTracksData={{
-        camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'run-1',
-        analysis_generation: 2, frame_index: 1, preview_available: true,
-      }}
-    />);
-    expect(authFetch).not.toHaveBeenCalled();
-    expect(screen.getByText('WAITING FOR HUD')).toBeInTheDocument();
-  });
-
-  it('renders authoritative person and vehicle boxes with the same-frame counts', async () => {
-    const telemetry = {
-      camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'session-1',
-      analysis_generation: 4, frame_index: 42, preview_available: true,
-      person_count: 1, vehicle_count: 1, track_count: 2,
-      tracks: [
-        { track_id: 11, class_name: 'person', bbox_x: 0.1, bbox_y: 0.1, bbox_w: 0.2, bbox_h: 0.4 },
-        { track_id: 12, class_name: 'car', bbox_x: 0.5, bbox_y: 0.4, bbox_w: 0.3, bbox_h: 0.25 },
-      ],
-      frame_width: 960, frame_height: 540,
-    };
-    const { container } = render(<VideoFeed
-      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
-      expectedSessionId="source-1" expectedGeneration={4} telemetryStatus="LIVE" liveTracksData={telemetry}
-    />);
-    await waitFor(() => expect(screen.getByTitle('Show source preview')).toHaveAttribute('aria-pressed', 'true'));
-    expect(container.querySelector('[data-track-id="11"][data-track-class="person"]')).not.toBeNull();
-    expect(container.querySelector('[data-track-id="12"][data-track-class="car"]')).not.toBeNull();
-    expect(screen.getByText((content) => content.includes('PERSONS 1') && content.includes('VEHICLES 1') && content.includes('TRACKS 2'))).toBeInTheDocument();
-  });
-
-  it('moves a box only when the next exact authoritative frame commits', async () => {
+  it('seeks to a detector-confirmed sample and atomically commits frame, boxes and metrics', async () => {
     const onAnalyzedSample = vi.fn();
-    authFetch.mockImplementation(async (url) => {
-      const params = new URL(url, 'https://example.test').searchParams;
-      return {
-        ok: true,
-        headers: new Headers({
-          'X-Analysis-Session': params.get('analysis_session_id'),
-          'X-Frame-Index': params.get('frame_index'),
-          'X-Person-Count': '1', 'X-Vehicle-Count': '0', 'X-Track-Count': '1',
-        }),
-        blob: async () => new Blob(['jpeg']),
-      };
-    });
-    const frame = (frameIndex, bboxX) => ({
-      camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'run-1',
-      analysis_generation: 1, sequence: frameIndex, frame_index: frameIndex,
-      video_time: frameIndex / 24, preview_available: true,
-      person_count: 1, vehicle_count: 0, track_count: 1,
-      tracks: [{ track_id: 7, class_name: 'person', bbox_x: bboxX, bbox_y: 0.1, bbox_w: 0.2, bbox_h: 0.4 }],
-      frame_width: 960, frame_height: 540,
-    });
-    const { container, rerender } = render(<VideoFeed
-      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
-      expectedSessionId="source-1" expectedGeneration={1} telemetryStatus="LIVE"
-      liveTracksData={frame(10, 0.1)} onAnalyzedSample={onAnalyzedSample}
-    />);
-    await waitFor(() => expect(container.querySelector('[data-track-id="7"]')).toHaveAttribute('data-bbox-x', '0.1'));
-    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 10 })));
+    const { container } = renderFeed({ onAnalyzedSample });
+    const video = wireVideo(container.querySelector('video'));
+    act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: sample() })));
 
-    rerender(<VideoFeed
-      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
-      expectedSessionId="source-1" expectedGeneration={1} telemetryStatus="LIVE"
-      liveTracksData={frame(11, 0.35)} onAnalyzedSample={onAnalyzedSample}
-    />);
-    await waitFor(() => expect(container.querySelector('[data-track-id="7"]')).toHaveAttribute('data-bbox-x', '0.35'));
-    expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 11, video_time: 11 / 24 }));
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({
+      frame_index: 12, video_time: 0.4, person_count: 1, track_count: 1,
+    })));
+    expect(video.currentTime).toBeCloseTo(0.4, 5);
+    expect(screen.getByLabelText('Detection-synchronized tracking overlay')).toHaveAttribute('data-frame-index', '12');
+    expect(container.querySelector('[data-track-id="9"][data-track-class="person"]')).toBeInTheDocument();
+    expect(screen.getByText('FRAME 12 · 0.40s')).toBeInTheDocument();
   });
 
-  it('does not mislabel one final analyzed frame as a completed replay timeline', async () => {
-    const telemetry = {
-      camera_id: 'cam-checkpoint-01', stream_id: 'source-1', analysis_session_id: 'session-1',
-      analysis_generation: 1, frame_index: 42, preview_available: true,
-      person_count: 1, vehicle_count: 1, track_count: 2, tracks: [], frame_width: 960, frame_height: 540,
-    };
-    const { rerender } = render(<VideoFeed
-      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
-      expectedSessionId="source-1" expectedGeneration={1} telemetryStatus="LIVE" liveTracksData={telemetry}
-    />);
-    await waitFor(() => expect(screen.getByTitle('Show source preview')).toHaveAttribute('aria-pressed', 'true'));
-    rerender(<VideoFeed
-      cameraId="cam-checkpoint-01" mediaUrl="blob:video" sourceMode="durable"
-      expectedSessionId="source-1" expectedGeneration={1} sourceRunState="COMPLETED"
-      telemetryStatus="COMPLETED" liveTracksData={telemetry}
-    />);
-    expect(screen.getByText('HUD UNAVAILABLE')).toHaveAttribute('data-view-state', 'COMPLETED_REPLAY_UNAVAILABLE');
-    expect(screen.queryByAltText('Synchronized analyzed video frame for cam-checkpoint-01')).not.toBeInTheDocument();
+  it('rejects optical-flow-only and malformed boxes instead of displaying irregular HUD data', async () => {
+    const onAnalyzedSample = vi.fn();
+    const { container } = renderFeed({ onAnalyzedSample });
+    wireVideo(container.querySelector('video'));
+    act(() => {
+      window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', {
+        detail: sample({ detection_method: 'OPTICAL_FLOW' }),
+      }));
+      window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', {
+        detail: sample({ frame_index: 13, tracks: [track({ bbox_w: -0.2 })] }),
+      }));
+    });
+    await new Promise(resolve => setTimeout(resolve, 80));
+    expect(onAnalyzedSample).not.toHaveBeenCalledWith(expect.objectContaining({ frame_index: 12 }));
+    expect(onAnalyzedSample).not.toHaveBeenCalledWith(expect.objectContaining({ frame_index: 13 }));
+    expect(container.querySelector('[data-track-id]')).not.toBeInTheDocument();
   });
 
-  it('uses the active label only for live telemetry', () => {
-    const { rerender } = render(<VideoFeed
-      cameraId="cam-border-01"
-      telemetryStatus="LIVE"
-      liveTracksData={{ analysis_session_id: 'session-1', frame_index: 42 }}
-    />);
-    expect(screen.getByText('TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL')).toBeInTheDocument();
+  it('keeps a zero-object detector frame as explicit current-run truth', async () => {
+    const onAnalyzedSample = vi.fn();
+    const { container } = renderFeed({ onAnalyzedSample });
+    wireVideo(container.querySelector('video'));
+    act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', {
+      detail: sample({ frame_index: 14, video_time: 0.5, tracks: [], person_count: 0, track_count: 0 }),
+    })));
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({
+      frame_index: 14, person_count: 0, vehicle_count: 0, track_count: 0,
+    })));
+  });
 
-    rerender(<VideoFeed
+  it('offers raw SOURCE PREVIEW as an explicit optional mode without analysis control calls', async () => {
+    const onStartAnalysis = vi.fn();
+    const onPauseAnalysis = vi.fn();
+    const { container } = renderFeed({ onStartAnalysis, onPauseAnalysis });
+    const video = wireVideo(container.querySelector('video'));
+    act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: sample() })));
+    await waitFor(() => expect(screen.getByTitle('Show source preview')).toBeEnabled());
+    fireEvent.click(screen.getByTitle('Show source preview'));
+    expect(screen.getByRole('button', { name: /ANALYZED SYNC/ })).toHaveAttribute('data-playback-mode', 'source-preview');
+    expect(video).toHaveAttribute('controls');
+    expect(HTMLMediaElement.prototype.play).toHaveBeenCalled();
+    expect(onStartAnalysis).not.toHaveBeenCalled();
+    expect(onPauseAnalysis).not.toHaveBeenCalled();
+    act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', {
+      detail: sample({ sequence: 2, frame_index: 13, video_time: 0.45 }),
+    })));
+    expect(screen.getByRole('button', { name: /ANALYZED SYNC/ })).toHaveAttribute('data-playback-mode', 'source-preview');
+  });
+
+  it('replays an accepted completed timeline in source order without triggering analysis', async () => {
+    const onAnalyzedSample = vi.fn();
+    const onStartAnalysis = vi.fn();
+    const timeline = [
+      sample({ frame_index: 20, video_time: 0 }),
+      sample({ sequence: 2, frame_index: 24, video_time: 0.15 }),
+    ];
+    const { container } = renderFeed({
+      sourceRunState: 'COMPLETED',
+      telemetryStatus: 'COMPLETED',
+      completedTimeline: timeline,
+      completedSummary: { ...scope, final_video_time: 0.15 },
+      onAnalyzedSample,
+      onStartAnalysis,
+    });
+    const replayVideo = wireVideo(container.querySelector('video'));
+    fireEvent.seeked(replayVideo);
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 24 })), { timeout: 1500 });
+    const committed = onAnalyzedSample.mock.calls.map(call => call[0]?.frame_index).filter(Boolean);
+    expect(committed).toEqual(expect.arrayContaining([20, 24]));
+    expect(committed.indexOf(20)).toBeLessThan(committed.indexOf(24));
+    expect(onStartAnalysis).not.toHaveBeenCalled();
+  });
+
+  it('does not call a restored durable source NO VIDEO SOURCE while transport is absent', () => {
+    render(<VideoFeed
       cameraId="cam-border-01"
-      telemetryStatus="STALE"
-      liveTracksData={{ analysis_session_id: 'session-1', frame_index: 42 }}
+      sourceMode="durable"
+      expectedSessionId="stored-source"
+      sourceRestoring
+      telemetryStatus="WAITING"
     />);
-    expect(screen.getByText('LAST TELEMETRY AVAILABLE · NOT LIVE')).toBeInTheDocument();
-    expect(screen.queryByText('TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL')).not.toBeInTheDocument();
+    expect(screen.queryByText('NO VIDEO SOURCE')).not.toBeInTheDocument();
+    expect(screen.getByText(/RESTORING STORED SOURCE/)).toBeInTheDocument();
   });
 });

@@ -55,6 +55,22 @@ def test_predicted_only_tracker_state_is_excluded():
     assert snapshot["person_count"] == 1
 
 
+def test_malformed_collapsed_and_off_frame_boxes_are_rejected_before_transmission():
+    valid = _track(1, DetectionClass.PERSON)
+    collapsed = _track(2, DetectionClass.PERSON)
+    collapsed.bbox = SimpleNamespace(x1=20, y1=20, x2=20, y2=100)
+    non_finite = _track(3, DetectionClass.PERSON)
+    non_finite.bbox = SimpleNamespace(x1=float("nan"), y1=20, x2=100, y2=100)
+    off_frame = _track(4, DetectionClass.PERSON)
+    off_frame.bbox = SimpleNamespace(x1=700, y1=20, x2=800, y2=100)
+    snapshot = build_active_track_snapshot(
+        [valid, collapsed, non_finite, off_frame], 640, 480
+    )
+    assert snapshot["active_track_ids"] == [1]
+    assert snapshot["track_count"] == 1
+    assert len(snapshot["tracks"]) == 1
+
+
 def test_render_and_counts_share_one_immutable_snapshot():
     snapshot = build_frame_snapshot(
         camera_id="cam-border-01", analysis_session_id="session-1234",

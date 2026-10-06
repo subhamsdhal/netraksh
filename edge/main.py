@@ -745,6 +745,7 @@ class EdgePipeline:
             "analysis_state": "PROCESSING",
             "scene_condition": str(getattr(self._last_condition, "condition", "UNKNOWN")),
             "detection_method": "OPTICAL_FLOW" if tracks else "NONE",
+            "bbox_format": "XYWH", "coordinate_space": "NORMALIZED_FRAME",
             "source_kind": self.adapter.source_kind, "demo_replay": self.adapter.demo_replay,
             "replay_cycle": getattr(meta, "replay_cycle", 0), "raw_detection_count": 0,
             "tracker_output_count": len(tracks), "person_count": snapshot.person_count,
@@ -1280,6 +1281,8 @@ class EdgePipeline:
                     "YOLO_BYTE_TRACK" if detector_packet is not None
                     else "OPTICAL_FLOW" if tracks else "NONE"
                 ),
+                "bbox_format": "XYWH",
+                "coordinate_space": "NORMALIZED_FRAME",
                 "source_kind": self.adapter.source_kind,
                 "demo_replay": self.adapter.demo_replay,
                 "replay_cycle": getattr(meta, "replay_cycle", 0),

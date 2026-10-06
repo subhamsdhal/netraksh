@@ -84,6 +84,8 @@ def _compact_tracking_sample(payload: TrackingFramePayload, received_at: float) 
         "vehicle_count": payload.vehicle_count,
         "track_count": payload.track_count,
         "detection_method": payload.detection_method,
+        "bbox_format": payload.bbox_format,
+        "coordinate_space": payload.coordinate_space,
         "detector_frame_index": payload.detector_frame_index,
         "tracks": [track.model_dump() for track in payload.tracks],
     }

@@ -223,6 +223,56 @@ export function eventsForCameraRun(events = [], cameraId, analysisSessionId, str
     && event.analysis_session_id === analysisSessionId);
 }
 
+export function selectedRunContext(
+  cameraId,
+  sourceStates = {},
+  telemetryByCamera = {},
+  presentedByCamera = {},
+) {
+  if (!cameraId) return null;
+  const source = sourceStates[cameraId] || {};
+  const telemetry = telemetryByCamera[cameraId] || null;
+  const presented = presentedByCamera[cameraId] || null;
+  const streamId = source.sourceId || telemetry?.stream_id || null;
+  const analysisSessionId = analysisSessionIdForSource(telemetry, source);
+  if (!streamId || !analysisSessionId) return null;
+  return {
+    cameraId,
+    camera_id: cameraId,
+    streamId,
+    stream_id: streamId,
+    analysisSessionId,
+    analysis_session_id: analysisSessionId,
+    sourceGeneration: source.sourceGeneration ?? telemetry?.source_generation ?? null,
+    source_generation: source.sourceGeneration ?? telemetry?.source_generation ?? null,
+    analysisGeneration: source.analysisGeneration ?? telemetry?.analysis_generation ?? null,
+    analysis_generation: source.analysisGeneration ?? telemetry?.analysis_generation ?? null,
+    runId: analysisSessionId,
+    frameIndex: presented?.frame_index ?? null,
+    videoTime: presented?.video_time != null && Number.isFinite(Number(presented.video_time))
+      ? Number(presented.video_time) : null,
+  };
+}
+
+export function latestEventAtOrBeforeFrame(events = [], context = null) {
+  if (!context) return null;
+  const scoped = eventsForCameraRun(
+    events,
+    context.cameraId,
+    context.analysisSessionId,
+    context.streamId,
+  );
+  if (!Number.isFinite(context.videoTime)) return null;
+  return scoped
+    .filter((event) => Number.isFinite(Number(event.video_time))
+      && Number(event.video_time) <= context.videoTime + 0.001)
+    .reduce((latest, event) => (
+      !latest || Number(event.video_time) > Number(latest.video_time)
+        || (Number(event.video_time) === Number(latest.video_time) && compareEventRecency(event, latest) > 0)
+        ? event : latest
+    ), null);
+}
+
 export function latestEventForSession(events = [], cameraId, analysisSessionId, streamId) {
   const scopedEvents = eventsForCameraRun(events, cameraId, analysisSessionId, streamId);
   return scopedEvents.reduce((latest, event) => (

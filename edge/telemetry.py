@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Iterable, Optional, Tuple
 
 VEHICLE_CLASS_NAMES = frozenset({"car", "motorcycle", "bus", "truck"})
@@ -19,6 +20,26 @@ def _class_name(track) -> str:
     subtype = getattr(track, "vehicle_subtype", None)
     subtype = str(getattr(subtype, "value", subtype or "")).lower()
     return subtype if subtype in VEHICLE_CLASS_NAMES else detection_class
+
+
+def _valid_frame_bbox(bbox, frame_width: int, frame_height: int) -> bool:
+    if frame_width <= 0 or frame_height <= 0:
+        return False
+    values = (float(bbox.x1), float(bbox.y1), float(bbox.x2), float(bbox.y2))
+    if not all(math.isfinite(value) for value in values):
+        return False
+    x1, y1, x2, y2 = values
+    width = x2 - x1
+    height = y2 - y1
+    if width <= 0 or height <= 0:
+        return False
+    visible_width = min(float(frame_width), x2) - max(0.0, x1)
+    visible_height = min(float(frame_height), y2) - max(0.0, y1)
+    if visible_width <= 0 or visible_height <= 0:
+        return False
+    normalized_area = (width / frame_width) * (height / frame_height)
+    aspect = width / height
+    return 0.00001 <= normalized_area <= 1.05 and 0.03 <= aspect <= 33.0
 
 
 @dataclass(frozen=True)
@@ -104,6 +125,8 @@ def build_frame_snapshot(
     output_ids = []
     for track in tracks:
         if not bool(getattr(track, "matched_current_frame", False)):
+            continue
+        if not _valid_frame_bbox(track.bbox, frame_width, frame_height):
             continue
         track_id = int(track.track_id)
         output_ids.append(track_id)

@@ -38,6 +38,8 @@ def test_tracking_frame_is_visualization_only_and_broadcast_without_database_wri
     payload = _payload()
     _latest_tracking_sequence.clear()
     assert payload.visualization_only is True
+    assert payload.bbox_format == "XYWH"
+    assert payload.coordinate_space == "NORMALIZED_FRAME"
     assert payload.tracks[0].detector_confirmed is False
     with patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock) as broadcast:
         result = asyncio.run(post_tracking_frame(
@@ -77,6 +79,8 @@ def test_tracking_frame_keeps_out_of_order_packet_for_replay_without_rebroadcast
         assert accepted == {"status": "ok"}
         assert delayed_result == {"status": "accepted_for_replay", "live_broadcast": False}
         assert {item["frame_index"] for item in _tracking_timelines[identity]} == {24, 27}
+        assert {item["bbox_format"] for item in _tracking_timelines[identity]} == {"XYWH"}
+        assert {item["coordinate_space"] for item in _tracking_timelines[identity]} == {"NORMALIZED_FRAME"}
         broadcast.assert_awaited_once()
     finally:
         _tracking_timelines.pop(identity, None)
