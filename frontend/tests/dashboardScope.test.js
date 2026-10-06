@@ -27,7 +27,15 @@ describe('completed Command Center data', () => {
   const sourceA = { sourceMode: 'durable', sourceId: 'stream-a', latestAnalysisSessionId: 'run-a', runState: 'COMPLETED', sourceName: 'vid 1.mp4' };
   const sourceB = { sourceMode: 'durable', sourceId: 'stream-b', latestAnalysisSessionId: 'run-b', runState: 'COMPLETED', sourceName: 'vid 2.mp4' };
   const summaryA = { camera_id: 'cam-border-01', stream_id: 'stream-a', analysis_session_id: 'run-a', final_frame_index: 90, final_video_time: 3, track_count: 4, person_count: 3, completed_at: 100 };
-  const summaryB = { camera_id: 'cam-checkpoint-01', stream_id: 'stream-b', analysis_session_id: 'run-b', final_frame_index: 50, track_count: 2, completed_at: 101 };
+  const summaryB = {
+    camera_id: 'cam-checkpoint-01', stream_id: 'stream-b', analysis_session_id: 'run-b',
+    final_frame_index: 50, person_count: 0, vehicle_count: 0, track_count: 0, completed_at: 101,
+    tracking_timeline_json: [
+      { person_count: 2, vehicle_count: 0, track_count: 2 },
+      { person_count: 3, vehicle_count: 1, track_count: 4 },
+      { person_count: 0, vehicle_count: 0, track_count: 0 },
+    ],
+  };
 
   it('restores final values after completion and prefers an exact displayed frame', () => {
     expect(completedRunMetrics('cam-border-01', sourceA, null, null, summaryA).sample).toBe(summaryA);
@@ -52,6 +60,7 @@ describe('completed Command Center data', () => {
     expect(comparison[0].events).toHaveLength(1);
     expect(comparison[0].eventTypes).toEqual(['LOITERING']);
     expect(comparison[1].events).toHaveLength(0);
+    expect(comparison[1].observedCounts).toEqual({ persons: 3, vehicles: 1, tracks: 4 });
     expect(uploadedRunComparison(['cam-border-01'], { 'cam-border-01': sourceA }, {}, { 'cam-border-01': { ...summaryA, stream_id: 'old-stream' } }, [])).toHaveLength(0);
   });
 });

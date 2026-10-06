@@ -311,10 +311,22 @@ export function uploadedRunComparison(cameraIds, sourceStates, telemetryByCamera
       || summary.camera_id !== cameraId || summary.stream_id !== source.sourceId
       || summary.analysis_session_id !== sessionId) return null;
     const runEvents = eventsForCameraRun(events, cameraId, sessionId, source.sourceId);
+    const timeline = Array.isArray(summary.tracking_timeline_json)
+      ? summary.tracking_timeline_json
+      : [];
+    const peak = field => timeline.reduce((maximum, sample) => {
+      const value = Number(sample?.[field]);
+      return Number.isFinite(value) ? Math.max(maximum, value) : maximum;
+    }, Number(summary[field]) || 0);
     return {
       cameraId,
       sourceName: source.sourceName || 'UPLOADED SOURCE',
       summary,
+      observedCounts: {
+        persons: peak('person_count'),
+        vehicles: peak('vehicle_count'),
+        tracks: peak('track_count'),
+      },
       events: runEvents,
       eventTypes: [...new Set(runEvents.map(event => event.event_type).filter(Boolean))],
     };

@@ -1602,11 +1602,11 @@ export default function Dashboard() {
               ) : uploadedComparison.length === 2 ? (
                 <div className="flex flex-col gap-2" aria-label="Uploaded run comparison">
                   <span className="text-sm font-display text-main">UPLOADED RUN COMPARISON</span>
-                  {uploadedComparison.map(({ cameraId, sourceName, summary, events: runEvents, eventTypes }) => (
+                  {uploadedComparison.map(({ cameraId, sourceName, summary, observedCounts, events: runEvents, eventTypes }) => (
                     <div key={cameraId} className="border rounded p-2" style={{ borderColor: 'var(--border-color)' }}>
                       <div className="font-display text-main text-xs">{cameraId} · {sourceName}</div>
                       <div className="text-xs text-muted">{summary.completed_at ? 'COMPLETED' : 'ANALYZING'} · SOURCE DURATION {Number.isFinite(summary.final_video_time) ? `${summary.final_video_time.toFixed(2)}s` : 'NOT REPORTED'}</div>
-                      <div className="text-xs text-muted">FINAL SAMPLE: PERSONS {summary.person_count ?? 'NOT REPORTED'} · VEHICLES {summary.vehicle_count ?? 'NOT REPORTED'} · TRACKS {summary.track_count ?? 'NOT REPORTED'} · EVENTS {runEvents.length}</div>
+                      <div className="text-xs text-muted">RUN PEAK: PERSONS {observedCounts.persons} · VEHICLES {observedCounts.vehicles} · TRACKS {observedCounts.tracks} · EVENTS {runEvents.length}</div>
                       <div className="text-xs text-muted">EVENT TYPES: {eventTypes.length ? eventTypes.join(', ') : 'NONE RECORDED'}</div>
                     </div>
                   ))}
