@@ -1562,40 +1562,47 @@ class EdgePipeline:
 
     def _publish_analysis_state(self, state: str) -> None:
         """Publish an explicit lifecycle state after all buffered frames finish."""
-        try:
-            processed_timestamp = time.time()
-            import httpx
-            verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
-            self._telemetry_sequence += 1
-            with httpx.Client(
-                timeout=3.0,
-                verify=verify,
-                cert=self.sync_client._client_cert,
-            ) as client:
-                response = client.post(
-                    f"{self._backend_url}/system/telemetry",
-                    json={
-                        "camera_id": self.camera_id,
-                        "timestamp": processed_timestamp,
-                        "video_time": self._last_video_time,
-                        "sequence": self._telemetry_sequence,
-                        "frame_index": self._last_processed_frame_index,
-                        "frame_width": self._last_frame_width,
-                        "frame_height": self._last_frame_height,
-                        "stream_id": self.source_stream_id,
-                        "analysis_session_id": self.stream_id,
-                        "analysis_generation": self.analysis_generation,
-                        "source_generation": self.source_generation,
-                        "processed_timestamp": processed_timestamp,
-                        "analysis_state": state,
-                        "tracks": [],
-                    },
-                    headers=self._edge_auth_headers(),
-                )
-            response.raise_for_status()
-            logger.info(f"[Pipeline] Analysis state published: {state}")
-        except Exception as exc:
-            logger.warning(f"[Pipeline] Failed to publish analysis state {state}: {exc}")
+        import httpx
+        processed_timestamp = time.time()
+        verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
+        payload = {
+            "camera_id": self.camera_id,
+            "timestamp": processed_timestamp,
+            "video_time": self._last_video_time,
+            "frame_index": self._last_processed_frame_index,
+            "frame_width": self._last_frame_width,
+            "frame_height": self._last_frame_height,
+            "stream_id": self.source_stream_id,
+            "analysis_session_id": self.stream_id,
+            "analysis_generation": self.analysis_generation,
+            "source_generation": self.source_generation,
+            "processed_timestamp": processed_timestamp,
+            "analysis_state": state,
+            "tracks": [],
+        }
+        for attempt in range(2):
+            try:
+                self._telemetry_sequence += 1
+                payload["sequence"] = self._telemetry_sequence
+                with httpx.Client(
+                    timeout=httpx.Timeout(connect=5.0, read=12.0, write=5.0, pool=5.0),
+                    verify=verify,
+                    cert=self.sync_client._client_cert,
+                ) as client:
+                    response = client.post(
+                        f"{self._backend_url}/system/telemetry",
+                        json=payload,
+                        headers=self._edge_auth_headers(),
+                    )
+                response.raise_for_status()
+                logger.info(f"[Pipeline] Analysis state published: {state}")
+                return
+            except Exception as exc:
+                if attempt == 0:
+                    logger.warning(f"[Pipeline] Analysis state publish retry for {state}: {exc}")
+                    time.sleep(0.5)
+                else:
+                    logger.warning(f"[Pipeline] Failed to publish analysis state {state}: {exc}")
 
     def _emit_event(self, track, reliability, health, condition, zone_id, overrides, frame) -> None:
         """Package and enqueue an event for sync."""
