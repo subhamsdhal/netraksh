@@ -459,7 +459,7 @@ class EdgePipeline:
                 # Keep the hosted transport below the backend's burst limit
                 # while leaving enough parallelism to carry the lightweight
                 # HUD samples at the required live cadence.
-                "16" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
+                "12" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
             )),
         )
         tracking_threads = []
@@ -487,13 +487,36 @@ class EdgePipeline:
             # and wait for any in-flight request before publishing the final
             # lifecycle record synchronously.
             if completed:
-                # The adapter has stopped producing by this point. Keep the
-                # workers alive until every accepted HUD/snapshot item has
-                # reached the backend, then publish COMPLETED.
+                # The adapter has stopped producing by this point. Let the
+                # lossy visualization workers drain briefly, but never allow
+                # a slow hosted HTTP request to prevent the terminal state
+                # from being published. Evidence/event queues retain their
+                # existing durable flush path below.
                 self._hud_frame_queue.join()
-                self.tracking_queue.join()
-                self.telemetry_queue.join()
-            self._running = False
+                self._running = False
+                for queue_name, queue, timeout_seconds in (
+                    ("tracking", self.tracking_queue, 8.0),
+                    ("telemetry", self.telemetry_queue, 12.0),
+                ):
+                    deadline = time.monotonic() + timeout_seconds
+                    while queue.unfinished_tasks and time.monotonic() < deadline:
+                        time.sleep(0.1)
+                    if queue.unfinished_tasks:
+                        abandoned = 0
+                        while True:
+                            try:
+                                queue.get_nowait()
+                                queue.task_done()
+                                abandoned += 1
+                            except Empty:
+                                break
+                        logger.warning(
+                            "[Pipeline] EOF %s drain timed out; discarded %d lossy item(s)",
+                            queue_name,
+                            abandoned,
+                        )
+            else:
+                self._running = False
             if not completed:
                 self._clear_live_queues()
             # A completed finite-file run must drain its exact HUD samples
