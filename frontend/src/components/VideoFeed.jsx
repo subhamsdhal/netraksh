@@ -271,7 +271,7 @@ export default function VideoFeed({
         ? completedSummaryLoading
           ? 'COMPLETED_REPLAY_LOADING'
           : replayAssessment.ready && trackingModeActive
-            ? 'COMPLETED_REPLAY_READY'
+            ? hudVisible ? 'COMPLETED_REPLAY_READY' : 'SOURCE_PREVIEW'
             : 'COMPLETED_REPLAY_UNAVAILABLE'
     : useTrackingTimeline && hudVisible
           ? 'ANALYZED_SYNC'
@@ -280,7 +280,7 @@ export default function VideoFeed({
             : 'SOURCE_PREVIEW';
   const viewBadge = {
     COMPLETED_REPLAY_LOADING: 'LOADING HUD',
-    COMPLETED_REPLAY_READY: 'ANALYZED REPLAY',
+    COMPLETED_REPLAY_READY: 'ANALYZED SYNC',
     COMPLETED_REPLAY_UNAVAILABLE: 'HUD UNAVAILABLE',
     ANALYZED_SYNC: 'ANALYZED SYNC',
     WAITING_FOR_FIRST_HUD_SAMPLE: 'WAITING FOR HUD',
@@ -670,8 +670,7 @@ export default function VideoFeed({
           setReplayPlaying(false);
           return;
         }
-        const sourceGap = next ? Math.max(0, Number(next.video_time) - target) : 0;
-        const delay = completedRun ? Math.min(400, Math.max(150, sourceGap * 400)) : 0;
+        const delay = completedRun ? 350 : 0;
         timer = setTimeout(() => {
           playbackCursorRef.current += 1;
           pump();
@@ -1225,7 +1224,7 @@ export default function VideoFeed({
               'rgba(239,68,68,0.85)',
           }}>
             {hudVisible
-              ? (completedRun ? 'CURRENT VIEW: ANALYZED REPLAY' : displayedSample ? 'CURRENT VIEW: ANALYZED SYNC' : 'CURRENT VIEW: AWAITING ANALYZED SAMPLE')
+              ? (completedRun || displayedSample ? 'CURRENT VIEW: ANALYZED SYNC' : 'CURRENT VIEW: AWAITING ANALYZED SAMPLE')
               : 'CURRENT VIEW: SOURCE PREVIEW'}
           </span>
         </div>

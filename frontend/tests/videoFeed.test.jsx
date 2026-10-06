@@ -220,7 +220,10 @@ describe('detection-synchronized analyzed playback', () => {
     await waitFor(() => expect(screen.getByTitle('View source preview')).toBeEnabled());
     fireEvent.click(screen.getByTitle('View source preview'));
     video.currentTime = 4.8;
+    expect(screen.getByTitle('View analyzed frames')).toHaveAttribute('data-view-state', 'SOURCE_PREVIEW');
     fireEvent.click(screen.getByTitle('View analyzed frames'));
+    expect(screen.getByTitle('View source preview')).toHaveAttribute('data-view-state', 'COMPLETED_REPLAY_READY');
+    expect(screen.getByText('CURRENT VIEW: ANALYZED SYNC')).toBeInTheDocument();
     await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({
       frame_index: 150, video_time: 5,
     })));
