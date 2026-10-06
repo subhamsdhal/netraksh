@@ -86,6 +86,42 @@ def test_s3_file_transfer_uses_multipart_upload_and_streaming_download(tmp_path)
     assert destination.read_bytes() == b"bounded-stream"
 
 
+def test_supabase_file_transfer_uses_explicit_bounded_multipart(tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"multipart-video")
+
+    class Client:
+        def __init__(self):
+            self.calls = []
+
+        def create_multipart_upload(self, **kwargs):
+            self.calls.append(("create", kwargs))
+            return {"UploadId": "upload-1"}
+
+        def upload_part(self, **kwargs):
+            self.calls.append(("part", kwargs))
+            assert isinstance(kwargs["Body"], bytes)
+            assert kwargs["ContentLength"] == len(kwargs["Body"])
+            return {"ETag": "etag-1"}
+
+        def complete_multipart_upload(self, **kwargs):
+            self.calls.append(("complete", kwargs))
+
+        def abort_multipart_upload(self, **kwargs):
+            pytest.fail("multipart upload should not be aborted")
+
+    storage = S3Storage.__new__(S3Storage)
+    storage.bucket = "private-test-bucket"
+    storage.s3 = Client()
+    storage._is_supabase_endpoint = True
+    storage._ClientError = RuntimeError
+    storage._S3UploadFailedError = RuntimeError
+
+    storage.put_file("video/original.mp4", str(source), "video/mp4")
+
+    assert [name for name, _ in storage.s3.calls] == ["create", "part", "complete"]
+
+
 def test_uploaded_video_state_uses_logical_object_keys(monkeypatch, tmp_path):
     storage = MemoryStorage()
     monkeypatch.setattr(video_storage, "get_evidence_storage", lambda: storage)

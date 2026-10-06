@@ -290,6 +290,7 @@ class S3Storage(EvidenceStorageBackend):
             )
         self._ClientError = _ClientError
         self._S3UploadFailedError = S3UploadFailedError
+        self._is_supabase_endpoint = bool(endpoint and ".supabase.co" in endpoint.lower())
         self.bucket = bucket
         self.s3 = boto3.client(
             's3',
@@ -306,7 +307,7 @@ class S3Storage(EvidenceStorageBackend):
                 s3={"addressing_style": "path"},
             ) if endpoint else None,
         )
-        if endpoint and ".supabase.co" in endpoint.lower():
+        if self._is_supabase_endpoint:
             # Supabase implements S3 multipart uploads, but deliberately does
             # not implement Content-MD5/checksum request headers. Botocore
             # injects Content-MD5 for streaming PutObject and UploadPart
@@ -349,14 +350,59 @@ class S3Storage(EvidenceStorageBackend):
 
     def put_file(self, object_key: str, file_path: str, content_type: str = "application/octet-stream") -> None:
         try:
-            # Large server-side uploads use the provider's supported multipart
-            # API so each bounded part can be retried independently.
-            self.s3.upload_file(
-                file_path,
-                self.bucket,
-                object_key,
-                ExtraArgs={"ContentType": content_type},
+            if not getattr(self, "_is_supabase_endpoint", False):
+                self.s3.upload_file(
+                    file_path,
+                    self.bucket,
+                    object_key,
+                    ExtraArgs={"ContentType": content_type},
+                )
+                return
+
+            # Supabase supports multipart uploads, but its S3 gateway rejects
+            # boto3's streamed UploadPart body. Send bounded bytes with an
+            # explicit length instead; one part is held at a time and each
+            # part remains independently retryable at the provider boundary.
+            part_size = 8 * 1024 * 1024
+            multipart = self.s3.create_multipart_upload(
+                Bucket=self.bucket,
+                Key=object_key,
+                ContentType=content_type,
             )
+            upload_id = multipart["UploadId"]
+            parts = []
+            try:
+                with open(file_path, "rb") as source:
+                    part_number = 1
+                    while True:
+                        body = source.read(part_size)
+                        if not body:
+                            break
+                        response = self.s3.upload_part(
+                            Bucket=self.bucket,
+                            Key=object_key,
+                            UploadId=upload_id,
+                            PartNumber=part_number,
+                            Body=body,
+                            ContentLength=len(body),
+                        )
+                        parts.append({"ETag": response["ETag"], "PartNumber": part_number})
+                        part_number += 1
+                if not parts:
+                    raise OSError("Cannot multipart-upload an empty file")
+                self.s3.complete_multipart_upload(
+                    Bucket=self.bucket,
+                    Key=object_key,
+                    UploadId=upload_id,
+                    MultipartUpload={"Parts": parts},
+                )
+            except Exception:
+                self.s3.abort_multipart_upload(
+                    Bucket=self.bucket,
+                    Key=object_key,
+                    UploadId=upload_id,
+                )
+                raise
         except (self._ClientError, self._S3UploadFailedError, OSError) as e:
             raise StorageUploadError(f"Failed to upload file to S3: {str(e)}")
 
