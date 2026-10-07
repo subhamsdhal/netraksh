@@ -131,6 +131,25 @@ def test_reanalyze_reuses_completed_source_creates_generation_and_audits(monkeyp
     assert "analysis_generation=5" in audits[0][1]["detail"]
 
 
+def test_reanalyze_camera_2_reuses_its_completed_source_without_upload(monkeypatch):
+    db, _camera, active, history, starts, audits, wakes = _setup(
+        monkeypatch, camera_id="cam-checkpoint-01"
+    )
+    payload = {**_payload(), "camera_id": "cam-checkpoint-01"}
+
+    result = asyncio.run(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
+
+    assert result["camera_id"] == "cam-checkpoint-01"
+    assert result["source_session_id"] == SOURCE_ID
+    assert result["analysis_generation"] == 5
+    assert result["analysis_state"] == "WAKING"
+    assert active["last_start_request_id"] == payload["request_id"]
+    assert starts == [payload["request_id"]]
+    assert wakes == ["cam-checkpoint-01"]
+    assert len(history) == 1
+    assert len(audits) == 1
+
+
 def test_same_reanalysis_request_is_idempotent_after_start(monkeypatch):
     db, _camera, _active, _history, starts, audits, wakes = _setup(monkeypatch)
     payload = _payload()

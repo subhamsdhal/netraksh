@@ -39,9 +39,15 @@ def test_constrained_camera1_defaults_to_higher_detection_resolution(mock_env):
 
     assert ONNXRuntimeCPU("dummy.onnx").input_size == 640
 
-def test_other_constrained_cameras_keep_resource_limited_resolution(mock_env):
+def test_constrained_camera2_uses_full_detection_resolution(mock_env):
     os.environ["EDGE_CONSTRAINED_CLOUD"] = "true"
     os.environ["CAMERA_ID"] = "cam-checkpoint-01"
+
+    assert ONNXRuntimeCPU("dummy.onnx").input_size == 640
+
+def test_other_constrained_cameras_keep_resource_limited_resolution(mock_env):
+    os.environ["EDGE_CONSTRAINED_CLOUD"] = "true"
+    os.environ["CAMERA_ID"] = "cam-other-01"
 
     assert ONNXRuntimeCPU("dummy.onnx").input_size == 320
 

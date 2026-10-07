@@ -326,7 +326,7 @@ export default function Dashboard() {
 
   const handleReanalyze = async (cameraId, sourceState) => {
     if (!canReanalyzeSource(cameraId, sourceState)) {
-      return { ok: false, error: 'REANALYZE REQUIRES A COMPLETED CAMERA 1 DURABLE SOURCE' };
+      return { ok: false, error: 'REANALYZE REQUIRES A COMPLETED DURABLE SOURCE' };
     }
     const requestKey = `${cameraId}:${sourceState.sourceId}`;
     if (reanalyzeRequestsRef.current.has(requestKey)) {
@@ -1395,7 +1395,7 @@ export default function Dashboard() {
           const analysisPresentation = mediaState.reanalyzeStartFailed
             ? { label: 'REANALYZE FAILED', badge: 'REANALYZE FAILED', tone: 'failed', retry: false }
             : baseAnalysisPresentation;
-          const showReanalyzeControl = cameraId === 'cam-border-01'
+          const showReanalyzeControl = ['cam-border-01', 'cam-checkpoint-01'].includes(cameraId)
             && sourceState?.sourceMode === 'durable'
             && (canReanalyzeSource(cameraId, sourceState) || reanalyzeInFlight || reanalysisActive || mediaState.reanalyzeStartFailed);
           const presentedSample = cameraId ? (presentedTelemetry[cameraId] || null) : null;

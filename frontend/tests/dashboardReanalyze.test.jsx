@@ -39,6 +39,7 @@ vi.mock('../src/components/VideoFeed', () => ({ default: () => null }));
 import Dashboard from '../src/pages/Dashboard';
 
 const sourceId = '22222222-2222-4222-8222-222222222222';
+const camera2SourceId = '44444444-4444-4444-8444-444444444444';
 const runId = '33333333-3333-4333-8333-333333333333';
 
 function response(body, ok = true) {
@@ -61,7 +62,7 @@ beforeEach(() => {
     if (path.startsWith('/api/dashboard/video/current?camera_id=cam-checkpoint-01')) {
       return response({
         available: true, source_mode: 'durable', camera_id: 'cam-checkpoint-01',
-        session_id: '44444444-4444-4444-8444-444444444444', source_name: 'vid 2.mp4',
+        session_id: camera2SourceId, source_name: 'vid 2.mp4',
         analysis_state: 'COMPLETED', analysis_generation: 3, source_generation: 1,
         scenario: 'paused', latest_analysis_session_id: null, preview_url: null,
       });
@@ -71,11 +72,12 @@ beforeEach(() => {
     if (path.startsWith('/api/nodes/health')) return response([]);
     if (path.startsWith('/system/analysis-runs/')) return response({}, false);
     if (path.startsWith('/api/dashboard/video/reanalyze')) {
+      const payload = JSON.parse(options.body);
       return response({
-        status: 'success', camera_id: 'cam-border-01', source_mode: 'durable',
-        source_session_id: sourceId, analysis_generation: 5, analysis_state: 'WAKING',
+        status: 'success', camera_id: payload.camera_id, source_mode: 'durable',
+        source_session_id: payload.video_session_id, analysis_generation: 5, analysis_state: 'WAKING',
         analysis_session_id: null, scenario: 'normal', edge_status: 'waking',
-        request_id: JSON.parse(options.body).request_id, idempotent_replay: false,
+        request_id: payload.request_id, idempotent_replay: false,
       });
     }
     return response({});
@@ -93,10 +95,11 @@ describe('Command Center restored-source reanalysis', () => {
     const user = userEvent.setup();
     render(<Dashboard />);
 
-    const reanalyze = await screen.findByRole('button', { name: 'REANALYZE' });
+    await screen.findAllByRole('button', { name: 'REANALYZE' });
+    const reanalyze = document.querySelector('[data-action="reanalyze-existing-source"][data-camera-id="cam-border-01"]');
     expect(screen.getByText('SOURCE: vid 1.mp4')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'REANALYZE', exact: true })).toBe(reanalyze);
-    expect(document.querySelector('[data-action="reanalyze-existing-source"][data-camera-id="cam-checkpoint-01"]')).toBeNull();
+    expect(reanalyze).toHaveTextContent('REANALYZE');
+    expect(document.querySelector('[data-action="reanalyze-existing-source"][data-camera-id="cam-checkpoint-01"]')).toHaveTextContent('REANALYZE');
     expect(mocks.authFetch.mock.calls.some(([path]) => path === '/api/dashboard/video/reanalyze')).toBe(false);
     expect(mocks.authFetch.mock.calls.some(([path, options]) => path === '/api/dashboard/video/scenario' && options?.method === 'POST')).toBe(false);
 
@@ -108,8 +111,26 @@ describe('Command Center restored-source reanalysis', () => {
     expect(payload.video_session_id).toBe(sourceId);
     expect(payload.request_id).toMatch(/^[0-9a-f-]{36}$/i);
     expect(payload).not.toHaveProperty('file');
-    expect(await screen.findByRole('button', { name: 'ANALYZING…' })).toBeDisabled();
+    await waitFor(() => expect(reanalyze).toHaveTextContent('ANALYZING…'));
+    expect(reanalyze).toBeDisabled();
     expect(mocks.authFetch.mock.calls.filter(([path]) => path === '/api/dashboard/video/reanalyze')).toHaveLength(1);
+  });
+
+  it('reanalyzes Camera 2 only after an explicit click on its completed source', async () => {
+    const user = userEvent.setup();
+    render(<Dashboard />);
+    await screen.findAllByRole('button', { name: 'REANALYZE' });
+    expect(mocks.authFetch.mock.calls.some(([path]) => path === '/api/dashboard/video/reanalyze')).toBe(false);
+
+    const camera2Reanalyze = document.querySelector('[data-action="reanalyze-existing-source"][data-camera-id="cam-checkpoint-01"]');
+    await user.click(camera2Reanalyze);
+
+    await waitFor(() => expect(mocks.authFetch.mock.calls.filter(([path]) => path === '/api/dashboard/video/reanalyze')).toHaveLength(1));
+    const [, options] = mocks.authFetch.mock.calls.find(([path]) => path === '/api/dashboard/video/reanalyze');
+    expect(JSON.parse(options.body)).toMatchObject({ camera_id: 'cam-checkpoint-01', video_session_id: camera2SourceId });
+    expect(camera2Reanalyze).toHaveTextContent('ANALYZING…');
+    expect(camera2Reanalyze).toBeDisabled();
+    expect(document.querySelector('[data-action="reanalyze-existing-source"][data-camera-id="cam-border-01"]')).toHaveTextContent('REANALYZE');
   });
 
   it('reports a failed start and retries the same idempotency request', async () => {
@@ -128,7 +149,9 @@ describe('Command Center restored-source reanalysis', () => {
       return originalFetch(path, options);
     });
 
-    await user.click(await screen.findByRole('button', { name: 'REANALYZE' }));
+    await screen.findAllByRole('button', { name: 'REANALYZE' });
+    const camera1Reanalyze = document.querySelector('[data-action="reanalyze-existing-source"][data-camera-id="cam-border-01"]');
+    await user.click(camera1Reanalyze);
     const retry = await screen.findByRole('button', { name: 'RETRY REANALYZE' });
     expect(screen.getAllByText('REANALYZE FAILED')).toHaveLength(2);
     await user.click(retry);

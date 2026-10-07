@@ -166,9 +166,11 @@ class BaseONNXRuntime(DetectorRuntime):
         self.providers = providers
         self.session = None
         constrained_cloud = os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true"
+        # Camera 2's distant people are lost at 320px before tracking; retain
+        # the full detector input for both accepted camera sources.
         default_input_size = (
             "640"
-            if not constrained_cloud or os.environ.get("CAMERA_ID") == "cam-border-01"
+            if not constrained_cloud or os.environ.get("CAMERA_ID") in {"cam-border-01", "cam-checkpoint-01"}
             else "320"
         )
         self.input_size = max(160, int(os.environ.get(

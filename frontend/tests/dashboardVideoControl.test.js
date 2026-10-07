@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, canReanalyzeSource, claimUploadAutoStart, durableHeartbeat, fetchWithTimeout, lifecycleAction, reanalyzeRequestPayload, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
 
 describe('dashboard video control ownership', () => {
-  it('offers reanalysis only for a completed durable Camera 1 source', () => {
+  it('offers reanalysis for either completed durable camera source', () => {
     const completed = { sourceMode: 'durable', sourceId: 'stored-camera-1-video', analysisState: 'COMPLETED' };
     expect(canReanalyzeSource('cam-border-01', completed)).toBe(true);
     expect(reanalyzeRequestPayload('cam-border-01', completed, 'request-1')).toEqual({
@@ -11,7 +11,13 @@ describe('dashboard video control ownership', () => {
       request_id: 'request-1',
     });
     expect(reanalyzeRequestPayload('cam-border-01', completed, 'request-1')).not.toHaveProperty('file');
-    expect(canReanalyzeSource('cam-checkpoint-01', completed)).toBe(false);
+    expect(canReanalyzeSource('cam-checkpoint-01', completed)).toBe(true);
+    expect(reanalyzeRequestPayload('cam-checkpoint-01', completed, 'request-2')).toEqual({
+      camera_id: 'cam-checkpoint-01',
+      video_session_id: 'stored-camera-1-video',
+      request_id: 'request-2',
+    });
+    expect(canReanalyzeSource('cam-unknown-01', completed)).toBe(false);
     expect(canReanalyzeSource('cam-border-01', { ...completed, analysisState: 'ACTIVE' })).toBe(false);
     expect(canReanalyzeSource('cam-border-01', { ...completed, sourceMode: 'bundled' })).toBe(false);
     expect(canReanalyzeSource('cam-border-01', { ...completed, sourceId: null })).toBe(false);

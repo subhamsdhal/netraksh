@@ -131,7 +131,7 @@ export function analysisLifecyclePresentation(sourceState, mediaState = {}, cont
 }
 
 export function canReanalyzeSource(cameraId, sourceState) {
-  return cameraId === 'cam-border-01'
+  return ['cam-border-01', 'cam-checkpoint-01'].includes(cameraId)
     && sourceState?.sourceMode === 'durable'
     && Boolean(sourceState.sourceId)
     && String(sourceState.analysisState || sourceState.runState || '').toUpperCase() === 'COMPLETED';
