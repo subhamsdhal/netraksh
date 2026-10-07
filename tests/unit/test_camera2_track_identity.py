@@ -88,6 +88,38 @@ def test_camera1_two_same_packet_id_changes_keep_separate_people():
     assert [track.track_id for track in incoming] == [1, 2]
 
 
+def test_camera1_stored_source_accepts_motion_match_below_default_histogram_threshold(monkeypatch):
+    pipeline, frame = _pipeline(camera_id="cam-border-01")
+    incoming = SimpleNamespace(
+        track_id=9,
+        bbox=BoundingBox(x1=470, y1=240, x2=515, y2=380),
+        trajectory=[pipeline._trajectories[2][0]],
+    )
+    monkeypatch.setattr(pipeline.continuity_guard, "_similarity", lambda *_: 0.55)
+
+    pipeline._prime_stored_lost_tracks([incoming])
+    pipeline._apply_continuity_guard([incoming], frame)
+
+    assert incoming.track_id == 2
+    assert pipeline._track_id_map[9] == 2
+
+
+def test_camera2_keeps_default_histogram_threshold(monkeypatch):
+    pipeline, frame = _pipeline(camera_id="cam-checkpoint-01")
+    incoming = SimpleNamespace(
+        track_id=9,
+        bbox=BoundingBox(x1=470, y1=240, x2=515, y2=380),
+        trajectory=[pipeline._trajectories[2][0]],
+    )
+    monkeypatch.setattr(pipeline.continuity_guard, "_similarity", lambda *_: 0.55)
+
+    pipeline._prime_stored_lost_tracks([incoming])
+    pipeline._apply_continuity_guard([incoming], frame)
+
+    assert incoming.track_id == 9
+    assert 9 not in pipeline._track_id_map
+
+
 def test_camera1_unstored_source_keeps_previous_continuity_order():
     pipeline, frame = _pipeline(camera_id="cam-border-01")
     pipeline.adapter.preserve_finite_frames = False

@@ -1177,7 +1177,23 @@ class EdgePipeline:
                 continue
 
             histogram = compute_track_histogram(frame, track.bbox)
-            match = self.continuity_guard.resolve_new_track(histogram, track.bbox.centroid, now)
+            adapter = getattr(self, "adapter", None)
+            stored_camera1 = (
+                getattr(self, "camera_id", None) == "cam-border-01"
+                and getattr(adapter, "source_kind", None) == "LOCAL_FINITE_FILE"
+                and bool(getattr(adapter, "preserve_finite_frames", False))
+            )
+            match = self.continuity_guard.resolve_new_track(
+                histogram,
+                track.bbox.centroid,
+                now,
+                # Camera 1's wide scene changes a person's crop substantially
+                # during ordinary lateral motion.  Keep this relaxation local
+                # to restored Camera 1 files and pair it with a tighter spatial
+                # bound so Camera 2 and live-source behavior remain unchanged.
+                histogram_similarity_threshold=0.50 if stored_camera1 else None,
+                max_centroid_distance=100.0 if stored_camera1 else None,
+            )
             if match is not None:
                 matched_id, matched_trajectory = match
                 logger.info(
