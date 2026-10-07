@@ -211,6 +211,9 @@ class EdgePipeline:
         # dropped by its bounded queue. Completion must report the last frame
         # that this pipeline actually processed instead.
         self._last_processed_frame_index: Optional[int] = None
+        # Retain only the actual final decoded image of a Camera 2 durable
+        # finite source. EOF needs one last image-grounded detector anchor.
+        self._last_finite_detector_frame = None
         self._last_frame_width = None
         self._last_frame_height = None
         # We need a small bounded queue so if the backend goes down or network
@@ -512,6 +515,7 @@ class EdgePipeline:
             # and wait for any in-flight request before publishing the final
             # lifecycle record synchronously.
             if completed:
+                self._flush_finite_detector_at_eof()
                 # The adapter has stopped producing by this point. Let the
                 # lossy visualization workers drain briefly, but never allow
                 # a slow hosted HTTP request to prevent the terminal state
@@ -572,6 +576,62 @@ class EdgePipeline:
             self.adapter.stop()
             self.adapter.join()
             self.detector_worker.stop()
+
+    def _flush_finite_detector_at_eof(self) -> None:
+        """Finish Camera 2's real final frame before freezing its replay timeline.
+
+        A slow hosted detector can still be working when the decoder reaches
+        EOF. Without this flush the completed timeline ends at the previous
+        keyframe, even though the terminal summary reports the last image.
+        Never synthesize a box or extend a previous box into unseen frames.
+        """
+        final = self._last_finite_detector_frame
+        if final is None or self.camera_id != "cam-checkpoint-01":
+            return
+        frame, meta, health, condition = final
+
+        def receive(deadline_seconds: float):
+            deadline = time.monotonic() + deadline_seconds
+            while self.detector_worker.busy and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if self.detector_worker.busy:
+                logger.warning("[Pipeline] EOF detector timed out; replay coverage remains incomplete")
+                return False
+            packet = self.detector_worker.poll_latest()
+            if packet is not None:
+                if packet.error is not None:
+                    logger.warning("[Pipeline] EOF detector failed; replay coverage remains incomplete")
+                    return False
+                if (self._last_detector_frame_index is None
+                        or packet.job.frame_index > self._last_detector_frame_index):
+                    tracks = self._apply_continuity_guard(packet.tracks, packet.job.frame)
+                    self._emit_detector_sample(packet, tracks)
+                    self._last_detector_frame_index = packet.job.frame_index
+            return True
+
+        if not receive(20.0):
+            return
+        if self._last_detector_frame_index == int(meta.frame_index):
+            return
+        policy = self.condition_router.route(condition.condition)
+        detection_frame = enhance_for_detection(frame, policy)
+        enhanced = detection_frame is not frame
+        source_copy = frame.copy()
+        job = DetectorJob(
+            frame=source_copy,
+            detector_frame=detection_frame.copy() if enhanced else source_copy,
+            frame_index=int(meta.frame_index),
+            meta=meta,
+            health=health,
+            condition=condition,
+            confidence_threshold=self.calibration.get_threshold(condition.condition),
+            enhancement_applied=enhanced,
+            submitted_at=time.time(),
+        )
+        if not self.detector_worker.submit(job) or not receive(20.0):
+            logger.warning("[Pipeline] EOF final image detection unavailable")
+            return
+        logger.info("[Pipeline] EOF final detector frame=%d emitted", meta.frame_index)
 
     def _clear_live_queues(self) -> None:
         """Discard lossy live packets before a replay/terminal transition."""
@@ -1006,6 +1066,7 @@ class EdgePipeline:
         self._last_hud_video_time = None
         self._last_detector_frame_index = None
         self._last_processed_frame_index = None
+        self._last_finite_detector_frame = None
         with self._hud_state_lock:
             self._hud_anchor = None
             self._hud_anchor_frame_index = None
@@ -1131,6 +1192,10 @@ class EdgePipeline:
         ):
             self._last_condition = self.condition_classifier.classify(frame)
         condition = self._last_condition
+        if (self.camera_id == "cam-checkpoint-01"
+                and self.adapter.source_kind == "LOCAL_FINITE_FILE"
+                and self.adapter.preserve_finite_frames):
+            self._last_finite_detector_frame = (frame, meta, health, condition)
 
         t_health_condition = time.perf_counter()
 
