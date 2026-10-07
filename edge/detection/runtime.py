@@ -177,6 +177,7 @@ class BaseONNXRuntime(DetectorRuntime):
             "DETECTOR_INPUT_SIZE",
             default_input_size,
         )))
+        self.last_max_person_confidence = 0.0
 
     def load(self) -> None:
         if not os.path.exists(self.model_path):
@@ -296,6 +297,9 @@ class BaseONNXRuntime(DetectorRuntime):
         # valid person/vehicle because an unsupported class happened to win.
         supported_ids = np.asarray(sorted(_YOLO_CLASS_MAP), dtype=np.int64)
         supported_scores = preds[:, 4:][:, supported_ids]
+        # Numeric diagnostic only: when a visible person vanishes before NMS,
+        # distinguish a true model miss from a confidence-filter rejection.
+        self.last_max_person_confidence = float(np.max(preds[:, 4])) if len(preds) else 0.0
         self.last_candidate_count = int(len(supported_scores))
         supported_argmax = np.argmax(supported_scores, axis=1)
         class_ids = supported_ids[supported_argmax]

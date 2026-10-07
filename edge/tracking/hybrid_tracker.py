@@ -133,7 +133,7 @@ class AsyncDetectorWorker:
             logger.info(
                 "[Detector Trace] frame=%d shape=%sx%s condition=%s threshold=%.3f "
                 "input=%s candidates=%d threshold_pass=%d nms=%d raw=%d tracks=%d "
-                "tracker_output=%d error=%s",
+                "tracker_output=%d max_person_confidence=%.3f error=%s",
                 job.frame_index,
                 job.detector_frame.shape[1] if getattr(job.detector_frame, "shape", None) else "?",
                 job.detector_frame.shape[0] if getattr(job.detector_frame, "shape", None) else "?",
@@ -146,6 +146,7 @@ class AsyncDetectorWorker:
                 len(getattr(self.detector, "last_raw_detections", [])),
                 len(tracks),
                 getattr(self.detector, "last_tracker_output_count", 0),
+                getattr(runtime, "last_max_person_confidence", 0.0),
                 error or "none",
             )
             elapsed_ms = (time.perf_counter() - started) * 1000.0
