@@ -413,7 +413,12 @@ class CameraAdapter:
                 self._set_state(StreamState.RECONNECTING)
                 
             # Stall detection
-            if self.state == StreamState.CONNECTED and first_frame_received:
+            # A finite-file producer can spend longer than the stall timeout
+            # waiting for its consumer. That is backpressure, not a decoder
+            # stall; the cap.read() duration check above still catches a
+            # genuinely blocked decoder.
+            if (self.state == StreamState.CONNECTED and first_frame_received
+                    and not (is_video_file and self.preserve_finite_frames)):
                 if time.time() - self.last_frame_time > self._stall_timeout:
                     logger.warning("[Adapter] Frame stall detected.")
                     self._set_state(StreamState.STALLING)

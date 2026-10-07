@@ -620,7 +620,7 @@ class EdgePipeline:
                     return False
                 if (self._last_detector_frame_index is None
                         or packet.job.frame_index > self._last_detector_frame_index):
-                    self._prime_camera2_lost_tracks(packet.tracks)
+                    self._prime_stored_lost_tracks(packet.tracks)
                     tracks = self._apply_continuity_guard(packet.tracks, packet.job.frame)
                     self._emit_detector_sample(packet, tracks)
                     self._last_detector_frame_index = packet.job.frame_index
@@ -1128,14 +1128,14 @@ class EdgePipeline:
         except Exception as exc:
             logger.debug(f"[Health] Periodic health report failed (non-fatal): {exc}")
 
-    def _prime_camera2_lost_tracks(self, incoming_tracks: List) -> None:
-        """Make same-packet losses available to Camera 2 re-identification.
+    def _prime_stored_lost_tracks(self, incoming_tracks: List) -> None:
+        """Make same-packet losses available to stored-camera re-identification.
 
         ByteTrack may assign a new native ID after a pose change. Previously
         the guard checked that new ID before the old track was remembered,
         making an otherwise strong spatial/appearance match impossible.
         """
-        if (self.camera_id != "cam-checkpoint-01"
+        if (self.camera_id not in {"cam-border-01", "cam-checkpoint-01"}
                 or self.adapter.source_kind != "LOCAL_FINITE_FILE"
                 or not self.adapter.preserve_finite_frames):
             return
@@ -1287,7 +1287,7 @@ class EdgePipeline:
         detector_tracks = None
         if detector_packet is not None:
             if detector_packet.error is None:
-                self._prime_camera2_lost_tracks(detector_packet.tracks)
+                self._prime_stored_lost_tracks(detector_packet.tracks)
                 detector_tracks = self._apply_continuity_guard(
                     detector_packet.tracks, detector_packet.job.frame,
                 )
