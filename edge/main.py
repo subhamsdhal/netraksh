@@ -88,6 +88,11 @@ def hud_sample_is_due(last_video_time: Optional[float], current_video_time: floa
     return (current_video_time - last_video_time) >= interval
 
 
+def preserve_stored_file_frames(camera_id: str, source_stream_id: object) -> bool:
+    """Keep every decoded frame for a one-shot stored Camera 1/2 source."""
+    return camera_id in {"cam-border-01", "cam-checkpoint-01"} and bool(source_stream_id)
+
+
 def should_capture_abstain_snapshot(last_snapshot_time: float, now: float) -> bool:
     """
     Tiered evidence capture by condition quality (shared/constants.py's
@@ -197,7 +202,7 @@ class EdgePipeline:
             simulate_frozen=config.get("simulate_frozen", False),
             simulate_night=config.get("simulate_night", False),
             loop_video=config.get("loop_video", os.environ.get("DEMO_LOOP_VIDEO", "false").lower() == "true"),
-            preserve_finite_frames=self.camera_id == "cam-checkpoint-01" and bool(config.get("source_stream_id")),
+            preserve_finite_frames=preserve_stored_file_frames(self.camera_id, config.get("source_stream_id")),
         )
         self.adapter.set_frame_tap(self._capture_hud_frame)
 

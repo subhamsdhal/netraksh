@@ -245,9 +245,9 @@ def _control_seek_target(
     return target
 
 
-def _camera2_durable_source_clock(camera_id: str, source_session_id: object) -> bool:
-    """Keep Camera 2's stored one-shot source on its decoder's media clock."""
-    return camera_id == "cam-checkpoint-01" and bool(source_session_id)
+def _stored_file_source_clock(camera_id: str, source_session_id: object) -> bool:
+    """Keep stored Camera 1/2 analyses on the decoder's media clock."""
+    return camera_id in {"cam-border-01", "cam-checkpoint-01"} and bool(source_session_id)
 
 
 def _apply_control_sync(data: dict) -> bool:
@@ -514,12 +514,12 @@ class DemoAwareEdgePipeline(EdgePipeline):
         scenario = _scenario["current"]
 
         # -------------------------------------------------------------
-        # SYNCHRONIZATION FIX:
-        # Override OpenCV's internal video_time with the authoritative
-        # extrapolated browser clock so that telemetry payloads match exactly.
+        # A restored, one-shot source uses the decoder's media time. Browser
+        # preview position is not an analysis clock; applying it here can
+        # stamp frame N with the time of a different frame.
         # -------------------------------------------------------------
         if (os.environ.get("DEMO_LOOP_VIDEO", "true").lower() != "true"
-                and not _camera2_durable_source_clock(self.camera_id, self.config.get("source_stream_id"))):
+                and not _stored_file_source_clock(self.camera_id, self.config.get("source_stream_id"))):
             browser_time = _scenario.get("video_time", 0.0)
             browser_updated = _scenario.get("video_time_updated_at", time.time())
             if scenario == "paused":
@@ -603,7 +603,7 @@ class DemoAwareEdgePipeline(EdgePipeline):
                     continue
 
                 # Check for explicit seek requests
-                if _camera2_durable_source_clock(self.camera_id, self.config.get("source_stream_id")):
+                if _stored_file_source_clock(self.camera_id, self.config.get("source_stream_id")):
                     # Browser preview position is not an analysis seek command.
                     # Replaying a completed source is handled by a new run.
                     time.sleep(1.0)
