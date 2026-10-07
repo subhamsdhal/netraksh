@@ -24,7 +24,7 @@ from backend.config import settings
 from backend.database.session import get_db
 from backend.models.orm import (
     Alert, Camera, Event, PipelineMetricsSnapshot, SyncQueue, AuditLog,
-    CameraHealth, AnalysisTelemetrySnapshot, AnalysisRunSummary,
+    CameraHealth, AnalysisTelemetrySnapshot, AnalysisRunSummary, AnalysisTrackingSample,
 )
 from backend.security.auth import require_edge_auth
 from backend.security.auth import require_any_role
@@ -89,6 +89,29 @@ def _compact_tracking_sample(payload: TrackingFramePayload, received_at: float) 
         "detector_frame_index": payload.detector_frame_index,
         "tracks": [track.model_dump() for track in payload.tracks],
     }
+
+
+def _durable_tracking_timeline(
+    db: Session,
+    identity: tuple[str, str, str, int],
+) -> list[dict[str, Any]]:
+    camera_id, stream_id, analysis_session_id, analysis_generation = identity
+    records = (
+        db.query(AnalysisTrackingSample)
+        .filter(
+            AnalysisTrackingSample.camera_id == camera_id,
+            AnalysisTrackingSample.stream_id == stream_id,
+            AnalysisTrackingSample.analysis_session_id == analysis_session_id,
+            AnalysisTrackingSample.analysis_generation == analysis_generation,
+        )
+        .order_by(
+            AnalysisTrackingSample.video_time,
+            AnalysisTrackingSample.sequence,
+            AnalysisTrackingSample.frame_index,
+        )
+        .all()
+    )
+    return [dict(record.sample_json or {}) for record in records]
 
 
 @router.get("/metrics")
@@ -423,10 +446,17 @@ def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[
     if str(payload.analysis_state or "").upper() == "COMPLETED":
         summary.completed_at = observed_at
         identity = _tracking_identity(payload)
-        timeline = sorted(
-            list(_tracking_timelines.get(identity, [])) if identity else [],
-            key=lambda item: (float(item.get("video_time") or 0), int(item.get("sequence") or 0)),
-        )
+        durable = _durable_tracking_timeline(db, identity) if identity else []
+        memory = list(_tracking_timelines.get(identity, [])) if identity else []
+        samples_by_key = {
+            (int(item.get("sequence") or 0), int(item.get("frame_index") or 0)): item
+            for item in (*durable, *memory)
+        }
+        timeline = sorted(samples_by_key.values(), key=lambda item: (
+            float(item.get("video_time") or 0),
+            int(item.get("sequence") or 0),
+            int(item.get("frame_index") or 0),
+        ))
         summary.tracking_timeline_json = timeline
         summary.tracking_sample_count = len(timeline)
         if len(timeline) > 1:
@@ -671,18 +701,36 @@ async def post_telemetry(
 async def post_tracking_frame(
     payload: TrackingFramePayload,
     edge_identity=Depends(require_edge_auth),
+    db: Session = Depends(get_db),
 ):
-    """Broadcast one lossy live-HUD sample without a database write.
+    """Durably checkpoint and broadcast one live-HUD sample.
 
-    This endpoint is deliberately separate from event/evidence ingestion and
-    the durable latest telemetry snapshot.  Slow consumers receive only the
-    newest frame through the existing bounded WebSocket batcher.
+    Slow consumers receive only the newest frame through the existing bounded
+    WebSocket batcher. Each compact sample is also written independently so a
+    backend restart cannot erase the beginning of a completed replay.
     """
     if edge_identity and edge_identity.edge_id != payload.camera_id:
         raise HTTPException(status_code=403, detail="Authenticated edge identity does not match camera_id")
     received_at = __import__("time").time()
     identity = _tracking_identity(payload)
     if identity is not None:
+        compact_sample = _compact_tracking_sample(payload, received_at)
+        persisted = db.get(
+            AnalysisTrackingSample,
+            (payload.analysis_session_id, int(payload.sequence), int(payload.frame_index)),
+        )
+        if persisted is None:
+            db.add(AnalysisTrackingSample(
+                analysis_session_id=payload.analysis_session_id,
+                sequence=int(payload.sequence),
+                frame_index=int(payload.frame_index),
+                camera_id=payload.camera_id,
+                stream_id=payload.stream_id,
+                analysis_generation=int(payload.analysis_generation),
+                video_time=payload.video_time,
+                sample_json=compact_sample,
+            ))
+            db.commit()
         timeline = _tracking_timelines.setdefault(identity, [])
         # Multiple transport workers can complete HTTPS requests out of order.
         # Preserve every unique source frame for durable replay even when it is
@@ -692,7 +740,7 @@ async def post_tracking_frame(
             and int(item.get("frame_index") or -1) == int(payload.frame_index)
             for item in timeline
         ):
-            timeline.append(_compact_tracking_sample(payload, received_at))
+            timeline.append(compact_sample)
         if len(timeline) > _MAX_TRACKING_SAMPLES_PER_RUN:
             del timeline[:-_MAX_TRACKING_SAMPLES_PER_RUN]
         # Keep at most four completed/in-flight run buffers per camera.

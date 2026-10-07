@@ -4,9 +4,18 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from backend.api.system import _latest_tracking_sequence, _tracking_timelines, post_tracking_frame
+from backend.models.orm import AnalysisRunSummary, AnalysisTrackingSample, Base
 from shared.schemas import TrackingFramePayload
+
+
+def _session():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine)()
 
 
 def _payload():
@@ -34,8 +43,9 @@ def _payload():
     )
 
 
-def test_tracking_frame_is_visualization_only_and_broadcast_without_database_write():
+def test_tracking_frame_is_visualization_only_and_durably_checkpointed():
     payload = _payload()
+    db = _session()
     _latest_tracking_sequence.clear()
     assert payload.visualization_only is True
     assert payload.bbox_format == "XYWH"
@@ -45,9 +55,13 @@ def test_tracking_frame_is_visualization_only_and_broadcast_without_database_wri
         result = asyncio.run(post_tracking_frame(
             payload,
             SimpleNamespace(edge_id="cam-checkpoint-01"),
+            db,
         ))
     assert result == {"status": "ok"}
     broadcast.assert_awaited_once()
+    stored = db.get(AnalysisTrackingSample, ("run-1", 4, 12))
+    assert stored is not None
+    assert stored.sample_json["frame_index"] == 12
 
 
 def test_tracking_frame_rejects_a_different_authenticated_edge_identity():
@@ -56,6 +70,7 @@ def test_tracking_frame_rejects_a_different_authenticated_edge_identity():
         asyncio.run(post_tracking_frame(
             _payload(),
             SimpleNamespace(edge_id="cam-border-01"),
+            _session(),
         ))
     assert exc_info.value.status_code == 403
 
@@ -67,13 +82,14 @@ def test_tracking_frame_keeps_out_of_order_packet_for_replay_without_rebroadcast
 
     identity = ("cam-checkpoint-01", "source-1", "run-1", 2)
     _tracking_timelines.pop(identity, None)
+    db = _session()
     try:
         with patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock) as broadcast:
             accepted = asyncio.run(post_tracking_frame(
-                newest, SimpleNamespace(edge_id="cam-checkpoint-01")
+                newest, SimpleNamespace(edge_id="cam-checkpoint-01"), db
             ))
             delayed_result = asyncio.run(post_tracking_frame(
-                delayed, SimpleNamespace(edge_id="cam-checkpoint-01")
+                delayed, SimpleNamespace(edge_id="cam-checkpoint-01"), db
             ))
 
         assert accepted == {"status": "ok"}
@@ -81,6 +97,7 @@ def test_tracking_frame_keeps_out_of_order_packet_for_replay_without_rebroadcast
         assert {item["frame_index"] for item in _tracking_timelines[identity]} == {24, 27}
         assert {item["bbox_format"] for item in _tracking_timelines[identity]} == {"XYWH"}
         assert {item["coordinate_space"] for item in _tracking_timelines[identity]} == {"NORMALIZED_FRAME"}
+        assert db.query(AnalysisTrackingSample).count() == 2
         broadcast.assert_awaited_once()
     finally:
         _tracking_timelines.pop(identity, None)
@@ -93,10 +110,11 @@ def test_tracking_frame_accepts_sequence_reset_for_new_run():
         "analysis_session_id": "run-2",
     })
     _latest_tracking_sequence.clear()
+    db = _session()
 
     with patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock) as broadcast:
-        asyncio.run(post_tracking_frame(previous, SimpleNamespace(edge_id="cam-checkpoint-01")))
-        result = asyncio.run(post_tracking_frame(next_run, SimpleNamespace(edge_id="cam-checkpoint-01")))
+        asyncio.run(post_tracking_frame(previous, SimpleNamespace(edge_id="cam-checkpoint-01"), db))
+        result = asyncio.run(post_tracking_frame(next_run, SimpleNamespace(edge_id="cam-checkpoint-01"), db))
 
     assert result == {"status": "ok"}
     assert broadcast.await_count == 2
@@ -110,8 +128,31 @@ def test_tracking_frame_accepts_empty_image_grounded_sample_to_clear_stale_boxes
         result = asyncio.run(post_tracking_frame(
             payload,
             SimpleNamespace(edge_id="cam-checkpoint-01"),
+            _session(),
         ))
 
     assert result == {"status": "ok"}
     broadcast.assert_awaited_once()
     assert broadcast.await_args.args[0]["tracks"] == []
+
+
+def test_completion_uses_durable_samples_after_memory_loss():
+    from backend.api.system import _record_run_summary
+
+    db = _session()
+    payload = _payload()
+    asyncio.run(post_tracking_frame(payload, SimpleNamespace(edge_id="cam-checkpoint-01"), db))
+    identity = ("cam-checkpoint-01", "source-1", "run-1", 2)
+    _tracking_timelines.pop(identity, None)
+
+    from shared.schemas import LiveTelemetryPayload
+    completion = LiveTelemetryPayload(**{
+        **payload.model_dump(),
+        "analysis_state": "COMPLETED",
+    })
+    _record_run_summary(db, completion)
+    db.commit()
+
+    summary = db.get(AnalysisRunSummary, "run-1")
+    assert summary.tracking_sample_count == 1
+    assert summary.tracking_timeline_json[0]["frame_index"] == 12

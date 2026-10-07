@@ -536,6 +536,29 @@ class AnalysisRunSummary(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class AnalysisTrackingSample(Base):
+    """Durable analyzed-HUD sample retained across backend restarts."""
+    __tablename__ = "analysis_tracking_samples"
+    __table_args__ = (
+        Index(
+            "ix_analysis_tracking_sample_run_time",
+            "analysis_session_id",
+            "video_time",
+            "sequence",
+        ),
+    )
+
+    analysis_session_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True)
+    frame_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    camera_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    stream_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    analysis_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    video_time: Mapped[Optional[float]] = mapped_column(Float)
+    sample_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 # ---------------------------------------------------------------------------
 # PipelineMetricsSnapshot — real edge performance telemetry (architecture v4 §15)
 # ---------------------------------------------------------------------------
