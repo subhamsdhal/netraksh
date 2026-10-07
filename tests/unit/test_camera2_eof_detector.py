@@ -37,6 +37,7 @@ def test_camera2_eof_emits_real_pending_and_final_frames(monkeypatch):
     monkeypatch.setattr(main, "enhance_for_detection", lambda frame, policy: frame)
     pipeline = EdgePipeline.__new__(EdgePipeline)
     pipeline.camera_id = "cam-checkpoint-01"
+    pipeline.adapter = SimpleNamespace(source_kind="LOCAL_FINITE_FILE", preserve_finite_frames=True)
     pipeline._last_detector_frame_index = 219
     frame = np.zeros((2, 2, 3), dtype=np.uint8)
     meta = SimpleNamespace(frame_index=240)
@@ -54,6 +55,7 @@ def test_camera2_eof_emits_real_pending_and_final_frames(monkeypatch):
     assert emitted == [220, 240]
     assert pipeline.detector_worker.submitted[0].frame is not frame
     assert pipeline.detector_worker.submitted[0].frame_index == 240
+    assert pipeline.detector_worker.submitted[0].confidence_threshold == 0.35
     assert pipeline._last_detector_frame_index == 240
 
 
@@ -66,3 +68,18 @@ def test_camera1_eof_does_not_submit_detector_job():
     pipeline._flush_finite_detector_at_eof()
 
     assert pipeline.detector_worker.submitted == []
+
+
+def test_lower_threshold_is_limited_to_camera2_durable_file():
+    pipeline = EdgePipeline.__new__(EdgePipeline)
+    pipeline.calibration = SimpleNamespace(get_threshold=lambda _: 0.45)
+    pipeline.adapter = SimpleNamespace(source_kind="LOCAL_FINITE_FILE", preserve_finite_frames=True)
+    pipeline.camera_id = "cam-checkpoint-01"
+    assert pipeline._detector_confidence_threshold("CLEAR_DAY") == 0.35
+
+    pipeline.camera_id = "cam-border-01"
+    assert pipeline._detector_confidence_threshold("CLEAR_DAY") == 0.45
+
+    pipeline.camera_id = "cam-checkpoint-01"
+    pipeline.adapter.preserve_finite_frames = False
+    assert pipeline._detector_confidence_threshold("CLEAR_DAY") == 0.45
