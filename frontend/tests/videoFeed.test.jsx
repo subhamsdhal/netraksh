@@ -108,6 +108,19 @@ describe('detection-synchronized analyzed playback', () => {
     expect(screen.getByText('FRAME 12 · 0.40s')).toBeInTheDocument();
   });
 
+  it('keeps waiting for later live samples after reaching the current timeline end', async () => {
+    const onAnalyzedSample = vi.fn();
+    const { container } = renderFeed({ onAnalyzedSample });
+    wireVideo(container.querySelector('video'));
+    act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: sample() })));
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 12 })));
+    act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', {
+      detail: sample({ sequence: 2, frame_index: 13, video_time: 0.45 }),
+    })));
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 13 })));
+    expect(screen.getByText('FRAME 13 · 0.45s')).toBeInTheDocument();
+  });
+
   it('exposes only persisted, read-only sample diagnostics when explicitly enabled for admins', async () => {
     const vehicle = track({
       track_id: 10,

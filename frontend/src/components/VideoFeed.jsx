@@ -668,7 +668,8 @@ export default function VideoFeed({
         if (!replayPlaying) return;
         const next = trackingTimelineRef.current[playbackCursorRef.current + 1];
         if (!next) {
-          setReplayPlaying(false);
+          if (completedRun) setReplayPlaying(false);
+          else timer = setTimeout(pump, 40);
           return;
         }
         const delay = completedRun ? 350 : 0;
