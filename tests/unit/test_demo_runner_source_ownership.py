@@ -5,6 +5,7 @@ import httpx
 
 from edge.demo_runner import (
     _apply_control_sync,
+    _camera2_durable_source_clock,
     _control_seek_target,
     _is_resolvable_edge_source,
     _materialize_remote_source,
@@ -109,6 +110,12 @@ def test_browser_position_is_not_wall_clock_extrapolated_after_its_last_update()
     # The browser's last explicit position is authoritative.  A quiet browser
     # must not make a fresh edge worker seek minutes ahead of a finite source.
     assert _control_seek_target(0.0, "LOCAL_FINITE_FILE", 79.5) == 0.0
+
+
+def test_camera2_durable_analysis_uses_decoder_clock_not_browser_preview():
+    assert _camera2_durable_source_clock("cam-checkpoint-01", "stored-video-session")
+    assert not _camera2_durable_source_clock("cam-checkpoint-01", None)
+    assert not _camera2_durable_source_clock("cam-border-01", "stored-video-session")
 
 
 def test_backend_scoped_paths_do_not_reuse_legacy_or_other_backend_queues():

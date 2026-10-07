@@ -82,6 +82,7 @@ class CameraAdapter:
         max_reconnect_attempts: int = -1,  # -1 for infinite
         reconnect_jitter: float = 1.0,
         loop_video: bool = False,
+        preserve_finite_frames: bool = False,
     ):
         self.source_str = source or os.environ.get("VIDEO_SOURCE", "0")
         self.simulate_frozen = simulate_frozen or os.environ.get("SIMULATE_FROZEN_CAMERA", "").lower() == "true"
@@ -92,6 +93,7 @@ class CameraAdapter:
         self._height: int = 480
         self._frozen_frame: Optional[np.ndarray] = None
         self.loop_video = loop_video
+        self.preserve_finite_frames = preserve_finite_frames
         self.source_kind = classify_source(self.source_str)
         self._max_replay_reopen_attempts = 3
         self._replay_reopen_failures = 0
@@ -373,19 +375,31 @@ class CameraAdapter:
                     except Exception as exc:
                         logger.debug("[Adapter] Frame tap failed (non-fatal): %s", type(exc).__name__)
 
-                # Push to bounded queue with DROP_OLDEST policy
-                try:
-                    self._queue.put_nowait((frame, meta))
-                except queue.Full:
-                    try:
-                        self._queue.get_nowait()
-                        self.frames_dropped += 1
-                    except queue.Empty:
-                        pass
+                # A finite acceptance source must retain its first frame and
+                # source order even if startup HTTP calls briefly stall the
+                # consumer. Backpressure the decoder instead of losing the
+                # beginning of the one-shot run.
+                if is_video_file and self.preserve_finite_frames:
+                    while not self._stop_event.is_set():
+                        try:
+                            self._queue.put((frame, meta), timeout=0.1)
+                            break
+                        except queue.Full:
+                            continue
+                else:
+                    # Live streams remain bounded and latest-value.
                     try:
                         self._queue.put_nowait((frame, meta))
                     except queue.Full:
-                        pass
+                        try:
+                            self._queue.get_nowait()
+                            self.frames_dropped += 1
+                        except queue.Empty:
+                            pass
+                        try:
+                            self._queue.put_nowait((frame, meta))
+                        except queue.Full:
+                            pass
                 
                 # Naive pacing if it's a file
                 if is_video_file:

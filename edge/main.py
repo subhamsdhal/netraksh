@@ -197,6 +197,7 @@ class EdgePipeline:
             simulate_frozen=config.get("simulate_frozen", False),
             simulate_night=config.get("simulate_night", False),
             loop_video=config.get("loop_video", os.environ.get("DEMO_LOOP_VIDEO", "false").lower() == "true"),
+            preserve_finite_frames=self.camera_id == "cam-checkpoint-01" and bool(config.get("source_stream_id")),
         )
         self.adapter.set_frame_tap(self._capture_hud_frame)
 

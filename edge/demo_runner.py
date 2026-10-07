@@ -245,6 +245,11 @@ def _control_seek_target(
     return target
 
 
+def _camera2_durable_source_clock(camera_id: str, source_session_id: object) -> bool:
+    """Keep Camera 2's stored one-shot source on its decoder's media clock."""
+    return camera_id == "cam-checkpoint-01" and bool(source_session_id)
+
+
 def _apply_control_sync(data: dict) -> bool:
     """Atomically apply a resolvable control-plane video session.
 
@@ -513,7 +518,8 @@ class DemoAwareEdgePipeline(EdgePipeline):
         # Override OpenCV's internal video_time with the authoritative
         # extrapolated browser clock so that telemetry payloads match exactly.
         # -------------------------------------------------------------
-        if os.environ.get("DEMO_LOOP_VIDEO", "true").lower() != "true":
+        if (os.environ.get("DEMO_LOOP_VIDEO", "true").lower() != "true"
+                and not _camera2_durable_source_clock(self.camera_id, self.config.get("source_stream_id"))):
             browser_time = _scenario.get("video_time", 0.0)
             browser_updated = _scenario.get("video_time_updated_at", time.time())
             if scenario == "paused":
@@ -597,6 +603,11 @@ class DemoAwareEdgePipeline(EdgePipeline):
                     continue
 
                 # Check for explicit seek requests
+                if _camera2_durable_source_clock(self.camera_id, self.config.get("source_stream_id")):
+                    # Browser preview position is not an analysis seek command.
+                    # Replaying a completed source is handled by a new run.
+                    time.sleep(1.0)
+                    continue
                 target_time = _scenario.get("video_time")
 
                 if target_time is not None and hasattr(self, 'adapter'):
