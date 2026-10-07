@@ -46,6 +46,9 @@ def test_camera2_eof_emits_real_pending_and_final_frames(monkeypatch):
     pipeline.detector_worker = _Worker(_packet(220))
     pipeline.condition_router = SimpleNamespace(route=lambda _: object())
     pipeline.calibration = SimpleNamespace(get_threshold=lambda _: 0.45)
+    pipeline._track_id_map = {}
+    pipeline._trajectories = {}
+    pipeline._track_last_snapshot = {}
     pipeline._apply_continuity_guard = lambda tracks, image: tracks
     emitted = []
     pipeline._emit_detector_sample = lambda packet, tracks: emitted.append(packet.job.frame_index)

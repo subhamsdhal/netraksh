@@ -615,6 +615,7 @@ class EdgePipeline:
                     return False
                 if (self._last_detector_frame_index is None
                         or packet.job.frame_index > self._last_detector_frame_index):
+                    self._prime_camera2_lost_tracks(packet.tracks)
                     tracks = self._apply_continuity_guard(packet.tracks, packet.job.frame)
                     self._emit_detector_sample(packet, tracks)
                     self._last_detector_frame_index = packet.job.frame_index
@@ -1122,6 +1123,31 @@ class EdgePipeline:
         except Exception as exc:
             logger.debug(f"[Health] Periodic health report failed (non-fatal): {exc}")
 
+    def _prime_camera2_lost_tracks(self, incoming_tracks: List) -> None:
+        """Make same-packet losses available to Camera 2 re-identification.
+
+        ByteTrack may assign a new native ID after a pose change. Previously
+        the guard checked that new ID before the old track was remembered,
+        making an otherwise strong spatial/appearance match impossible.
+        """
+        if (self.camera_id != "cam-checkpoint-01"
+                or self.adapter.source_kind != "LOCAL_FINITE_FILE"
+                or not self.adapter.preserve_finite_frames):
+            return
+        incoming_ids = {
+            self._track_id_map.get(track.track_id, track.track_id)
+            for track in incoming_tracks
+        }
+        now = time.time()
+        for old_id, trajectory in self._trajectories.items():
+            if old_id in incoming_ids:
+                continue
+            snapshot = self._track_last_snapshot.get(old_id)
+            if snapshot is not None and snapshot["histogram"] is not None:
+                self.continuity_guard.remember_lost(
+                    old_id, snapshot["histogram"], snapshot["centroid"], trajectory, now,
+                )
+
     def _apply_continuity_guard(self, tracks: List, frame) -> List:
         """
         For every track ID not seen before, ask the Continuity Guard whether
@@ -1256,6 +1282,7 @@ class EdgePipeline:
         detector_tracks = None
         if detector_packet is not None:
             if detector_packet.error is None:
+                self._prime_camera2_lost_tracks(detector_packet.tracks)
                 detector_tracks = self._apply_continuity_guard(
                     detector_packet.tracks, detector_packet.job.frame,
                 )
