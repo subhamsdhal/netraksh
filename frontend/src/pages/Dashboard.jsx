@@ -391,6 +391,30 @@ export default function Dashboard() {
     }
   };
 
+  const handleInterruptGeneration = async (cameraId, sourceState) => {
+    const response = await authFetch('/api/dashboard/video/interrupt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        camera_id: cameraId,
+        video_session_id: sourceState.sourceId,
+        analysis_generation: sourceState.analysisGeneration,
+        reason: 'deployment_interrupted',
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.detail || `INTERRUPT FAILED — HTTP ${response.status}`);
+    setSlotSources((current) => ({
+      ...current,
+      [cameraId]: {
+        ...(current[cameraId] || sourceState),
+        analysisState: 'INTERRUPTED',
+        runState: 'INTERRUPTED',
+      },
+    }));
+    return result;
+  };
+
   useEffect(() => {
     cameraMediaRef.current = cameraMedia;
   }, [cameraMedia]);
@@ -1465,6 +1489,13 @@ export default function Dashboard() {
                       disabled={reanalyzeInFlight || reanalysisActive}
                       onClick={() => handleReanalyze(cameraId, sourceState)}
                     >{reanalyzeInFlight ? 'STARTING REANALYSIS…' : reanalysisActive ? 'ANALYZING…' : mediaState.reanalyzeStartFailed ? 'RETRY REANALYZE' : 'REANALYZE'}</button>}
+                    {diagnosticsEnabled && cameraId === 'cam-border-01' && ['WAKING', 'ACTIVE', 'LIVE'].includes(lifecycle) && <button
+                      type="button"
+                      className="btn btn-sm btn-outline"
+                      data-action="interrupt-analysis-generation"
+                      data-camera-id={cameraId}
+                      onClick={() => handleInterruptGeneration(cameraId, sourceState)}
+                    >INTERRUPT DEPLOYMENT-STALE RUN</button>}
                   </div>}
                   <select
                     aria-label={`Select camera slot ${slotIndex + 1}`}

@@ -328,6 +328,33 @@ def reconcile_inactive_control(camera_id: str, telemetry: dict[str, Any] | None 
     return current
 
 
+def interrupt_active_session(
+    camera_id: str,
+    session_id: str,
+    generation: int,
+    *,
+    reason: str,
+) -> dict[str, Any] | None:
+    """Truthfully settle one exact stale generation without rewriting its history."""
+    current = get_valid_active_session(camera_id)
+    if current is None or current.get("session_id") != session_id:
+        return None
+    if int(current.get("analysis_generation") or 0) != int(generation):
+        return None
+    if str(current.get("analysis_state") or "").upper() not in {"WAKING", "ACTIVE"}:
+        return None
+    now = time.time()
+    current.update({
+        "scenario": "paused",
+        "analysis_state": "INTERRUPTED",
+        "state_updated_at": now,
+        "interrupted_at": now,
+        "interruption_reason": reason,
+    })
+    _put_json(control_key(camera_id), current)
+    return current
+
+
 def start_active_session(
     camera_id: str,
     session_id: str,

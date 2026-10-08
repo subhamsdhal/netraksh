@@ -12,6 +12,7 @@ describe('dashboard video control ownership', () => {
     });
     expect(reanalyzeRequestPayload('cam-border-01', completed, 'request-1')).not.toHaveProperty('file');
     expect(canReanalyzeSource('cam-checkpoint-01', completed)).toBe(true);
+    expect(canReanalyzeSource('cam-border-01', { ...completed, analysisState: 'INTERRUPTED' })).toBe(true);
     expect(reanalyzeRequestPayload('cam-checkpoint-01', completed, 'request-2')).toEqual({
       camera_id: 'cam-checkpoint-01',
       video_session_id: 'stored-camera-1-video',
@@ -183,6 +184,9 @@ describe('dashboard video control ownership', () => {
     expect(analysisLifecyclePresentation({ analysisState: 'STOPPING' }).label).toBe('FINISHING ANALYSIS...');
     expect(analysisLifecyclePresentation({ analysisState: 'COMPLETED' })).toMatchObject({
       label: 'ANALYSIS COMPLETED', badge: 'COMPLETED', retry: false,
+    });
+    expect(analysisLifecyclePresentation({ analysisState: 'INTERRUPTED' })).toMatchObject({
+      label: 'ANALYSIS INTERRUPTED', badge: 'INTERRUPTED', tone: 'failed',
     });
     expect(analysisLifecyclePresentation({ analysisState: 'FAILED' }).label).toBe('ANALYSIS FAILED');
   });

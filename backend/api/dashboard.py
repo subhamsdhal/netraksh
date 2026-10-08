@@ -60,6 +60,7 @@ from backend.services.video_storage import (
     retry_preparation_job,
     signed_media_url,
     start_active_session,
+    interrupt_active_session,
     store_uploaded_session,
     complete_active_session,
     reconcile_inactive_control,
@@ -1017,8 +1018,8 @@ async def reanalyze_existing_video(
     lifecycle = str(active.get("analysis_state") or "").upper()
     if lifecycle in {"WAKING", "ACTIVE", "STARTING", "STOPPING"}:
         raise HTTPException(status_code=409, detail="An analysis run is already active for this source")
-    if lifecycle != "COMPLETED":
-        raise HTTPException(status_code=409, detail="Only a completed durable source can be reanalyzed")
+    if lifecycle not in {"COMPLETED", "INTERRUPTED"}:
+        raise HTTPException(status_code=409, detail="Only a completed or interrupted durable source can be reanalyzed")
 
     try:
         started, created_generation = start_active_session(
@@ -1079,6 +1080,83 @@ async def reanalyze_existing_video(
         "request_id": request_id,
         "idempotent_replay": False,
         "edge_status": edge_status,
+    }
+
+
+@router.post("/video/interrupt")
+async def interrupt_stale_video_analysis(
+    payload: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user=Depends(require_operator_or_admin),
+):
+    """Settle one exact deployment-interrupted run after its worker has gone stale."""
+    camera_id = str(payload.get("camera_id") or "").strip()
+    source_session_id = str(payload.get("video_session_id") or "").strip()
+    reason = str(payload.get("reason") or "").strip()
+    try:
+        source_session_id = str(uuid.UUID(source_session_id))
+        generation = int(payload.get("analysis_generation"))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=422, detail="Valid run identity is required")
+    if reason != "deployment_interrupted":
+        raise HTTPException(status_code=422, detail="A supported interruption reason is required")
+    if not settings.AUDIT_LOG_ENABLED:
+        raise HTTPException(status_code=503, detail="Interruption requires audit logging")
+
+    camera = (
+        db.query(Camera)
+        .filter(Camera.id == camera_id, Camera.is_active.is_(True))
+        .with_for_update()
+        .one_or_none()
+    )
+    if camera is None:
+        raise HTTPException(status_code=404, detail="Camera was not found or is inactive")
+    enforce_command_access(_user, camera.owning_command_id)
+    active = get_valid_active_session(camera_id)
+    if active is None or (
+        active.get("session_id"),
+        int(active.get("analysis_generation") or 0),
+    ) != (source_session_id, generation):
+        raise HTTPException(status_code=409, detail="The active durable generation no longer matches this source")
+    run_ids = [row[0] for row in db.query(AnalysisRunSummary.analysis_session_id).filter(
+        AnalysisRunSummary.camera_id == camera_id,
+        AnalysisRunSummary.stream_id == source_session_id,
+        AnalysisRunSummary.analysis_generation == generation,
+        AnalysisRunSummary.completed_at.is_(None),
+    ).all()]
+    if not run_ids:
+        raise HTTPException(status_code=409, detail="No incomplete durable run exists for this generation")
+
+    interrupted = interrupt_active_session(
+        camera_id,
+        source_session_id,
+        generation,
+        reason=reason,
+    )
+    if interrupted is None:
+        raise HTTPException(status_code=409, detail="The active durable generation no longer matches this run")
+    audit(
+        db,
+        "ANALYSIS_INTERRUPTED",
+        user_id=getattr(_user, "id", None),
+        resource_type="analysis_generation",
+        resource_id=f"{camera_id}:{generation}",
+        ip_address=request.client.host if request.client else "unknown",
+        detail=(
+            f"camera_id={camera_id}; stream_id={source_session_id}; "
+            f"analysis_generation={generation}; reason={reason}; run_count={len(run_ids)}"
+        ),
+    )
+    return {
+        "status": "success",
+        "camera_id": camera_id,
+        "source_session_id": source_session_id,
+        "analysis_session_ids": run_ids,
+        "analysis_generation": generation,
+        "analysis_state": interrupted.get("analysis_state"),
+        "scenario": interrupted.get("scenario"),
+        "reason": reason,
     }
 
 

@@ -118,6 +118,9 @@ export function analysisLifecyclePresentation(sourceState, mediaState = {}, cont
   if (lifecycle === 'COMPLETED') {
     return { label: 'ANALYSIS COMPLETED', badge: 'COMPLETED', tone: 'completed', retry: false };
   }
+  if (lifecycle === 'INTERRUPTED') {
+    return { label: 'ANALYSIS INTERRUPTED', badge: 'INTERRUPTED', tone: 'failed', retry: false };
+  }
   if (['FAILED', 'ERROR'].includes(lifecycle) || uploadStage === 'ERROR') {
     return { label: 'ANALYSIS FAILED', badge: 'FAILED', tone: 'failed', retry: false };
   }
@@ -134,7 +137,7 @@ export function canReanalyzeSource(cameraId, sourceState) {
   return ['cam-border-01', 'cam-checkpoint-01'].includes(cameraId)
     && sourceState?.sourceMode === 'durable'
     && Boolean(sourceState.sourceId)
-    && String(sourceState.analysisState || sourceState.runState || '').toUpperCase() === 'COMPLETED';
+    && ['COMPLETED', 'INTERRUPTED'].includes(String(sourceState.analysisState || sourceState.runState || '').toUpperCase());
 }
 
 export function reanalyzeRequestPayload(cameraId, sourceState, requestId) {
