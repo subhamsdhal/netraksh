@@ -71,6 +71,7 @@ _scenario: dict = {
     "video_session_id": None,
     "analysis_state": "READY",
     "analysis_generation": 0,
+    "latest_analysis_session_id": None,
     "should_restart": False,
     "initialized": False,
 }
@@ -293,6 +294,7 @@ def _apply_control_sync(data: dict) -> bool:
     new_scenario = data.get("scenario", "normal")
     _scenario["analysis_state"] = str(data.get("analysis_state") or "READY").upper()
     _scenario["analysis_generation"] = int(data.get("analysis_generation") or 0)
+    _scenario["latest_analysis_session_id"] = data.get("latest_analysis_session_id")
     _scenario["source_generation"] = data.get("source_generation")
     new_video_time = data.get("video_time")
 
@@ -322,9 +324,27 @@ def _apply_control_sync(data: dict) -> bool:
     return True
 
 
-def _durable_pipeline_allowed(session_id: str | None, lifecycle: str, scenario: str) -> bool:
-    """A durable replay may run only under one coherent control contract."""
-    return bool(session_id) and lifecycle.upper() in {"WAKING", "ACTIVE"} and scenario == "normal"
+def _durable_pipeline_allowed(
+    session_id: str | None,
+    lifecycle: str,
+    scenario: str,
+    latest_analysis_session_id: str | None = None,
+) -> bool:
+    """Allow only a generation that has not already been claimed by a run.
+
+    ACTIVE means the backend has accepted telemetry from a concrete analysis
+    session.  If the edge process is subsequently replaced, starting a new
+    local UUID would fork that generation and replay the source from frame 1.
+    The original process does not call this gate again while its pipeline is
+    running, so a fresh process must wait for an explicit interruption and
+    reanalysis instead of silently creating a second run.
+    """
+    if not session_id or scenario != "normal":
+        return False
+    lifecycle = lifecycle.upper()
+    if lifecycle == "WAKING":
+        return not latest_analysis_session_id
+    return False
 
 
 def _apply_live_control(adapter, sync_client, scenario: str) -> None:
@@ -730,12 +750,25 @@ def run_demo_pipeline(
         # explicit START creates a coherent WAKING/ACTIVE generation. A
         # contradictory WAKING+paused record must not open the source and
         # spin a paused pipeline with zero processed frames.
-        if current_session and not _durable_pipeline_allowed(current_session, lifecycle, scenario):
+        latest_analysis_session_id = _scenario.get("latest_analysis_session_id")
+        if current_session and not _durable_pipeline_allowed(
+            current_session,
+            lifecycle,
+            scenario,
+            latest_analysis_session_id,
+        ):
             if lifecycle in {"WAKING", "ACTIVE"} and scenario != "normal":
                 logger.warning(
                     "[DemoRunner] Control state inconsistent: lifecycle=%s scenario=%s; "
                     "waiting for normalized START control",
                     lifecycle, scenario,
+                )
+            elif lifecycle == "ACTIVE" and latest_analysis_session_id:
+                logger.warning(
+                    "[DemoRunner] Durable generation %s already belongs to analysis session %s; "
+                    "replacement process will not fork the run",
+                    _scenario.get("analysis_generation", 0),
+                    str(latest_analysis_session_id)[:8],
                 )
             else:
                 logger.info(

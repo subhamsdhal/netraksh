@@ -78,6 +78,24 @@ def test_resolvable_source_switch_applies_its_session_seek():
     assert _scenario["current"] == "paused"
 
 
+def test_control_sync_preserves_claimed_analysis_session_for_restart_fence():
+    _set_local_session()
+    replacement = Path(__file__)
+
+    assert _apply_control_sync({
+        "video_source": str(replacement),
+        "video_session_id": "local-session",
+        "scenario": "normal",
+        "analysis_state": "ACTIVE",
+        "analysis_generation": 7,
+        "latest_analysis_session_id": "existing-analysis-session",
+    }) is True
+
+    assert _scenario["analysis_state"] == "ACTIVE"
+    assert _scenario["analysis_generation"] == 7
+    assert _scenario["latest_analysis_session_id"] == "existing-analysis-session"
+
+
 def test_same_accepted_session_keeps_legitimate_browser_seek_functional():
     replacement = str(Path(__file__))
     _set_local_session(replacement)
