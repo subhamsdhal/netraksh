@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
@@ -60,8 +61,17 @@ async def lifespan(app: FastAPI):
     # Phase 6: Start Async Webhook Worker
     from backend.services.escalation import start_webhook_worker
     start_webhook_worker()
-    
-    yield
+    from backend.services.camera1_liveness import monitor_camera1_active_analysis
+    camera1_liveness_task = asyncio.create_task(monitor_camera1_active_analysis())
+
+    try:
+        yield
+    finally:
+        camera1_liveness_task.cancel()
+        try:
+            await camera1_liveness_task
+        except asyncio.CancelledError:
+            pass
     logger.info("NETRAKSH backend shutting down.")
 
 
