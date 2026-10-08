@@ -1037,14 +1037,15 @@ class EdgePipeline:
         client.close()
 
     def _post_tracking_with_retry(self, client, url: str, payload: dict) -> bool:
-        """At most five sends; never let a backend transport fault stop inference.
+        """At most eight sends; never let a backend transport fault stop inference.
 
         Backend sample writes are idempotent by run/sequence/frame. A terminal
         failure is counted and logged rather than represented as persisted.
         """
         import httpx
 
-        for attempt in range(5):
+        max_attempts = 8
+        for attempt in range(max_attempts):
             try:
                 response = client.post(url, json=payload, headers=self._edge_auth_headers())
                 if response.status_code == 202:
@@ -1068,7 +1069,7 @@ class EdgePipeline:
             except httpx.RequestError as exc:
                 self._record_tracking_transport_error(exception=exc)
                 retryable = True
-            if not retryable or attempt == 4:
+            if not retryable or attempt == max_attempts - 1:
                 self._tracking_metrics["dropped"] += 1
                 logger.error(
                     "[Tracking] delivery permanently failed run_id=%s frame=%s attempts=%s total_dropped=%s",

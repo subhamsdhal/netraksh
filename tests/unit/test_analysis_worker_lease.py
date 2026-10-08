@@ -222,8 +222,26 @@ def test_persistent_502_is_bounded_and_truthfully_counted(monkeypatch):
     client = SimpleNamespace(post=lambda *_args, **_kw: calls.append(1) or _Response(502))
     monkeypatch.setattr("edge.main.time.sleep", lambda *_args: None)
     assert pipeline._post_tracking_with_retry(client, "https://backend.test/system/tracking-frame", {"frame_index": 5}) is False
-    assert len(calls) == 5
-    assert pipeline._tracking_metrics == {"produced": 0, "transmitted": 0, "dropped": 1, "errors": 5}
+    assert len(calls) == 8
+    assert pipeline._tracking_metrics == {"produced": 0, "transmitted": 0, "dropped": 1, "errors": 8}
+
+
+def test_tracking_delivery_recovers_after_five_transient_gateway_errors(monkeypatch):
+    pipeline = _transport_pipeline()
+    calls = []
+
+    def post(*_args, **_kwargs):
+        calls.append(1)
+        return _Response(502 if len(calls) <= 5 else 202)
+
+    client = SimpleNamespace(post=post)
+    monkeypatch.setattr("edge.main.time.sleep", lambda *_args: None)
+
+    assert pipeline._post_tracking_with_retry(
+        client, "https://backend.test/system/tracking-frame", {"frame_index": 5},
+    ) is True
+    assert len(calls) == 6
+    assert pipeline._tracking_metrics == {"produced": 0, "transmitted": 1, "dropped": 0, "errors": 5}
 
 
 def test_tracking_queue_remains_bounded_and_reports_eviction():
