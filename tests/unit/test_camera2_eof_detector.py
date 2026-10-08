@@ -73,7 +73,7 @@ def test_camera1_eof_does_not_submit_detector_job():
     assert pipeline.detector_worker.submitted == []
 
 
-def test_lower_threshold_is_limited_to_camera2_durable_file():
+def test_camera_thresholds_remain_distinct_for_durable_files():
     pipeline = EdgePipeline.__new__(EdgePipeline)
     pipeline.calibration = SimpleNamespace(get_threshold=lambda _: 0.45)
     pipeline.adapter = SimpleNamespace(source_kind="LOCAL_FINITE_FILE", preserve_finite_frames=True)
@@ -81,7 +81,8 @@ def test_lower_threshold_is_limited_to_camera2_durable_file():
     assert pipeline._detector_confidence_threshold("CLEAR_DAY") == 0.35
 
     pipeline.camera_id = "cam-border-01"
-    assert pipeline._detector_confidence_threshold("CLEAR_DAY") == 0.45
+    assert pipeline._detector_confidence_threshold("CLEAR_DAY") == 0.40
+    assert pipeline._detector_new_track_threshold("CLEAR_DAY") == 0.45
 
     pipeline.camera_id = "cam-checkpoint-01"
     pipeline.adapter.preserve_finite_frames = False

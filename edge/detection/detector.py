@@ -218,6 +218,7 @@ class DetectionTracker:
 
             with open(self.tracker_config, "r") as f:
                 self._numpy_tracker = _NumpyByteTracker(yaml.safe_load(f) or {})
+            self._numpy_default_new_threshold = self._numpy_tracker.new
             logger.info("[Detector] NumPy ByteTrack initialized for ONNX CPU runtime")
             return
         
@@ -246,6 +247,8 @@ class DetectionTracker:
         condition: SceneCondition,
         confidence_threshold: float,
         existing_trajectories: Optional[Dict[int, List[Point]]] = None,
+        *,
+        new_track_threshold: float | None = None,
     ) -> List[TrackData]:
         """
         Run YOLO inference + ByteTrack association.
@@ -262,6 +265,10 @@ class DetectionTracker:
         self.last_raw_detections = list(detections)
 
         if self._numpy_tracker is not None:
+            self._numpy_tracker.new = max(
+                getattr(self, "_numpy_default_new_threshold", self._numpy_tracker.new),
+                float(new_track_threshold) if new_track_threshold is not None else 0.0,
+            )
             tracker_started = time.perf_counter()
             tracked_objects = self._numpy_tracker.update(detections)
             self.last_tracker_ms = (time.perf_counter() - tracker_started) * 1000.0

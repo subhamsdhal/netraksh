@@ -229,6 +229,12 @@ class EdgePipeline:
         # Bounded retry headroom for ~51 seconds of 10 Hz analyzed samples.
         # Accepted samples are idempotently persisted by the backend.
         self.tracking_queue = Queue(maxsize=512)
+        # Health and performance snapshots are current-state diagnostics, not
+        # evidence. Keep them off the frame loop and retain only a small,
+        # bounded amount of pending work when the backend is slow.
+        self.status_queue = Queue(maxsize=4)
+        self._status_transport_metrics = {"produced": 0, "dropped": 0, "errors": 0}
+        self._status_transport_stop = threading.Event()
         self._hud_frame_queue = Queue(maxsize=2)
         self._hud_decoupled = False
         self._hud_tracker = OpticalFlowBoxTracker(
@@ -464,6 +470,7 @@ class EdgePipeline:
         logger.info("[Pipeline] Sync thread started")
 
         self._running = True
+        self._status_transport_stop.clear()
         logger.info(f"[Pipeline] Starting frame loop for camera {self.camera_id}")
 
         telemetry_thread = threading.Thread(
@@ -473,6 +480,14 @@ class EdgePipeline:
         )
         telemetry_thread.start()
         logger.info("[Pipeline] Telemetry thread started")
+
+        status_thread = threading.Thread(
+            target=self._run_status_transport_loop,
+            daemon=True,
+            name=f"status-transport-{self.camera_id}",
+        )
+        status_thread.start()
+        logger.info("[Pipeline] Bounded status transport started")
 
         self._hud_decoupled = True
         hud_thread = threading.Thread(
@@ -595,6 +610,28 @@ class EdgePipeline:
                     self._publish_analysis_state("COMPLETED")
             elif self.adapter.state == StreamState.FAILED:
                 self._publish_analysis_state("FAILED")
+            # Keep the best-effort status worker alive until the final metrics
+            # snapshot has been enqueued. _running is cleared before queue
+            # drains, so using it as the worker's stop signal can race EOF.
+            self._status_transport_stop.set()
+            status_deadline = time.monotonic() + 2.0
+            while self.status_queue.unfinished_tasks and time.monotonic() < status_deadline:
+                time.sleep(0.1)
+            if self.status_queue.unfinished_tasks:
+                abandoned_status = 0
+                while True:
+                    try:
+                        self.status_queue.get_nowait()
+                        self.status_queue.task_done()
+                        abandoned_status += 1
+                    except Empty:
+                        break
+                if abandoned_status:
+                    logger.info(
+                        "[Pipeline] EOF status drain timed out; discarded %d best-effort report(s)",
+                        abandoned_status,
+                    )
+            status_thread.join(timeout=2.0)
             if hasattr(self, 'sync_client') and self.sync_client:
                 try:
                     self.sync_client.stop()
@@ -606,6 +643,14 @@ class EdgePipeline:
 
     def _detector_confidence_threshold(self, condition) -> float:
         calibrated = self.calibration.get_threshold(condition)
+        if (self.camera_id == "cam-border-01"
+                and self.adapter.source_kind == "LOCAL_FINITE_FILE"
+                and self.adapter.preserve_finite_frames
+                and condition == SceneCondition.CLEAR_DAY):
+            # Preserve an already-established person when the partly occluded
+            # detection dips below the prototype 0.45 cutoff. New tracks still
+            # require the calibrated threshold; see DetectorJob below.
+            return min(calibrated, 0.40)
         if (self.camera_id == "cam-checkpoint-01"
                 and self.adapter.source_kind == "LOCAL_FINITE_FILE"
                 and self.adapter.preserve_finite_frames):
@@ -614,6 +659,13 @@ class EdgePipeline:
             # the person without extra people/vehicles; 0.30 added duplicates.
             return min(calibrated, 0.35)
         return calibrated
+
+    def _detector_new_track_threshold(self, condition) -> float | None:
+        calibrated = self.calibration.get_threshold(condition)
+        effective = self._detector_confidence_threshold(condition)
+        if self.camera_id == "cam-border-01" and effective < calibrated:
+            return calibrated
+        return None
 
     def _flush_finite_detector_at_eof(self) -> None:
         """Finish Camera 2's real final frame before freezing its replay timeline.
@@ -666,6 +718,7 @@ class EdgePipeline:
             confidence_threshold=self._detector_confidence_threshold(condition.condition),
             enhancement_applied=enhanced,
             submitted_at=time.time(),
+            new_track_threshold=self._detector_new_track_threshold(condition.condition),
         )
         if not self.detector_worker.submit(job) or not receive(20.0):
             logger.warning("[Pipeline] EOF final image detection unavailable")
@@ -1179,19 +1232,77 @@ class EdgePipeline:
         health = getattr(self, "_last_health", None)
         if health is None:
             return
+        self._enqueue_status_report("health", health.model_dump(mode="json"))
+
+    def _enqueue_status_report(self, kind: str, payload: dict) -> None:
+        """Queue a latest-state report without making the caller wait on HTTP."""
+        item = (kind, payload)
         try:
-            import httpx
-            verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
-            httpx.post(
-                f"{self.sync_client.backend_url}/cameras/{self.camera_id}/health",
-                content=health.model_dump_json(),
-                headers={"Content-Type": "application/json", **self._edge_auth_headers()},
-                timeout=3.0,
-                verify=verify,
-                cert=self.sync_client._client_cert
-            )
-        except Exception as exc:
-            logger.debug(f"[Health] Periodic health report failed (non-fatal): {exc}")
+            self.status_queue.put_nowait(item)
+        except Full:
+            try:
+                self.status_queue.get_nowait()
+                self.status_queue.task_done()
+                self._status_transport_metrics["dropped"] += 1
+            except Empty:
+                pass
+            try:
+                self.status_queue.put_nowait(item)
+            except Full:
+                self._status_transport_metrics["dropped"] += 1
+                return
+        self._status_transport_metrics["produced"] += 1
+
+    def _run_status_transport_loop(self) -> None:
+        """Deliver best-effort health/metrics reports off the frame thread."""
+        import httpx
+
+        verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
+        client = httpx.Client(
+            timeout=httpx.Timeout(connect=2.0, read=2.0, write=2.0, pool=2.0),
+            verify=verify,
+            cert=self.sync_client._client_cert,
+        )
+        try:
+            while not self._status_transport_stop.is_set() or not self.status_queue.empty():
+                try:
+                    kind, payload = self.status_queue.get(timeout=0.25)
+                except Empty:
+                    continue
+                try:
+                    if kind == "health":
+                        url = f"{self.sync_client.backend_url}/cameras/{self.camera_id}/health"
+                    elif kind == "metrics":
+                        url = f"{self.sync_client.backend_url}/system/metrics"
+                    else:
+                        logger.warning("[Status Transport] discarded unknown report kind=%s", kind)
+                        continue
+
+                    # These endpoints append history rows. A retry after a
+                    # read timeout could duplicate a report already committed
+                    # by the backend, so use the next periodic snapshot as
+                    # the retry opportunity instead of resending this item.
+                    try:
+                        response = client.post(
+                            url,
+                            json=payload,
+                            headers=self._edge_auth_headers(),
+                        )
+                        delivered = 200 <= response.status_code < 300
+                        error_type = f"HTTP{response.status_code}"
+                    except httpx.RequestError as exc:
+                        delivered = False
+                        error_type = type(exc).__name__
+                    if not delivered:
+                        self._status_transport_metrics["errors"] += 1
+                        logger.debug(
+                            "[Status Transport] report failed kind=%s error_type=%s",
+                            kind, error_type,
+                        )
+                finally:
+                    self.status_queue.task_done()
+        finally:
+            client.close()
 
     def _prime_stored_lost_tracks(self, incoming_tracks: List) -> None:
         """Make same-packet losses available to stored-camera re-identification.
@@ -1525,6 +1636,7 @@ class EdgePipeline:
                 confidence_threshold=calibrated_threshold,
                 enhancement_applied=enhancement_applied,
                 submitted_at=time.time(),
+                new_track_threshold=self._detector_new_track_threshold(condition.condition),
             ))
             if submitted:
                 self._last_detector_source_time = float(meta.video_time_seconds)
@@ -2124,36 +2236,21 @@ class EdgePipeline:
         # evidence.
         summary["events"]["queue_depth"] = self.sync_client.get_queue_depth() if hasattr(self, "sync_client") and self.sync_client else 0
         
-        try:
-            import httpx
-            verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
-            with httpx.Client(
-                timeout=3.0,
-                verify=verify,
-                cert=self.sync_client._client_cert,
-            ) as client:
-                response = client.post(
-                    f"{self.sync_client.backend_url}/system/metrics",
-                    json={
-                        "edge_device_id": self.camera_id,
-                        "uptime_seconds": summary["uptime_seconds"],
-                        "fps": summary["fps"],
-                        "frames": summary["frames"],
-                        "events": summary["events"],
-                        "alerts_generated": summary["alerts_generated"],
-                        "telemetry_produced": self._telemetry_metrics["produced"],
-                        "telemetry_dropped": self._telemetry_metrics["dropped"],
-                        "telemetry_errors": self._telemetry_metrics["errors"],
-                        "cpu_percent": summary["cpu_percent"],
-                        "rss_mb": summary["rss_mb"],
-                        "psutil_available": summary["psutil_available"],
-                        "adaptive_gate": gate_stats,
-                    },
-                    headers=self._edge_auth_headers(),
-                )
-                response.raise_for_status()
-        except Exception as exc:
-            logger.debug(f"[Metrics] Backend report failed (non-fatal): {exc}")
+        self._enqueue_status_report("metrics", {
+            "edge_device_id": self.camera_id,
+            "uptime_seconds": summary["uptime_seconds"],
+            "fps": summary["fps"],
+            "frames": summary["frames"],
+            "events": summary["events"],
+            "alerts_generated": summary["alerts_generated"],
+            "telemetry_produced": self._telemetry_metrics["produced"],
+            "telemetry_dropped": self._telemetry_metrics["dropped"],
+            "telemetry_errors": self._telemetry_metrics["errors"],
+            "cpu_percent": summary["cpu_percent"],
+            "rss_mb": summary["rss_mb"],
+            "psutil_available": summary["psutil_available"],
+            "adaptive_gate": gate_stats,
+        })
 
     def stop(self) -> None:
         self._running = False
