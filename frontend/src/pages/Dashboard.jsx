@@ -1410,12 +1410,19 @@ export default function Dashboard() {
               ? 'COMPLETED'
               : operational.analysis === 'LIVE'
                 ? 'LIVE'
+                : lifecycle === 'INTERRUPTED'
+                  ? 'READY'
                 : lifecycle || (telemetryAvailable ? 'LIVE' : 'LOADED');
           const mediaState = cameraId ? (cameraMedia[cameraId] || {}) : {};
           const uploadState = visibleUploadState(mediaState, sourceState);
           const reanalyzeInFlight = Boolean(controlRequests[cameraId]);
           const reanalysisActive = ['STARTING', 'WAKING', 'ACTIVE', 'LIVE', 'RUNNING'].includes(lifecycle);
-          const baseAnalysisPresentation = analysisLifecyclePresentation(sourceState, mediaState, reanalyzeInFlight);
+          const baseAnalysisPresentation = analysisLifecyclePresentation(
+            sourceState,
+            mediaState,
+            reanalyzeInFlight,
+            { hideInterrupted: true },
+          );
           const analysisPresentation = mediaState.reanalyzeStartFailed
             ? { label: 'REANALYZE FAILED', badge: 'REANALYZE FAILED', tone: 'failed', retry: false }
             : baseAnalysisPresentation;

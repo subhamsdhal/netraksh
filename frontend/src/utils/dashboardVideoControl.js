@@ -77,7 +77,7 @@ export function lifecycleAction(sourceState) {
   return ['WAKING', 'ACTIVE', 'LIVE'].includes(lifecycle) ? 'STOP' : 'START';
 }
 
-export function analysisLifecyclePresentation(sourceState, mediaState = {}, controlPending = false) {
+export function analysisLifecyclePresentation(sourceState, mediaState = {}, controlPending = false, options = {}) {
   const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
   const uploadStage = String(mediaState?.uploadStage || '').toUpperCase();
 
@@ -119,6 +119,9 @@ export function analysisLifecyclePresentation(sourceState, mediaState = {}, cont
     return { label: 'ANALYSIS COMPLETED', badge: 'COMPLETED', tone: 'completed', retry: false };
   }
   if (lifecycle === 'INTERRUPTED') {
+    if (options.hideInterrupted) {
+      return { label: 'SOURCE READY', badge: 'SOURCE READY', tone: 'ready', retry: false };
+    }
     return { label: 'ANALYSIS INTERRUPTED', badge: 'INTERRUPTED', tone: 'failed', retry: false };
   }
   if (['FAILED', 'ERROR'].includes(lifecycle) || uploadStage === 'ERROR') {

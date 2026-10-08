@@ -25,6 +25,16 @@ describe('dashboard video control ownership', () => {
     expect(reanalyzeRequestPayload('cam-border-01', completed, '')).toBeNull();
   });
 
+  it('keeps interrupted history truthful while presenting the normal card as ready', () => {
+    const interrupted = { sourceMode: 'durable', sourceId: 'source-1', analysisState: 'INTERRUPTED' };
+    expect(analysisLifecyclePresentation(interrupted)).toMatchObject({
+      label: 'ANALYSIS INTERRUPTED', badge: 'INTERRUPTED', tone: 'failed',
+    });
+    expect(analysisLifecyclePresentation(interrupted, {}, false, { hideInterrupted: true })).toMatchObject({
+      label: 'SOURCE READY', badge: 'SOURCE READY', tone: 'ready',
+    });
+  });
+
   it('aborts a stalled read-only restore preflight after the timeout', async () => {
     let requestSignal;
     const fetcher = vi.fn((_path, { signal }) => new Promise((_resolve, reject) => {
