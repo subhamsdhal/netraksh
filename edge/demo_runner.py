@@ -347,6 +347,38 @@ def _durable_pipeline_allowed(
     return False
 
 
+def _persist_durable_eof(backend_url: str, token: str, payload: dict) -> bool:
+    """Idempotently persist the exact completed generation across short 502s."""
+    import httpx
+
+    url = f"{backend_url}/api/dashboard/video/internal-complete"
+    with httpx.Client(timeout=httpx.Timeout(connect=5, read=10, write=10, pool=5)) as client:
+        for attempt in range(5):
+            try:
+                response = client.post(
+                    url, headers={"Authorization": f"Bearer {token}"}, json=payload,
+                )
+                if response.status_code == 200:
+                    return True
+                logger.warning(
+                    "[DemoRunner] durable EOF response camera_id=%s generation=%s run_id=%s status=%s attempt=%s",
+                    payload["camera_id"], payload["analysis_generation"],
+                    payload["analysis_session_id"], response.status_code, attempt + 1,
+                )
+                retryable = response.status_code in {429, 502, 503, 504}
+            except httpx.RequestError as exc:
+                logger.warning(
+                    "[DemoRunner] durable EOF transport error camera_id=%s generation=%s run_id=%s error_type=%s attempt=%s",
+                    payload["camera_id"], payload["analysis_generation"],
+                    payload["analysis_session_id"], type(exc).__name__, attempt + 1,
+                )
+                retryable = True
+            if not retryable or attempt == 4:
+                return False
+            time.sleep(min(0.5 * (2 ** attempt), 4.0))
+    return False
+
+
 def _apply_live_control(adapter, sync_client, scenario: str) -> None:
     """Apply the latest poll result to an already-running pipeline."""
     want_offline = scenario == "offline"
@@ -695,6 +727,7 @@ def run_demo_pipeline(
     backend_url: str,
     zones_config_path: str = "demo/scripts/zones_config.json",
     require_explicit_session: bool = False,
+    on_run_state=None,
 ) -> None:
     """
     Build and run a DemoAwareEdgePipeline for one named camera.
@@ -815,7 +848,22 @@ def run_demo_pipeline(
         pipeline = DemoAwareEdgePipeline(config)
 
         # start() blocks until the pipeline stops (e.g. video ends, interrupted, or restarted)
-        pipeline.start()
+        if on_run_state:
+            on_run_state("RUNNING", pipeline)
+        try:
+            pipeline.start()
+        except BaseException as exc:
+            logger.error(
+                "[DemoRunner] pipeline terminated unexpectedly camera_id=%s generation=%s run_id=%s last_frame=%s last_video_time=%s error_type=%s",
+                camera_id, config["analysis_generation"], pipeline.stream_id,
+                getattr(pipeline, "_last_processed_frame_index", None),
+                getattr(pipeline, "_last_video_time", None),
+                type(exc).__name__,
+            )
+            raise
+        finally:
+            if on_run_state:
+                on_run_state("FINALIZING", pipeline)
 
         pipeline_exit_time = time.time()
 
@@ -824,41 +872,45 @@ def run_demo_pipeline(
             logger.info("[DemoRunner] Pipeline stopped for restart. Recreating...")
             # Consume the restart request only after the blocking pipeline exits.
             _scenario["should_restart"] = False
+            if on_run_state:
+                on_run_state("IDLE", None)
             time.sleep(1.0)
         else:
             # A completed upload should leave the worker alive so the next
             # uploaded session can be picked up without restarting the OS
             # process. The polling thread sets should_restart on a new ID.
             if _scenario.get("video_session_id"):
-                if pipeline.adapter.eof_reached and pipeline.adapter.state.name != "FAILED":
-                    try:
-                        import httpx
-                        headers = {"Authorization": f"Bearer {os.environ.get('EDGE_AUTH_TOKEN', '')}"}
-                        response = httpx.post(
-                            f"{backend_url}/api/dashboard/video/internal-complete",
-                            headers=headers,
-                            json={
-                                "camera_id": camera_id,
-                                "video_session_id": current_session,
-                                "analysis_session_id": pipeline.stream_id,
-                                "analysis_generation": _scenario.get("analysis_generation", 0),
-                                # Use the last frame actually processed by the
-                                # pipeline. CameraAdapter exposes
-                                # frames_received, not a frame_index property,
-                                # and that decoder counter can include frames
-                                # dropped before processing.
-                                "final_frame_index": getattr(pipeline, "_last_processed_frame_index", None),
-                                "final_video_time": getattr(pipeline, "_last_video_time", None),
-                            },
-                            timeout=10.0,
-                        )
-                        response.raise_for_status()
+                eof_persist_failed = bool(getattr(pipeline, "timeline_incomplete", False))
+                if pipeline.adapter.eof_reached and pipeline.adapter.state.name != "FAILED" and not eof_persist_failed:
+                    completed = _persist_durable_eof(
+                        backend_url, os.environ.get("EDGE_AUTH_TOKEN", ""), {
+                            "camera_id": camera_id,
+                            "video_session_id": current_session,
+                            "analysis_session_id": pipeline.stream_id,
+                            "analysis_generation": _scenario.get("analysis_generation", 0),
+                            # This is the last frame actually analyzed, not
+                            # the decoder's potentially ahead-of-work counter.
+                            "final_frame_index": getattr(pipeline, "_last_processed_frame_index", None),
+                            "final_video_time": getattr(pipeline, "_last_video_time", None),
+                        },
+                    )
+                    if completed:
                         _scenario["analysis_state"] = "COMPLETED"
                         _scenario["current"] = "paused"
                         logger.info("[DemoRunner] Durable EOF persisted for generation %s", _scenario.get("analysis_generation", 0))
-                    except Exception as exc:
-                        logger.warning("[DemoRunner] Durable EOF callback failed: %s", type(exc).__name__)
+                    else:
+                        eof_persist_failed = True
+                        logger.error(
+                            "[DemoRunner] Durable EOF not persisted camera_id=%s generation=%s run_id=%s final_frame=%s",
+                            camera_id, _scenario.get("analysis_generation", 0),
+                            pipeline.stream_id, getattr(pipeline, "_last_processed_frame_index", None),
+                        )
                 logger.info("[DemoRunner] Uploaded video completed; waiting for the next session...")
+                if on_run_state:
+                    if eof_persist_failed:
+                        on_run_state("FAILED_EOF", pipeline)
+                    else:
+                        on_run_state("IDLE", None)
                 while not _scenario.get("should_restart"):
                     # Only restart if scenario is normal AND video_time explicitly returns to 0 (replay)
                     if _scenario.get("analysis_state") in {"WAKING", "ACTIVE"} and _scenario.get("current") == "normal" and _scenario.get("video_time", -1) == 0:
@@ -870,6 +922,8 @@ def run_demo_pipeline(
                 _scenario["should_restart"] = False
                 continue
             logger.info("[DemoRunner] Pipeline exited normally. Ending loop.")
+            if on_run_state:
+                on_run_state("IDLE", None)
             break
 
 

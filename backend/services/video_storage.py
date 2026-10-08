@@ -334,12 +334,15 @@ def interrupt_active_session(
     generation: int,
     *,
     reason: str,
+    analysis_session_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Truthfully settle one exact stale generation without rewriting its history."""
     current = get_valid_active_session(camera_id)
     if current is None or current.get("session_id") != session_id:
         return None
     if int(current.get("analysis_generation") or 0) != int(generation):
+        return None
+    if analysis_session_id is not None and current.get("latest_analysis_session_id") != analysis_session_id:
         return None
     if str(current.get("analysis_state") or "").upper() not in {"WAKING", "ACTIVE"}:
         return None
@@ -437,8 +440,16 @@ def complete_active_session(camera_id: str, session_id: str, generation: int, ch
         return None
     if int(current.get("analysis_generation") or 0) != int(generation):
         return None
+    expected_run_id = changes.get("latest_analysis_session_id")
+    if expected_run_id and current.get("latest_analysis_session_id") != expected_run_id:
+        return None
     if current.get("analysis_state") == "COMPLETED":
         return current
+    if current.get("analysis_state") == "INTERRUPTED":
+        # A late EOF callback must not rewrite the settled historical truth.
+        return None
+    if str(current.get("analysis_state") or "").upper() not in {"WAKING", "ACTIVE"}:
+        return None
     current.update({
         "scenario": "paused",
         "analysis_state": "COMPLETED",

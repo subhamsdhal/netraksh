@@ -11,7 +11,7 @@ import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, completedRunMetrics, completedRunSummaryIdentity, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, latestEventAtOrBeforeFrame, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, selectedRunContext, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring, uploadedRunComparison } from '../utils/dashboardScope';
 import { canReuseRestoredMedia, updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
-import { analysisLifecyclePresentation, applyReplayResult, canReanalyzeSource, fetchWithTimeout, reanalyzeRequestPayload, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, canReanalyzeSource, fetchWithTimeout, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 import { replayTimelineAssessment } from '../utils/trackingTimeline';
 import { adminDiagnosticsEnabled as isAdminDiagnosticsEnabled } from '../utils/adminDiagnostics';
@@ -861,6 +861,32 @@ export default function Dashboard() {
     return () => { mounted = false; };
   }, [visibleCameraIds.join('|'), backendStatus]);
   useEffect(() => {
+    // Camera 1's backend worker lease is authoritative. An open page must
+    // observe an interrupted or completed generation without a manual reload.
+    const cameraId = 'cam-border-01';
+    const source = slotSources[cameraId];
+    if (backendStatus !== 'HEALTHY' || source?.sourceMode !== 'durable'
+        || !['WAKING', 'ACTIVE', 'LIVE', 'RUNNING'].includes(String(source.analysisState || '').toUpperCase())) return undefined;
+    let mounted = true;
+    const checkTerminal = async () => {
+      try {
+        const response = await fetchWithTimeout(
+          authFetch, `/api/dashboard/video/current?camera_id=${cameraId}`, 5000,
+        );
+        if (!mounted || !response.ok) return;
+        const authority = await response.json();
+        if (mounted) setSlotSources((current) => {
+          const existing = current[cameraId];
+          const settled = reconcileTerminalCameraSource(existing, authority);
+          return settled === existing ? current : { ...current, [cameraId]: settled };
+        });
+      } catch (_) { /* A transient read failure cannot change lifecycle authority. */ }
+    };
+    checkTerminal();
+    const id = window.setInterval(checkTerminal, 10_000);
+    return () => { mounted = false; window.clearInterval(id); };
+  }, [backendStatus, slotSources['cam-border-01']?.sourceId, slotSources['cam-border-01']?.analysisGeneration, slotSources['cam-border-01']?.analysisState]);
+  useEffect(() => {
     if (operationalCameraIdsNow.length !== 1) return;
     const cameraId = operationalCameraIdsNow[0];
     setSelectedCameraId(cameraId);
@@ -1376,15 +1402,16 @@ export default function Dashboard() {
           const camera = cameraModels.find(item => item.cameraId === cameraId) || null;
           const telemetry = cameraId ? scopedLiveTracks[cameraId] : null;
           const sourceState = cameraId ? slotSources[cameraId] : null;
+          const interruptedReady = String(sourceState?.analysisState || '').toUpperCase() === 'INTERRUPTED';
           const sessionId = analysisSessionIdForSource(telemetry, sourceState);
           const streamId = sourceState?.sourceId || null;
-          const cameraRunEvents = eventsForCameraRun(scopedRunEvents, cameraId, sessionId, streamId);
+          const cameraRunEvents = interruptedReady ? [] : eventsForCameraRun(scopedRunEvents, cameraId, sessionId, streamId);
           const latestCameraEvent = latestEventForSession(cameraRunEvents, cameraId, sessionId, streamId);
           const latestPlateEvent = latestPlateEventForSession(cameraRunEvents, cameraId, sessionId, streamId);
           const latestFaceEvent = latestFaceEventForSession(cameraRunEvents, cameraId, sessionId, streamId);
           const faceStatus = latestFaceEvent?.face_match_status || (latestFaceEvent?.face_match_person_id ? 'KNOWN' : latestFaceEvent ? 'UNKNOWN' : null);
           const faceLabel = latestFaceEvent?.watchlist_label || latestFaceEvent?.face_match_person_name || null;
-          const completedSummary = runSummaries[cameraId] || null;
+          const completedSummary = interruptedReady ? null : runSummaries[cameraId] || null;
           const replayAssessment = replayTimelineAssessment(
             completedSummary?.tracking_timeline_json || [],
             completedSummary || {},
@@ -1408,10 +1435,10 @@ export default function Dashboard() {
             ? 'RESTORING'
             : status === 'COMPLETED'
               ? 'COMPLETED'
-              : operational.analysis === 'LIVE'
-                ? 'LIVE'
-                : lifecycle === 'INTERRUPTED'
+              : lifecycle === 'INTERRUPTED'
                   ? 'READY'
+                : operational.analysis === 'LIVE'
+                  ? 'LIVE'
                 : lifecycle || (telemetryAvailable ? 'LIVE' : 'LOADED');
           const mediaState = cameraId ? (cameraMedia[cameraId] || {}) : {};
           const uploadState = visibleUploadState(mediaState, sourceState);
@@ -1429,7 +1456,7 @@ export default function Dashboard() {
           const showReanalyzeControl = ['cam-border-01', 'cam-checkpoint-01'].includes(cameraId)
             && sourceState?.sourceMode === 'durable'
             && (canReanalyzeSource(cameraId, sourceState) || reanalyzeInFlight || reanalysisActive || mediaState.reanalyzeStartFailed);
-          const presentedSample = cameraId ? (presentedTelemetry[cameraId] || null) : null;
+          const presentedSample = cameraId && !interruptedReady ? (presentedTelemetry[cameraId] || null) : null;
           const isDemoReplay = Boolean(telemetry?.demo_replay || sourceState?.sourceMode === 'bundled');
           const statusLabel = analysisPresentation.badge;
           const cardFps = processingFpsForTelemetry(presentedSample, now);

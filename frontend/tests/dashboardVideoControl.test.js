@@ -1,7 +1,28 @@
 import { describe, expect, it, vi } from 'vitest';
-import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, canReanalyzeSource, claimUploadAutoStart, durableHeartbeat, fetchWithTimeout, lifecycleAction, reanalyzeRequestPayload, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, canReanalyzeSource, claimUploadAutoStart, durableHeartbeat, fetchWithTimeout, lifecycleAction, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
 
 describe('dashboard video control ownership', () => {
+  it('settles only the exact Camera 1 live generation from backend authority', () => {
+    const live = {
+      sourceMode: 'durable', sourceId: 'source-1', analysisGeneration: 8,
+      analysisState: 'LIVE', runState: 'LIVE', latestAnalysisSessionId: 'run-8',
+    };
+    const interrupted = {
+      session_id: 'source-1', analysis_generation: 8, analysis_state: 'INTERRUPTED',
+      scenario: 'paused', latest_analysis_session_id: 'run-8',
+    };
+    expect(reconcileTerminalCameraSource(live, interrupted)).toMatchObject({
+      analysisState: 'INTERRUPTED', runState: 'INTERRUPTED', scenario: 'paused',
+      latestAnalysisSessionId: 'run-8',
+    });
+    expect(canReanalyzeSource('cam-border-01', reconcileTerminalCameraSource(live, interrupted))).toBe(true);
+    expect(reconcileTerminalCameraSource(live, { ...interrupted, session_id: 'other-source' })).toBe(live);
+    expect(reconcileTerminalCameraSource(live, { ...interrupted, analysis_generation: 7 })).toBe(live);
+    expect(reconcileTerminalCameraSource(live, { ...interrupted, analysis_state: 'ACTIVE' })).toBe(live);
+    expect(reconcileTerminalCameraSource(live, { ...interrupted, analysis_state: 'COMPLETED' })).toMatchObject({
+      analysisState: 'COMPLETED', runState: 'COMPLETED',
+    });
+  });
   it('offers reanalysis for either completed durable camera source', () => {
     const completed = { sourceMode: 'durable', sourceId: 'stored-camera-1-video', analysisState: 'COMPLETED' };
     expect(canReanalyzeSource('cam-border-01', completed)).toBe(true);

@@ -38,6 +38,25 @@ export function restoringSourceState() {
   return { restoring: true, runState: 'RESTORING' };
 }
 
+// Only a terminal backend control response for the same exact source and
+// generation may settle a locally live card. Old responses cannot reclaim a
+// newer generation or change another camera's presentation.
+export function reconcileTerminalCameraSource(current, response) {
+  const terminal = String(response?.analysis_state || '').toUpperCase();
+  if (!['INTERRUPTED', 'COMPLETED'].includes(terminal)
+      || current?.sourceMode !== 'durable'
+      || response?.session_id !== current.sourceId
+      || Number(response?.analysis_generation) !== Number(current.analysisGeneration)) return current;
+  if (current.analysisState === terminal && current.runState === terminal) return current;
+  return {
+    ...current,
+    analysisState: terminal,
+    runState: terminal,
+    scenario: String(response.scenario || 'paused').toLowerCase(),
+    latestAnalysisSessionId: response.latest_analysis_session_id || current.latestAnalysisSessionId || null,
+  };
+}
+
 export async function fetchWithTimeout(fetcher, path, timeoutMs = 5000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);

@@ -23,7 +23,7 @@ import time
 import uuid
 from collections import deque
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -216,6 +216,8 @@ class EdgePipeline:
         # dropped by its bounded queue. Completion must report the last frame
         # that this pipeline actually processed instead.
         self._last_processed_frame_index: Optional[int] = None
+        self.timeline_incomplete = False
+        self._last_tracking_persist_log_at = 0.0
         # Retain only the actual final decoded image of a Camera 2 durable
         # finite source. EOF needs one last image-grounded detector anchor.
         self._last_finite_detector_frame = None
@@ -224,10 +226,9 @@ class EdgePipeline:
         # We need a small bounded queue so if the backend goes down or network
         # is durable/offline-capable. Telemetry is explicitly lossy.
         self.telemetry_queue = Queue(maxsize=2)
-        # Keep a little more burst headroom for the lightweight HUD channel.
-        # The queue remains bounded and lossy; this only prevents short hosted
-        # response-latency spikes from erasing an entire visible interval.
-        self.tracking_queue = Queue(maxsize=128)
+        # Bounded retry headroom for ~51 seconds of 10 Hz analyzed samples.
+        # Accepted samples are idempotently persisted by the backend.
+        self.tracking_queue = Queue(maxsize=512)
         self._hud_frame_queue = Queue(maxsize=2)
         self._hud_decoupled = False
         self._hud_tracker = OpticalFlowBoxTracker(
@@ -492,7 +493,7 @@ class EdgePipeline:
                 # A smaller hosted fan-out avoids synchronized request bursts
                 # against the backend while still carrying the HUD above the
                 # required live cadence.
-                "6" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
+                "3" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
             )),
         )
         tracking_threads = []
@@ -526,20 +527,30 @@ class EdgePipeline:
                 # a slow hosted HTTP request to prevent the terminal state
                 # from being published. Evidence/event queues retain their
                 # existing durable flush path below.
-                self._hud_frame_queue.join()
+                hud_deadline = time.monotonic() + 30.0
+                while self._hud_frame_queue.unfinished_tasks and time.monotonic() < hud_deadline:
+                    time.sleep(0.1)
+                if self._hud_frame_queue.unfinished_tasks:
+                    self.timeline_incomplete = True
+                    logger.error(
+                        "[Tracking] EOF HUD drain timed out run_id=%s pending=%s",
+                        self.stream_id, self._hud_frame_queue.unfinished_tasks,
+                    )
                 self._running = False
                 for queue_name, queue, timeout_seconds in (
                     # The HUD queue carries compact replay samples, not
                     # evidence. Give the bounded transport enough time to
                     # finish the intentional 10 Hz source-time timeline at
                     # EOF, while still bounding a failed backend drain.
-                    ("tracking", self.tracking_queue, 45.0),
+                    ("tracking", self.tracking_queue, 90.0),
                     ("telemetry", self.telemetry_queue, 12.0),
                 ):
                     deadline = time.monotonic() + timeout_seconds
                     while queue.unfinished_tasks and time.monotonic() < deadline:
                         time.sleep(0.1)
                     if queue.unfinished_tasks:
+                        if queue_name == "tracking":
+                            self.timeline_incomplete = True
                         abandoned = 0
                         while True:
                             try:
@@ -553,6 +564,8 @@ class EdgePipeline:
                             queue_name,
                             abandoned,
                         )
+                if self._tracking_metrics["dropped"] or not self._tracking_metrics["transmitted"]:
+                    self.timeline_incomplete = True
             else:
                 self._running = False
             if not completed:
@@ -570,7 +583,16 @@ class EdgePipeline:
                 # Publish one final metrics snapshot after the drain so the
                 # command-center sync indicator sees the real zero queue.
                 self._report_metrics()
-                self._publish_analysis_state("COMPLETED")
+                if self.timeline_incomplete:
+                    logger.error(
+                        "[Tracking] run timeline incomplete camera_id=%s run_id=%s generation=%s produced=%s transmitted=%s dropped=%s final_frame=%s",
+                        self.camera_id, self.stream_id, self.analysis_generation,
+                        self._tracking_metrics["produced"], self._tracking_metrics["transmitted"],
+                        self._tracking_metrics["dropped"], self._last_processed_frame_index,
+                    )
+                    self._publish_analysis_state("FAILED")
+                else:
+                    self._publish_analysis_state("COMPLETED")
             elif self.adapter.state == StreamState.FAILED:
                 self._publish_analysis_state("FAILED")
             if hasattr(self, 'sync_client') and self.sync_client:
@@ -845,15 +867,29 @@ class EdgePipeline:
             "detector_fps": (1000.0 / self._detector_refresh_interval_ms if self._detector_refresh_interval_ms and self._detector_refresh_interval_ms > 0 else None),
             "hud_fps": measured_hud_fps,
         }
+        self._queue_tracking_payload(payload)
+
+    def _queue_tracking_payload(self, payload: dict) -> None:
+        """Keep newest samples within the fixed queue budget and report loss."""
         try:
             if self.tracking_queue.full():
-                self.tracking_queue.get_nowait()
-                self.tracking_queue.task_done()
-                self._tracking_metrics["dropped"] += 1
+                try:
+                    lost = self.tracking_queue.get_nowait()
+                except Empty:
+                    lost = None  # A transport worker drained it concurrently.
+                if lost is not None:
+                    self.tracking_queue.task_done()
+                    self._tracking_metrics["dropped"] += 1
+                    logger.error(
+                        "[Tracking] bounded queue overflow dropped frame=%s run_id=%s total_dropped=%s",
+                        lost.get("frame_index"), self.stream_id, self._tracking_metrics["dropped"],
+                    )
             self.tracking_queue.put_nowait(payload)
             self._tracking_metrics["produced"] += 1
-        except Exception:
+        except (Empty, Full):
             self._tracking_metrics["errors"] += 1
+            self._tracking_metrics["dropped"] += 1
+            logger.error("[Tracking] bounded queue enqueue race run_id=%s frame=%s", self.stream_id, payload.get("frame_index"))
 
     def _emit_detector_sample(self, packet, tracks) -> None:
         """Publish the detector's own source frame, never a later flow frame.
@@ -921,18 +957,10 @@ class EdgePipeline:
                 else None
             ),
         }
-        try:
-            if self.tracking_queue.full():
-                self.tracking_queue.get_nowait()
-                self.tracking_queue.task_done()
-                self._tracking_metrics["dropped"] += 1
-            self.tracking_queue.put_nowait(payload)
-            self._tracking_metrics["produced"] += 1
-        except Exception:
-            self._tracking_metrics["errors"] += 1
+        self._queue_tracking_payload(payload)
 
     def _run_tracking_loop(self) -> None:
-        """Push small current-frame box metadata without persistence/JPEGs."""
+        """Push idempotent frame samples with bounded, isolated transport retries."""
         import httpx
         verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
         client = httpx.Client(
@@ -945,13 +973,7 @@ class EdgePipeline:
             try:
                 payload = self.tracking_queue.get(timeout=0.25)
                 try:
-                    response = client.post(url, json=payload, headers=self._edge_auth_headers())
-                    if response.status_code != 202:
-                        self._record_tracking_transport_error(status_code=response.status_code)
-                    else:
-                        self._tracking_metrics["transmitted"] += 1
-                except httpx.RequestError as exc:
-                    self._record_tracking_transport_error(exception=exc)
+                    self._post_tracking_with_retry(client, url, payload)
                 finally:
                     self.tracking_queue.task_done()
             except Empty:
@@ -960,6 +982,49 @@ class EdgePipeline:
                 self._tracking_metrics["errors"] += 1
                 logger.warning("[Tracking] Unexpected transport error: %s", type(exc).__name__)
         client.close()
+
+    def _post_tracking_with_retry(self, client, url: str, payload: dict) -> bool:
+        """At most five sends; never let a backend transport fault stop inference.
+
+        Backend sample writes are idempotent by run/sequence/frame. A terminal
+        failure is counted and logged rather than represented as persisted.
+        """
+        import httpx
+
+        for attempt in range(5):
+            try:
+                response = client.post(url, json=payload, headers=self._edge_auth_headers())
+                if response.status_code == 202:
+                    self._tracking_metrics["transmitted"] += 1
+                    log_at = time.monotonic()
+                    if log_at - self._last_tracking_persist_log_at >= 10:
+                        self._last_tracking_persist_log_at = log_at
+                        logger.info(
+                            "[Tracking] timeline persisted camera_id=%s run_id=%s generation=%s frame=%s transmitted=%s",
+                            self.camera_id, self.stream_id, self.analysis_generation,
+                            payload.get("frame_index"), self._tracking_metrics["transmitted"],
+                        )
+                    if attempt:
+                        logger.info(
+                            "[Tracking] delivery recovered run_id=%s frame=%s attempt=%s",
+                            self.stream_id, payload.get("frame_index"), attempt + 1,
+                        )
+                    return True
+                self._record_tracking_transport_error(status_code=response.status_code)
+                retryable = response.status_code in {429, 502, 503, 504}
+            except httpx.RequestError as exc:
+                self._record_tracking_transport_error(exception=exc)
+                retryable = True
+            if not retryable or attempt == 4:
+                self._tracking_metrics["dropped"] += 1
+                logger.error(
+                    "[Tracking] delivery permanently failed run_id=%s frame=%s attempts=%s total_dropped=%s",
+                    self.stream_id, payload.get("frame_index"), attempt + 1,
+                    self._tracking_metrics["dropped"],
+                )
+                return False
+            time.sleep(min(0.25 * (2 ** attempt), 2.0))
+        return False
 
     def _record_tracking_transport_error(
         self, *, status_code: Optional[int] = None, exception: Optional[Exception] = None,
@@ -1527,18 +1592,7 @@ class EdgePipeline:
                 except OSError as exc:
                     logger.debug("[Telemetry] Trace write failed: %s", exc)
             if not self._hud_decoupled:
-                try:
-                    if self.tracking_queue.full():
-                        try:
-                            self.tracking_queue.get_nowait()
-                            self.tracking_queue.task_done()
-                            self._tracking_metrics["dropped"] += 1
-                        except Empty:
-                            pass
-                    self.tracking_queue.put_nowait(dict(payload))
-                    self._tracking_metrics["produced"] += 1
-                except Exception:
-                    self._tracking_metrics["errors"] += 1
+                self._queue_tracking_payload(dict(payload))
 
             # Full JPEG + durable latest-state telemetry stays diagnostic and
             # low-cadence.  Its encoding/upload can no longer gate HUD boxes.

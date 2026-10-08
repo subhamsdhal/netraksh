@@ -24,6 +24,20 @@ import {
 } from '../src/utils/dashboardScope';
 
 describe('completed Command Center data', () => {
+  it('keeps an interrupted Camera 1 run historical instead of primary live data', () => {
+    const interrupted = {
+      sourceMode: 'durable', sourceId: 'stream-a', analysisState: 'INTERRUPTED',
+      runState: 'INTERRUPTED', latestAnalysisSessionId: 'run-a', analysisGeneration: 8,
+    };
+    const oldSample = {
+      camera_id: 'cam-border-01', stream_id: 'stream-a', analysis_session_id: 'run-a',
+      analysis_generation: 8, frame_index: 1725, person_count: 4,
+    };
+    expect(telemetryForSource(oldSample, interrupted, 'cam-border-01')).toBeNull();
+    expect(completedRunMetrics('cam-border-01', interrupted, oldSample, oldSample, {
+      camera_id: 'cam-border-01', stream_id: 'stream-a', analysis_session_id: 'run-a',
+    })).toEqual({ summary: null, sample: null });
+  });
   const sourceA = { sourceMode: 'durable', sourceId: 'stream-a', latestAnalysisSessionId: 'run-a', runState: 'COMPLETED', sourceName: 'vid 1.mp4' };
   const sourceB = { sourceMode: 'durable', sourceId: 'stream-b', latestAnalysisSessionId: 'run-b', runState: 'COMPLETED', sourceName: 'vid 2.mp4' };
   const summaryA = { camera_id: 'cam-border-01', stream_id: 'stream-a', analysis_session_id: 'run-a', final_frame_index: 90, final_video_time: 3, track_count: 4, person_count: 3, completed_at: 100 };

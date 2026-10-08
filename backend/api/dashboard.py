@@ -42,7 +42,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from backend.config import settings
-from backend.database.session import get_db
+from backend.database.session import SessionLocal, get_db
 from backend.models.orm import AnalysisRunSummary, Camera
 from backend.security.auth import audit, enforce_command_access, require_edge_auth, require_operator_or_admin
 from backend.services.video_storage import (
@@ -67,6 +67,7 @@ from backend.services.video_storage import (
     update_preparation_job,
     update_active_session,
 )
+from backend.services.analysis_worker_lease import record_heartbeat, reconcile_stale_run
 
 # Import the shared in-memory state from the demo module.  This is a plain
 # module-level dict — the same object across all imports — so writing here
@@ -91,11 +92,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
+_lease_check_at: dict[str, float] = {}
+
+
 def _reconciled_durable(camera_id: str):
     # Latest telemetry is a read-only proof input. Reconciliation never emits
     # telemetry, changes source identity, increments a generation, or wakes a worker.
     from backend.api.system import _latest_telemetry
-    return reconcile_inactive_control(camera_id, _latest_telemetry.get(camera_id))
+    control = reconcile_inactive_control(camera_id, _latest_telemetry.get(camera_id))
+    if control and str(control.get("analysis_state") or "").upper() in {"WAKING", "ACTIVE"}:
+        now = time.time()
+        # Edge polls and open dashboards can be frequent on a free backend.
+        # Heartbeats also trigger immediate reconciliation, so this bounded
+        # fallback only needs to check once per fifteen seconds per camera.
+        if now - _lease_check_at.get(camera_id, 0) >= 15:
+            _lease_check_at[camera_id] = now
+            with SessionLocal() as db:
+                control = reconcile_stale_run(db, camera_id, control, now=now)
+    return control
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -730,6 +744,65 @@ async def get_current_video(request: Request, _user=Depends(require_operator_or_
 # ---------------------------------------------------------------------------
 # GET /api/dashboard/video/internal-sync
 # ---------------------------------------------------------------------------
+
+@router.post("/video/internal-worker-heartbeat")
+async def post_internal_worker_heartbeat(
+    payload: dict,
+    _edge=Depends(require_edge_auth),
+    db: Session = Depends(get_db),
+):
+    """Register an edge boot and its exact current run without UI authority."""
+    camera_id = str(payload.get("camera_id") or "").strip()
+    if camera_id not in _BUNDLED_CAMERA_IDS:
+        raise HTTPException(status_code=422, detail="Unknown camera_id")
+    if _edge and _edge.edge_id != camera_id:
+        raise HTTPException(status_code=403, detail="Authenticated edge identity does not match camera_id")
+    try:
+        boot_id = str(uuid.UUID(str(payload["boot_id"])))
+        worker_started_at = float(payload["worker_started_at"])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise HTTPException(status_code=422, detail="Valid worker boot identity is required")
+    phase = str(payload.get("phase") or "").upper()
+    if phase not in {"IDLE", "STARTING", "RUNNING", "FINALIZING", "FAILED_EOF"}:
+        raise HTTPException(status_code=422, detail="Invalid worker phase")
+    instance_id = str(payload.get("instance_id") or "")[:128]
+    if instance_id and not all(char.isalnum() or char in "-_." for char in instance_id):
+        raise HTTPException(status_code=422, detail="Invalid worker instance identity")
+    heartbeat = {
+        "camera_id": camera_id,
+        "boot_id": boot_id,
+        "instance_id": instance_id or None,
+        "worker_started_at": worker_started_at,
+        "phase": phase,
+        "analysis_session_id": None,
+        "stream_id": None,
+        "analysis_generation": None,
+        "last_frame_index": None,
+        "last_video_time": None,
+    }
+    if phase != "IDLE":
+        try:
+            heartbeat["analysis_session_id"] = str(uuid.UUID(str(payload["analysis_session_id"])))
+            heartbeat["stream_id"] = str(uuid.UUID(str(payload["stream_id"])))
+            heartbeat["analysis_generation"] = int(payload["analysis_generation"])
+            if heartbeat["analysis_generation"] < 0:
+                raise ValueError("negative generation")
+            if payload.get("last_frame_index") is not None:
+                heartbeat["last_frame_index"] = max(0, int(payload["last_frame_index"]))
+            if payload.get("last_video_time") is not None:
+                heartbeat["last_video_time"] = max(0.0, float(payload["last_video_time"]))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise HTTPException(status_code=422, detail="Valid run identity is required")
+    lease = record_heartbeat(db, heartbeat)
+    control = get_valid_active_session(camera_id)
+    if control and str(control.get("analysis_state") or "").upper() in {"WAKING", "ACTIVE"}:
+        reconcile_stale_run(db, camera_id, control)
+    return {
+        "status": "ok",
+        "camera_id": camera_id,
+        "boot_id": lease.boot_id,
+        "phase": lease.phase,
+    }
 
 @router.get("/video/internal-sync")
 async def get_internal_sync(request: Request, _edge=Depends(require_edge_auth)):

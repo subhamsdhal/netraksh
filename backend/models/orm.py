@@ -516,6 +516,12 @@ class AnalysisRunSummary(Base):
     first_telemetry_at: Mapped[float] = mapped_column(Float, nullable=False)
     last_telemetry_at: Mapped[float] = mapped_column(Float, nullable=False)
     completed_at: Mapped[Optional[float]] = mapped_column(Float)
+    interrupted_at: Mapped[Optional[float]] = mapped_column(Float)
+    interruption_reason: Mapped[Optional[str]] = mapped_column(String(64))
+    worker_boot_id: Mapped[Optional[str]] = mapped_column(String(36))
+    worker_instance_id: Mapped[Optional[str]] = mapped_column(String(128))
+    worker_started_at: Mapped[Optional[float]] = mapped_column(Float)
+    last_worker_heartbeat: Mapped[Optional[float]] = mapped_column(Float)
     final_frame_index: Mapped[Optional[int]] = mapped_column(Integer)
     final_video_time: Mapped[Optional[float]] = mapped_column(Float)
     processing_fps: Mapped[Optional[float]] = mapped_column(Float)
@@ -557,6 +563,24 @@ class AnalysisTrackingSample(Base):
     video_time: Mapped[Optional[float]] = mapped_column(Float)
     sample_json: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AnalysisWorkerLease(Base):
+    """Latest authenticated edge process and exact run ownership per camera."""
+    __tablename__ = "analysis_worker_leases"
+
+    camera_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    boot_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    instance_id: Mapped[Optional[str]] = mapped_column(String(128))
+    registered_at: Mapped[float] = mapped_column(Float, nullable=False)
+    worker_started_at: Mapped[float] = mapped_column(Float, nullable=False)
+    last_heartbeat_at: Mapped[float] = mapped_column(Float, nullable=False)
+    phase: Mapped[str] = mapped_column(String(24), nullable=False)
+    analysis_session_id: Mapped[Optional[str]] = mapped_column(String(36))
+    stream_id: Mapped[Optional[str]] = mapped_column(String(36))
+    analysis_generation: Mapped[Optional[int]] = mapped_column(Integer)
+    last_frame_index: Mapped[Optional[int]] = mapped_column(Integer)
+    last_video_time: Mapped[Optional[float]] = mapped_column(Float)
 
 
 # ---------------------------------------------------------------------------
