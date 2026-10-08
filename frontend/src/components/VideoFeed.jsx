@@ -213,6 +213,7 @@ export default function VideoFeed({
 }) {
   const containerRef = useRef(null);
   const videoRef = useRef(null);
+  const frozenFrameRef = useRef(null);
   const previewRef = useRef(null);
   const svgRef = useRef(null);
   const trackingTimelineRef = useRef([]);
@@ -221,6 +222,7 @@ export default function VideoFeed({
   const [replayPlaying, setReplayPlaying] = useState(true);
   const [replayRevision, setReplayRevision] = useState(0);
   const [framePending, setFramePending] = useState(false);
+  const [frozenFrameReady, setFrozenFrameReady] = useState(false);
 
   // Measured geometry of the letterboxed video frame within its container.
   const [videoRect, setVideoRect] = useState({
@@ -316,6 +318,8 @@ export default function VideoFeed({
     setTrackingModeActive(false);
     displayedSampleRef.current = null;
     setDisplayedSample(null);
+    setFramePending(false);
+    setFrozenFrameReady(false);
     onAnalyzedSampleRef.current?.(null);
   }, [cameraId, sourceMode, expectedSessionId, expectedGeneration, expectedSourceGeneration]);
 
@@ -362,6 +366,8 @@ export default function VideoFeed({
     setHudVisible(true);
     displayedSampleRef.current = null;
     setDisplayedSample(null);
+    setFramePending(false);
+    setFrozenFrameReady(false);
     onAnalyzedSampleRef.current?.(null);
   }, [runIdentity]);
 
@@ -606,6 +612,7 @@ export default function VideoFeed({
       displayedSampleRef.current = visibleSample;
       setDisplayedSample(visibleSample);
       setFramePending(false);
+      setFrozenFrameReady(false);
       setAnalyzedFrameStatus(completedRun ? 'ANALYZED REPLAY' : 'ANALYZED LIVE STREAM');
       onAnalyzedSampleRef.current?.(visibleSample);
       updateRectRef.current();
@@ -662,8 +669,28 @@ export default function VideoFeed({
       }
       video.pause();
       const target = Math.max(0, Number(sample.video_time));
+      // Freeze the last *committed* video frame before seeking the next one.
+      // Its existing boxes and card metrics remain paired until the new frame
+      // is decoded and committed. Canvas is display-only; no pixels are read.
+      let frozen = false;
+      if (displayedSampleRef.current && video.readyState >= 2 && frozenFrameRef.current) {
+        const canvas = frozenFrameRef.current;
+        const width = video.videoWidth;
+        const height = video.videoHeight;
+        if (width > 0 && height > 0) {
+          try {
+            canvas.width = width;
+            canvas.height = height;
+            const context = canvas.getContext('2d');
+            if (context) {
+              context.drawImage(video, 0, 0, width, height);
+              frozen = true;
+            }
+          } catch { /* Show a neutral buffering mask if frame capture is unavailable. */ }
+        }
+      }
+      setFrozenFrameReady(frozen);
       setFramePending(true);
-      onAnalyzedSampleRef.current?.(null);
       const continueAfterPaint = () => {
         if (!replayPlaying) return;
         const next = trackingTimelineRef.current[playbackCursorRef.current + 1];
@@ -886,6 +913,7 @@ export default function VideoFeed({
           /* object-fit:contain ensures no stretching; letterbox bars are black */
           objectFit: 'contain',
           zIndex: 0,
+          opacity: framePending && useTrackingTimeline && hudVisible ? 0 : 1,
         }}
       /> : analyzedFrameUrl ? <img
         ref={previewRef}
@@ -894,6 +922,19 @@ export default function VideoFeed({
         onLoad={updateRect}
         style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'contain', zIndex: 0 }}
       /> : null}
+      {useTrackingTimeline && hudVisible && <canvas
+        ref={frozenFrameRef}
+        aria-label="Last synchronized analyzed frame"
+        style={{
+          display: framePending && frozenFrameReady ? 'block' : 'none',
+          position: 'absolute', inset: 0, width: '100%', height: '100%',
+          objectFit: 'contain', zIndex: 1, pointerEvents: 'none',
+        }}
+      />}
+      {useTrackingTimeline && hudVisible && framePending && !frozenFrameReady && <div
+        aria-label="Buffering analyzed frame"
+        style={{ position: 'absolute', inset: 0, zIndex: 1, background: '#020617', pointerEvents: 'none' }}
+      />}
       {videoError && mediaUrl && !showAnalyzedFrame && (
         <div className="absolute inset-0 z-25 flex items-center justify-center bg-black/80 text-danger text-sm text-center px-4" role="alert">
           Unable to play this video in the browser.
@@ -919,7 +960,7 @@ export default function VideoFeed({
         data-frame-index={displayedSample?.frame_index ?? ''}
         data-source-time={Number.isFinite(displayedSample?.video_time) ? displayedSample.video_time : ''}
         style={{
-          display: !framePending && (showAnalyzedFrame || (useTrackingTimeline && hudVisible)) ? 'block' : 'none',
+          display: (showAnalyzedFrame || (useTrackingTimeline && hudVisible && (!framePending || frozenFrameReady))) ? 'block' : 'none',
           position: 'absolute', inset: 0,
           width: '100%', height: '100%',
           zIndex: 10, pointerEvents: 'none',
@@ -1065,7 +1106,7 @@ export default function VideoFeed({
         </div>
       )}
 
-      {hudVisible && !framePending && displayedSample && (
+      {hudVisible && (!framePending || frozenFrameReady) && displayedSample && (
         <div style={{
           position: 'absolute', left: '0.45rem', bottom: '0.45rem', zIndex: 20,
           padding: '0.25rem 0.45rem', border: '1px solid rgba(74,222,128,0.55)',
@@ -1226,7 +1267,7 @@ export default function VideoFeed({
               'rgba(239,68,68,0.85)',
           }}>
             {hudVisible
-              ? (completedRun || displayedSample ? 'CURRENT VIEW: ANALYZED SYNC' : 'CURRENT VIEW: AWAITING ANALYZED SAMPLE')
+              ? (framePending && !frozenFrameReady ? 'CURRENT VIEW: BUFFERING ANALYZED FRAME' : completedRun || displayedSample ? 'CURRENT VIEW: ANALYZED SYNC' : 'CURRENT VIEW: AWAITING ANALYZED SAMPLE')
               : 'CURRENT VIEW: SOURCE PREVIEW'}
           </span>
         </div>

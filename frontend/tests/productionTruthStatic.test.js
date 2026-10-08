@@ -20,7 +20,7 @@ describe('production UI contains no retired operational claims', () => {
 
   it('uses lifecycle status instead of primary evaluator START or STOP controls', () => {
     const dashboard = read('../src/pages/Dashboard.jsx');
-    expect(dashboard).toContain('analysisLifecyclePresentation(sourceState, mediaState');
+    expect(dashboard).toMatch(/analysisLifecyclePresentation\(\s*sourceState,\s*mediaState,/);
     expect(dashboard).toContain('RETRY ANALYSIS');
     expect(dashboard).not.toContain('START / ANALYZE');
     expect(dashboard).not.toContain('STOP ANALYSIS');
