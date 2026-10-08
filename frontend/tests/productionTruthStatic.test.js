@@ -29,6 +29,11 @@ describe('production UI contains no retired operational claims', () => {
     expect(read('../src/utils/dashboardVideoControl.js')).toContain("payload.control_action = 'stop'");
   });
 
+  it('does not show a worker wake warning after a run has completed', () => {
+    const dashboard = read('../src/pages/Dashboard.jsx');
+    expect(dashboard).toContain("!completedRun && mediaState.edgeStatus === 'WAKING'");
+  });
+
   it('uses shared freshness and age truth in the command center', () => {
     const dashboard = read('../src/pages/Dashboard.jsx');
     expect(dashboard).toContain('cameraHealthPresentation(health[activeCameraId], now)');
