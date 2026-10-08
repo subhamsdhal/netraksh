@@ -1229,6 +1229,63 @@ class EdgePipeline:
         dwell/stationary tracking) resumes exactly where it left off.
         """
         now = time.time()
+        adapter = getattr(self, "adapter", None)
+        stored_camera1 = (
+            getattr(self, "camera_id", None) == "cam-border-01"
+            and getattr(adapter, "source_kind", None) == "LOCAL_FINITE_FILE"
+            and bool(getattr(adapter, "preserve_finite_frames", False))
+        )
+        if stored_camera1:
+            # A native tracker ID and a previously re-associated native ID can
+            # coexist in one detector packet. They must never share a public
+            # identity: downstream keyed timelines would otherwise erase one
+            # of the two real detections. Keep the identity closest to its last
+            # observed position and give the other native track a distinct ID.
+            candidates = {}
+            for track in tracks:
+                native = int(track.track_id)
+                canonical = self._track_id_map.get(native, native)
+                candidates.setdefault(canonical, []).append(track)
+            occupied = set(candidates)
+            native_ids = {int(track.track_id) for track in tracks}
+            for canonical, group in candidates.items():
+                if len(group) < 2:
+                    continue
+                previous = self._track_last_snapshot.get(canonical)
+                centroid = previous.get("centroid") if previous else None
+                owner = min(
+                    group,
+                    key=lambda track: (
+                        ((track.bbox.centroid.x - centroid.x) ** 2
+                         + (track.bbox.centroid.y - centroid.y) ** 2)
+                        if centroid is not None else float(int(track.track_id) != canonical),
+                        int(track.track_id),
+                    ),
+                )
+                for track in group:
+                    if track is owner:
+                        continue
+                    native = int(track.track_id)
+                    replacement = native
+                    if replacement in occupied or replacement in self._known_track_ids:
+                        replacement = max(
+                            occupied | self._known_track_ids | native_ids
+                            | set(self._track_id_map.values()) | {0}
+                        ) + 1
+                    self._track_id_map[native] = replacement
+                    self._known_track_ids.add(replacement)
+                    occupied.add(replacement)
+                    track.track_id = replacement
+                    logger.warning(
+                        "[Pipeline] Camera 1 prevented simultaneous track-ID collision "
+                        "canonical=%d native=%d distinct=%d",
+                        canonical, native, replacement,
+                    )
+        occupied_ids = {
+            self._track_id_map.get(track.track_id, track.track_id)
+            for track in tracks
+        }
+        packet_native_ids = {int(track.track_id) for track in tracks}
         for track in tracks:
             native_id = track.track_id
             
@@ -1242,12 +1299,6 @@ class EdgePipeline:
                 continue
 
             histogram = compute_track_histogram(frame, track.bbox)
-            adapter = getattr(self, "adapter", None)
-            stored_camera1 = (
-                getattr(self, "camera_id", None) == "cam-border-01"
-                and getattr(adapter, "source_kind", None) == "LOCAL_FINITE_FILE"
-                and bool(getattr(adapter, "preserve_finite_frames", False))
-            )
             match = self.continuity_guard.resolve_new_track(
                 histogram,
                 track.bbox.centroid,
@@ -1258,6 +1309,7 @@ class EdgePipeline:
                 # bound so Camera 2 and live-source behavior remain unchanged.
                 histogram_similarity_threshold=0.50 if stored_camera1 else None,
                 max_centroid_distance=100.0 if stored_camera1 else None,
+                excluded_track_ids=(occupied_ids | (packet_native_ids - {native_id})) if stored_camera1 else None,
             )
             if match is not None:
                 matched_id, matched_trajectory = match
@@ -1269,8 +1321,10 @@ class EdgePipeline:
                 track.track_id = matched_id
                 track.trajectory = list(matched_trajectory) + list(track.trajectory)
                 self._known_track_ids.add(matched_id)
+                occupied_ids.add(matched_id)
             else:
                 self._known_track_ids.add(native_id)
+                occupied_ids.add(native_id)
         return tracks
 
     def _process_frame(self, frame, meta) -> None:

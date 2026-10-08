@@ -108,6 +108,7 @@ class TrackContinuityGuard:
         *,
         histogram_similarity_threshold: Optional[float] = None,
         max_centroid_distance: Optional[float] = None,
+        excluded_track_ids: Optional[set[int]] = None,
     ) -> Optional[Tuple[int, List[Point]]]:
         """
         Checks whether a newly-appeared track is likely the same physical
@@ -136,6 +137,8 @@ class TrackContinuityGuard:
         best_trajectory: List[Point] = []
 
         for track_id, entry in self._lost_pool.items():
+            if excluded_track_ids and track_id in excluded_track_ids:
+                continue
             distance = math.hypot(centroid.x - entry["centroid"].x, centroid.y - entry["centroid"].y)
             if distance > max_distance:
                 continue
