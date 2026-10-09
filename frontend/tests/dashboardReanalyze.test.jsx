@@ -1,5 +1,5 @@
 import React from 'react';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -88,6 +88,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   localStorage.clear();
   vi.unstubAllGlobals();
 });
@@ -112,6 +113,67 @@ describe('Command Center restored-source reanalysis', () => {
       path === '/api/dashboard/video/scenario'
       && options?.method === 'POST')).toBe(false);
     expect(mocks.authFetch.mock.calls.some(([path]) => path === '/api/dashboard/video/reanalyze')).toBe(false);
+  });
+
+  it('keeps an in-flight authoritative source restore alive through a readiness-probe failure', async () => {
+    vi.useFakeTimers();
+    const readyResolvers = [];
+    vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => readyResolvers.push(resolve))));
+    let resolveCamera1Current;
+    mocks.authFetch.mockImplementation(async (path) => {
+      if (path === '/api/nodes/health') return response([]);
+      if (path.includes('/api/dashboard/video/preparation/current?')) return response({});
+      if (path.startsWith('/api/dashboard/video/current?camera_id=cam-border-01')) {
+        return new Promise((resolve) => { resolveCamera1Current = resolve; });
+      }
+      if (path.startsWith('/api/dashboard/video/current?camera_id=cam-checkpoint-01')) {
+        return response({
+          available: true, source_mode: 'durable', camera_id: 'cam-checkpoint-01',
+          session_id: camera2SourceId, source_name: 'vid 2.mp4', analysis_state: 'COMPLETED',
+          analysis_generation: 3, source_generation: 1, scenario: 'paused', preview_url: null,
+        });
+      }
+      if (path.startsWith('/system/analysis-runs/')) return response({});
+      return response({});
+    });
+
+    render(<Dashboard />);
+    expect(screen.getAllByText('RESTORING CAMERA STATE').length).toBeGreaterThan(0);
+    await act(async () => {
+      readyResolvers[0]({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+    expect(resolveCamera1Current).toBeTypeOf('function');
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+    expect(readyResolvers).toHaveLength(2);
+    await act(async () => {
+      readyResolvers[1]({ ok: false });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      resolveCamera1Current(response({
+        available: true, source_mode: 'durable', camera_id: 'cam-border-01',
+        session_id: sourceId, source_name: 'vid 1.mp4', analysis_state: 'COMPLETED',
+        analysis_generation: 4, source_generation: 2, scenario: 'paused',
+        latest_analysis_session_id: runId, preview_url: null,
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByText('SOURCE: vid 1.mp4')).toBeInTheDocument();
+    expect(screen.getByText('SOURCE: vid 2.mp4')).toBeInTheDocument();
+    expect(screen.getAllByText('ANALYSIS COMPLETED').length).toBeGreaterThanOrEqual(2);
+    expect(mocks.authFetch.mock.calls.some(([path]) =>
+      path.includes('/api/dashboard/video/preparation/current?'))).toBe(true);
+    expect(mocks.authFetch.mock.calls.some(([path]) =>
+      path.startsWith('/api/dashboard/video/current?camera_id=cam-border-01'))).toBe(true);
+    expect(mocks.authFetch.mock.calls.some(([path]) =>
+      path.startsWith(`/system/analysis-runs/${runId}?`))).toBe(true);
+    vi.useRealTimers();
   });
 
   it('automatically starts exactly one analysis after a new Camera 1 upload is ready', async () => {
