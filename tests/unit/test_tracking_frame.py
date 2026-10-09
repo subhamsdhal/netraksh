@@ -212,13 +212,21 @@ def test_camera1_eof_completion_requires_exact_durable_final_sample(monkeypatch)
         "analysis_session_id": "run-1", "analysis_generation": 2,
         "sequence": 701, "frame_index": 2385, "video_time": 79.4666667,
     })
-    with patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock):
+    promoted = []
+    with (
+        patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock),
+        patch("backend.api.system.promote_active_session", side_effect=lambda *args: promoted.append(args)),
+    ):
         _run_sync_async_handler(post_tracking_frame(
             final_sample, SimpleNamespace(edge_id="cam-border-01"), db,
         ))
         _run_sync_async_handler(post_tracking_frame(
             final_sample, SimpleNamespace(edge_id="cam-border-01"), db,
         ))
+    assert promoted == [
+        ("cam-border-01", "source-1", 2, "run-1"),
+        ("cam-border-01", "source-1", 2, "run-1"),
+    ]
     assert db.query(AnalysisTrackingSample).filter_by(
         analysis_session_id="run-1", frame_index=2385,
     ).count() == 1

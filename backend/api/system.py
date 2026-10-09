@@ -738,6 +738,16 @@ async def post_tracking_frame(
             _record_run_summary(db, payload)
         if persisted is None or payload.camera_id == "cam-border-01":
             db.commit()
+        if payload.camera_id == "cam-border-01":
+            # Durable tracking is authoritative even if the separate optional
+            # telemetry transport was unavailable. Ensure this exact run owns
+            # the active generation before its EOF completion callback.
+            promote_active_session(
+                payload.camera_id,
+                payload.stream_id,
+                int(payload.analysis_generation),
+                payload.analysis_session_id,
+            )
         timeline = _tracking_timelines.setdefault(identity, [])
         # Multiple transport workers can complete HTTPS requests out of order.
         # Preserve every unique source frame for durable replay even when it is

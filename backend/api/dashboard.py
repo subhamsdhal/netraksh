@@ -1290,7 +1290,7 @@ async def complete_dashboard_video(
             active is None
             or active.get("session_id") != session_id
             or int(active.get("analysis_generation") or 0) != generation
-            or (active.get("latest_analysis_session_id") not in {None, analysis_session_id})
+            or active.get("latest_analysis_session_id") != analysis_session_id
             or str(active.get("analysis_state") or "").upper() not in {"WAKING", "ACTIVE", "COMPLETED"}
         ):
             raise HTTPException(status_code=409, detail="Completion does not match active durable generation")
