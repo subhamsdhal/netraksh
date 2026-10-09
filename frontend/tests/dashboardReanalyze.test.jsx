@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   authFetch: vi.fn(),
+  authUpload: vi.fn(),
   resetCameraContext: vi.fn(),
   refreshEventsForContext: vi.fn(),
   refreshTelemetryForContext: vi.fn(),
@@ -14,7 +15,7 @@ vi.mock('../src/services/auth', () => ({
   WS_URL: 'wss://example.invalid',
   BACKEND_URL: 'https://example.invalid',
   authFetch: mocks.authFetch,
-  authUpload: vi.fn(),
+  authUpload: mocks.authUpload,
 }));
 vi.mock('../src/hooks/useAuth', () => ({ default: () => ({ role: 'ADMIN' }) }));
 vi.mock('../src/hooks/useDemoScenario', () => ({ default: () => ({ scenario: 'normal' }) }));
@@ -50,6 +51,7 @@ beforeEach(() => {
   localStorage.setItem('netraksh.cameraSlots', JSON.stringify(['cam-border-01', 'cam-checkpoint-01']));
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
   mocks.authFetch.mockReset();
+  mocks.authUpload.mockReset();
   mocks.authFetch.mockImplementation(async (path, options = {}) => {
     if (path.startsWith('/api/dashboard/video/current?camera_id=cam-border-01')) {
       return response({
@@ -91,6 +93,51 @@ afterEach(() => {
 });
 
 describe('Command Center restored-source reanalysis', () => {
+  it('automatically starts exactly one analysis after a new Camera 1 upload is ready', async () => {
+    const user = userEvent.setup();
+    mocks.authUpload.mockResolvedValue(response({
+      available: true,
+      status: 'accepted',
+      state: 'READY',
+      source_state: 'READY',
+      camera_id: 'cam-border-01',
+      preparation_job_id: sourceId,
+      upload_intent_id: sourceId,
+      session_id: sourceId,
+      source_name: 'vid 1.mp4',
+      source_generation: 7,
+    }, true));
+    render(<Dashboard />);
+
+    await screen.findAllByRole('button', { name: 'REANALYZE' });
+    const file = new File(['video-bytes'], 'vid 1.mp4', { type: 'video/mp4' });
+    await user.upload(document.querySelector('input[type="file"][data-camera-id="cam-border-01"]'), file);
+
+    await waitFor(() => {
+      expect(mocks.authUpload).toHaveBeenCalledTimes(1);
+      const starts = mocks.authFetch.mock.calls.filter(([path, options]) =>
+        path === '/api/dashboard/video/scenario'
+        && options?.method === 'POST'
+        && JSON.parse(options.body).scenario === 'normal',
+      );
+      expect(starts).toHaveLength(1);
+    });
+    const starts = mocks.authFetch.mock.calls.filter(([path, request]) =>
+      path === '/api/dashboard/video/scenario'
+      && request?.method === 'POST'
+      && JSON.parse(request.body).scenario === 'normal',
+    );
+    const [, options] = starts[0];
+    expect(JSON.parse(options.body)).toMatchObject({
+      camera_id: 'cam-border-01',
+      source_mode: 'durable',
+      video_session_id: sourceId,
+      scenario: 'normal',
+      wake_edge: true,
+    });
+    expect(starts).toHaveLength(1);
+  });
+
   it('does not start a run on restore, then sends exactly one explicit Camera 1 reanalyze request', async () => {
     const user = userEvent.setup();
     render(<Dashboard />);

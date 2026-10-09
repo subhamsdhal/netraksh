@@ -11,7 +11,7 @@ import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, completedRunMetrics, completedRunSummaryIdentity, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, latestEventAtOrBeforeFrame, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, selectedRunContext, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring, uploadedRunComparison } from '../utils/dashboardScope';
 import { canReuseRestoredMedia, updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
-import { analysisLifecyclePresentation, applyReplayResult, canReanalyzeSource, fetchWithTimeout, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, canReanalyzeSource, fetchWithTimeout, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 import { replayTimelineAssessment } from '../utils/trackingTimeline';
 import { adminDiagnosticsEnabled as isAdminDiagnosticsEnabled } from '../utils/adminDiagnostics';
@@ -194,7 +194,7 @@ export default function Dashboard() {
     throw lastTransportError || new Error('VIDEO PREPARATION TIMED OUT');
   };
 
-  const hydratePreparedUpload = async (cameraId, prepared, requestIsCurrent) => {
+  const hydratePreparedUpload = async (cameraId, prepared, requestIsCurrent, uploadRequestId = null) => {
     if (!prepared || !requestIsCurrent()) return false;
     const preparedSource = sourceStateFromPreparation(prepared);
     if (!preparedSource) throw new Error('VIDEO PREPARATION COMPLETED WITHOUT A VALID SOURCE');
@@ -208,6 +208,15 @@ export default function Dashboard() {
       uploadError: null,
       analysisStartFailed: false,
     });
+    if (uploadRequestId && requestIsCurrent()) {
+      await runUploadAutoStart({
+        claims: uploadAutoStartClaimsRef.current,
+        cameraId,
+        sourceState: preparedSource,
+        uploadRequestId,
+        start: handleStartAnalysis,
+      });
+    }
     if (prepared.preview_url) {
       try {
         const mediaResponse = await authFetch(prepared.preview_url);
@@ -1171,7 +1180,7 @@ export default function Dashboard() {
     if (String(uploaded.state || uploaded.source_state || '').toUpperCase() !== 'READY') {
       uploaded = await waitForPreparation(cameraId, uploaded.preparation_job_id, requestIsCurrent);
     }
-    await hydratePreparedUpload(cameraId, uploaded, requestIsCurrent);
+    await hydratePreparedUpload(cameraId, uploaded, requestIsCurrent, uploadRequestId);
     if (requestIsCurrent()) delete uploadRequestsRef.current[cameraId];
   };
 
