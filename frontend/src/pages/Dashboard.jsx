@@ -792,7 +792,7 @@ export default function Dashboard() {
             analysis_generation: state.analysis_generation ?? null,
           });
           if (diagnosticsEnabled && cameraId === 'cam-border-01'
-              && state.session_id === 'ce25c9fc-7eb7-4396-9c43-25ba7633d269') {
+              && state.latest_analysis_session_id === 'ce25c9fc-7eb7-4396-9c43-25ba7633d269') {
             authFetch('/api/dashboard/admin/media-diagnostics/camera1-completed-run')
               .then(async (diagnosticResponse) => ({
                 stage: 'MEDIA_RESPONSE_DIAGNOSTIC_COMPLETE',
