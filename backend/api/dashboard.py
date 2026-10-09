@@ -30,6 +30,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -38,7 +39,7 @@ from pathlib import Path
 from time import perf_counter
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from backend.config import settings
@@ -90,6 +91,77 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+
+
+_SINGLE_BYTE_RANGE = re.compile(r"^bytes=(\d*)-(\d*)$", re.IGNORECASE)
+_MEDIA_CHUNK_SIZE = 64 * 1024
+
+
+def _parse_byte_range(range_header: str | None, size: int) -> tuple[int, int] | None:
+    """Return the inclusive byte range, or None when the Range header is ignored."""
+    match = _SINGLE_BYTE_RANGE.fullmatch(range_header or "")
+    if not range_header or "," in range_header or not match:
+        return None
+
+    first, last = match.groups()
+    if not first and not last:
+        return None
+    if not first:
+        suffix_length = int(last)
+        if suffix_length <= 0 or size == 0:
+            raise ValueError("unsatisfiable byte range")
+        start = max(0, size - suffix_length)
+        end = size - 1
+    else:
+        start = int(first)
+        end = int(last) if last else size - 1
+        if start >= size or end < start:
+            raise ValueError("unsatisfiable byte range")
+        end = min(end, size - 1)
+    return start, end
+
+
+def _iter_file_range(path: Path, start: int, length: int):
+    with path.open("rb") as media_file:
+        media_file.seek(start)
+        remaining = length
+        while remaining:
+            chunk = media_file.read(min(_MEDIA_CHUNK_SIZE, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+def _video_file_response(path: Path, request: Request) -> Response:
+    """Serve MP4 media with a real single-byte-range response for seeking."""
+    size = path.stat().st_size
+    headers = {"Accept-Ranges": "bytes"}
+    range_header = request.headers.get("range")
+    try:
+        selected_range = _parse_byte_range(range_header, size)
+    except ValueError:
+        return Response(status_code=416, headers={**headers, "Content-Range": f"bytes */{size}"})
+
+    if selected_range is None:
+        return FileResponse(path, media_type="video/mp4", headers=headers)
+
+    start, end = selected_range
+
+    length = end - start + 1
+    headers.update({
+        "Content-Length": str(length),
+        "Content-Range": f"bytes {start}-{end}/{size}",
+    })
+    if request.method.upper() == "HEAD":
+        return Response(status_code=206, media_type="video/mp4", headers=headers)
+
+    return StreamingResponse(
+        _iter_file_range(path, start, length),
+        status_code=206,
+        media_type="video/mp4",
+        headers=headers,
+    )
 
 
 _lease_check_at: dict[str, float] = {}
@@ -1342,7 +1414,7 @@ async def complete_dashboard_video(
 # ---------------------------------------------------------------------------
 
 @router.get("/video/current/media")
-async def get_current_video_media(_user=Depends(require_operator_or_admin)):
+async def get_current_video_media(request: Request, _user=Depends(require_operator_or_admin)):
     """
     Securely serve the current dashboard video media using an authenticated endpoint.
     """
@@ -1363,11 +1435,11 @@ async def get_current_video_media(_user=Depends(require_operator_or_admin)):
     else:
         preview_path = None
     if preview_path and preview_path.exists() and preview_path.stat().st_size > 0:
-        return FileResponse(preview_path, media_type="video/mp4", headers={"Accept-Ranges": "bytes"})
+        return _video_file_response(preview_path, request)
 
     # Priority 2: original file is already MP4
     if abs_source.exists() and abs_source.suffix.lower() == ".mp4":
-        return FileResponse(abs_source, media_type="video/mp4", headers={"Accept-Ranges": "bytes"})
+        return _video_file_response(abs_source, request)
 
     raise HTTPException(status_code=404, detail="Media file not found")
 
@@ -1396,7 +1468,7 @@ async def get_video_media_by_session(
         raise HTTPException(status_code=404, detail="Video session media not found")
     if media_path.suffix.lower() != ".mp4":
         raise HTTPException(status_code=415, detail="This video has no browser-compatible MP4 preview")
-    return FileResponse(media_path, media_type="video/mp4", headers={"Accept-Ranges": "bytes"})
+    return _video_file_response(media_path, request)
 
 
 @router.get("/video/demo-telemetry")
