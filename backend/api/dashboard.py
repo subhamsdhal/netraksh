@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -35,6 +36,8 @@ import time
 import uuid
 from pathlib import Path
 from time import perf_counter
+from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status, Request
@@ -44,7 +47,8 @@ from sqlalchemy.orm import Session
 from backend.config import settings
 from backend.database.session import SessionLocal, get_db
 from backend.models.orm import AnalysisRunSummary, Camera
-from backend.security.auth import audit, enforce_command_access, require_edge_auth, require_operator_or_admin
+from backend.security.auth import audit, enforce_command_access, require_admin, require_edge_auth, require_operator_or_admin
+from backend.services.evidence_storage import get_evidence_storage
 from backend.services.video_storage import (
     activate_bundled_source,
     activate_session,
@@ -1333,6 +1337,111 @@ async def get_video_media_by_session(
     if media_path.suffix.lower() != ".mp4":
         raise HTTPException(status_code=415, detail="This video has no browser-compatible MP4 preview")
     return FileResponse(media_path, media_type="video/mp4", headers={"Accept-Ranges": "bytes"})
+
+
+@router.get("/admin/media-diagnostics/camera1-completed-run")
+async def diagnose_camera1_completed_run_media(_admin=Depends(require_admin)):
+    """Read-only, admin-only transport diagnostics for the one accepted C1 run."""
+    camera_id = "cam-border-01"
+    session_id = "ce25c9fc-7eb7-4396-9c43-25ba7633d269"
+    result = {
+        "camera_id": camera_id,
+        "session_id": session_id,
+        "storage_provider": settings.OBJECT_STORAGE_PROVIDER or settings.EVIDENCE_STORAGE_BACKEND,
+        "media_object_exists": False,
+        "object_key_sha256_prefix": None,
+        "signed_url_generated": False,
+        "signed_url_expiry_remaining_seconds": None,
+        "storage_host": None,
+        "head_status": None,
+        "head_content_type": None,
+        "head_content_length": None,
+        "head_accept_ranges": None,
+        "range_status": None,
+        "range_content_type": None,
+        "range_content_length": None,
+        "range_accept_ranges": None,
+        "range_content_range": None,
+        "cors_allow_origin": None,
+        "range_error_category": None,
+        "head_error_category": None,
+    }
+    if result["storage_provider"] != "s3":
+        result["error_category"] = "configured_storage_provider_not_s3"
+        return result
+
+    try:
+        metadata = await asyncio.to_thread(get_uploaded_session, camera_id, session_id)
+    except Exception as exc:
+        result["error_category"] = "session_metadata_lookup_failed"
+        result["metadata_error_category"] = type(exc).__name__
+        return result
+    if not metadata:
+        result["error_category"] = "session_metadata_not_found"
+        return result
+
+    object_key = metadata.get("preview_object_key")
+    if not object_key and metadata.get("content_type") == "video/mp4":
+        object_key = metadata.get("source_object_key")
+    if not object_key:
+        result["error_category"] = "browser_compatible_media_object_missing"
+        return result
+
+    result["object_key_sha256_prefix"] = hashlib.sha256(str(object_key).encode("utf-8")).hexdigest()[:16]
+    storage = get_evidence_storage()
+    try:
+        head = await asyncio.to_thread(storage.head_object, object_key)
+        result.update({
+            "media_object_exists": True,
+            "head_status": "available",
+            "head_content_type": head.get("ContentType"),
+            "head_content_length": head.get("ContentLength"),
+            "head_accept_ranges": head.get("AcceptRanges"),
+        })
+    except Exception as exc:
+        result["head_status"] = "failed"
+        result["head_error_category"] = type(exc).__name__
+
+    url = signed_media_url(object_key, expires_in=900)
+    result["signed_url_generated"] = bool(url)
+    if not url:
+        result["error_category"] = result.get("error_category") or "signed_url_generation_failed"
+        return result
+
+    parsed = urlsplit(url)
+    result["storage_host"] = parsed.hostname
+    query = parse_qs(parsed.query)
+    try:
+        signed_at = datetime.strptime(query["X-Amz-Date"][0], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).timestamp()
+        expires_in = int(query["X-Amz-Expires"][0])
+        result["signed_url_expiry_remaining_seconds"] = max(0, int(signed_at + expires_in - time.time()))
+    except (KeyError, IndexError, TypeError, ValueError):
+        result["signed_url_expiry_remaining_seconds"] = None
+
+    try:
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+            async with client.stream(
+                "GET",
+                url,
+                headers={"Range": "bytes=0-1", "Origin": "https://netraksh.vercel.app"},
+            ) as response:
+                result.update({
+                    "range_status": response.status_code,
+                    "range_content_type": response.headers.get("content-type"),
+                    "range_content_length": response.headers.get("content-length"),
+                    "range_accept_ranges": response.headers.get("accept-ranges"),
+                    "range_content_range": response.headers.get("content-range"),
+                    "cors_allow_origin": response.headers.get("access-control-allow-origin"),
+                })
+                # Consume at most one bounded transport chunk and close immediately.
+                iterator = response.aiter_raw()
+                try:
+                    await iterator.__anext__()
+                except StopAsyncIteration:
+                    pass
+    except Exception as exc:
+        result["range_error_category"] = type(exc).__name__
+    return result
 
 
 @router.get("/video/demo-telemetry")
