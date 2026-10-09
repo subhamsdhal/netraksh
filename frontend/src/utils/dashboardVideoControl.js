@@ -85,6 +85,27 @@ export async function fetchPreparationForRestore(fetcher, path, onDiagnostic = (
   }
 }
 
+export async function fetchReadOnlyWithRetry(
+  fetcher,
+  path,
+  { timeoutMs = 10000, attempts = 3, retryDelayMs = 350, onRetry = () => {} } = {},
+) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetchWithTimeout(fetcher, path, timeoutMs);
+      if (response.status < 500 || attempt === attempts) return response;
+      onRetry({ attempt, http_status: response.status });
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) throw error;
+      onRetry({ attempt, error_name: error?.name || 'Error' });
+    }
+    await new Promise(resolve => setTimeout(resolve, retryDelayMs * attempt));
+  }
+  throw lastError || new Error('Read-only request did not complete');
+}
+
 export function sourceStateFromPreparation(job) {
   if (!job?.available || !job?.preparation_job_id || !job?.camera_id) return null;
   const preparationState = String(job.state || 'UPLOADED').toUpperCase();

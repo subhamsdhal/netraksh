@@ -11,7 +11,7 @@ import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, completedRunMetrics, completedRunSummaryIdentity, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, latestEventAtOrBeforeFrame, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, selectedRunContext, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring, uploadedRunComparison } from '../utils/dashboardScope';
 import { canReuseRestoredMedia, updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
-import { analysisLifecyclePresentation, applyReplayResult, canReanalyzeSource, fetchPreparationForRestore, fetchWithTimeout, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, canReanalyzeSource, fetchPreparationForRestore, fetchReadOnlyWithRetry, fetchWithTimeout, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 import { replayTimelineAssessment } from '../utils/trackingTimeline';
 import { adminDiagnosticsEnabled as isAdminDiagnosticsEnabled } from '../utils/adminDiagnostics';
@@ -768,7 +768,14 @@ export default function Dashboard() {
             }
           }
           recordRestoreDiagnostic({ stage: 'CURRENT_SOURCE_LOOKUP_PENDING' });
-          const response = await authFetch(`/api/dashboard/video/current?camera_id=${encodeURIComponent(cameraId)}`);
+          const response = await fetchReadOnlyWithRetry(
+            authFetch,
+            `/api/dashboard/video/current?camera_id=${encodeURIComponent(cameraId)}`,
+            {
+              timeoutMs: 15000,
+              onRetry: (retry) => recordRestoreDiagnostic({ stage: 'CURRENT_SOURCE_LOOKUP_RETRY', ...retry }),
+            },
+          );
           recordRestoreDiagnostic({ stage: 'CURRENT_SOURCE_LOOKUP_COMPLETE', http_status: response.status });
           if (!response.ok || !mounted) return;
           authoritativeResponse = true;
@@ -811,7 +818,15 @@ export default function Dashboard() {
             if (state.preview_url && !reuseLoadedMedia) {
               recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_PENDING' });
               try {
-                const mediaResponse = await authFetch(state.preview_url);
+                const mediaResponse = await fetchReadOnlyWithRetry(
+                  authFetch,
+                  state.preview_url,
+                  {
+                    timeoutMs: 30000,
+                    attempts: 2,
+                    onRetry: (retry) => recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_RETRY', ...retry }),
+                  },
+                );
                 recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_COMPLETE', http_status: mediaResponse.status });
                 if (mediaResponse.ok) {
                   const blobUrl = URL.createObjectURL(await mediaResponse.blob());
@@ -1039,7 +1054,14 @@ export default function Dashboard() {
       const params = new URLSearchParams({ camera_id: identity.cameraId, stream_id: identity.streamId });
       if (identity.analysisGeneration != null) params.set('analysis_generation', String(identity.analysisGeneration));
       try {
-        const response = await authFetch(`/system/analysis-runs/${encodeURIComponent(identity.analysisSessionId)}?${params.toString()}`);
+        const response = await fetchReadOnlyWithRetry(
+          authFetch,
+          `/system/analysis-runs/${encodeURIComponent(identity.analysisSessionId)}?${params.toString()}`,
+          {
+            timeoutMs: 10000,
+            onRetry: (retry) => recordSummaryDiagnostic({ stage: 'RUN_SUMMARY_FETCH_RETRY', ...retry }),
+          },
+        );
         const summary = response.ok ? await response.json() : null;
         recordSummaryDiagnostic({
           stage: 'RUN_SUMMARY_FETCH_COMPLETE',

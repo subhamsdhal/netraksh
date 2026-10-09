@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, canReanalyzeSource, claimUploadAutoStart, durableHeartbeat, fetchPreparationForRestore, fetchWithTimeout, lifecycleAction, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, canReanalyzeSource, claimUploadAutoStart, durableHeartbeat, fetchPreparationForRestore, fetchReadOnlyWithRetry, fetchWithTimeout, lifecycleAction, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
 
 describe('dashboard video control ownership', () => {
   it('settles only the exact Camera 1 live generation from backend authority', () => {
@@ -83,6 +83,39 @@ describe('dashboard video control ownership', () => {
       stage: 'PREPARATION_CHECK_ERROR',
       preparation_error_name: 'TypeError',
     });
+  });
+
+  it('retries transient read-only restore fetch failures and returns the successful response', async () => {
+    const onRetry = vi.fn();
+    const success = { ok: true, status: 200 };
+    const fetcher = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce(success);
+
+    await expect(fetchReadOnlyWithRetry(fetcher, '/system/analysis-runs/run-1', {
+      attempts: 3,
+      retryDelayMs: 0,
+      onRetry,
+    })).resolves.toBe(success);
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(onRetry).toHaveBeenCalledWith({ attempt: 1, error_name: 'TypeError' });
+  });
+
+  it('retries a transient server error but does not retry a client response', async () => {
+    const onRetry = vi.fn();
+    const success = { ok: true, status: 200 };
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce({ status: 503 })
+      .mockResolvedValueOnce(success);
+
+    await expect(fetchReadOnlyWithRetry(fetcher, '/api/dashboard/video/current', {
+      attempts: 3,
+      retryDelayMs: 0,
+      onRetry,
+    })).resolves.toBe(success);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(onRetry).toHaveBeenCalledWith({ attempt: 1, http_status: 503 });
   });
 
   it('replaces a stale browser session with the bundled source contract', () => {
