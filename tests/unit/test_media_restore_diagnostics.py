@@ -66,15 +66,21 @@ async def test_camera1_media_diagnostic_reports_sanitized_head_range_and_cors(mo
             return {"ContentType": "video/mp4", "ContentLength": 2048, "AcceptRanges": "bytes"}
 
     monkeypatch.setattr(dashboard.settings, "OBJECT_STORAGE_PROVIDER", "s3")
-    monkeypatch.setattr(
-        dashboard,
-        "get_uploaded_session",
-        lambda camera_id, session_id: {
+    lookups = []
+
+    def _get_uploaded_session(camera_id, session_id):
+        lookups.append((camera_id, session_id))
+        return {
             "camera_id": camera_id,
             "session_id": session_id,
             "preview_object_key": "video-sessions/cam-border-01/private-preview.mp4",
             "content_type": "video/mp4",
-        },
+        }
+
+    monkeypatch.setattr(
+        dashboard,
+        "get_uploaded_session",
+        _get_uploaded_session,
     )
     monkeypatch.setattr(dashboard, "get_evidence_storage", lambda: _Storage())
     monkeypatch.setattr(dashboard, "signed_media_url", lambda *_args, **_kwargs: signed_url)
@@ -89,6 +95,9 @@ async def test_camera1_media_diagnostic_reports_sanitized_head_range_and_cors(mo
     serialized = json.dumps(result)
 
     assert result["media_object_exists"] is True
+    assert result["analysis_session_id"] == "ce25c9fc-7eb7-4396-9c43-25ba7633d269"
+    assert result["media_session_id"] == "f31525b5-19a1-4dca-af55-e7cbc271134b"
+    assert lookups == [("cam-border-01", "f31525b5-19a1-4dca-af55-e7cbc271134b")]
     assert result["head_status"] == "available"
     assert result["head_content_type"] == "video/mp4"
     assert result["head_content_length"] == 2048

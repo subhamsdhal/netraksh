@@ -1343,10 +1343,12 @@ async def get_video_media_by_session(
 async def diagnose_camera1_completed_run_media(_admin=Depends(require_admin)):
     """Read-only, admin-only transport diagnostics for the one accepted C1 run."""
     camera_id = "cam-border-01"
-    session_id = "ce25c9fc-7eb7-4396-9c43-25ba7633d269"
+    analysis_session_id = "ce25c9fc-7eb7-4396-9c43-25ba7633d269"
+    session_id = "f31525b5-19a1-4dca-af55-e7cbc271134b"
     result = {
         "camera_id": camera_id,
-        "session_id": session_id,
+        "analysis_session_id": analysis_session_id,
+        "media_session_id": session_id,
         "storage_provider": settings.OBJECT_STORAGE_PROVIDER or settings.EVIDENCE_STORAGE_BACKEND,
         "media_object_exists": False,
         "object_key_sha256_prefix": None,
