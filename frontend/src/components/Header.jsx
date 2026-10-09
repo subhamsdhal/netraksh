@@ -309,6 +309,7 @@ export default function Header() {
 
         {/* Account button */}
         <button
+          className="topbar-account-button"
           onClick={() => { setShowAccountPanel(!showAccountPanel); setShowSyncPanel(false); }}
           style={{
             width: 32, height: 32, borderRadius: '50%',
@@ -318,6 +319,7 @@ export default function Header() {
             color: roleStyle.text, cursor: 'pointer',
             transition: 'all 0.15s ease',
           }}
+          aria-label={isAuthenticated ? `Account menu for ${username} (${role})` : 'Account menu'}
           title={isAuthenticated ? `${username} (${role})` : 'Not signed in'}
         >
           <User size={14} />

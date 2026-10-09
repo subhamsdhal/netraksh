@@ -80,6 +80,13 @@ describe('completed Command Center data', () => {
 });
 
 describe('dynamic dashboard camera scope', () => {
+  it('keeps unknown source authority in RESTORING instead of interpreting it as idle', () => {
+    expect(lifecycleStatus({ restoring: true, runState: 'RESTORING' }, null)).toBe('RESTORING');
+    expect(lifecycleStatus({ restoring: true, runState: 'RESTORING' }, {
+      timestamp: Date.now(), analysis_state: 'COMPLETED',
+    })).toBe('RESTORING');
+  });
+
   it('uses restored durable run identity but never substitutes stream identity', () => {
     expect(analysisSessionIdForSource(null, { sourceId: 'stream-1', latestAnalysisSessionId: 'run-1' })).toBe('run-1');
     expect(analysisSessionIdForSource(null, { sourceId: 'stream-1' })).toBeNull();

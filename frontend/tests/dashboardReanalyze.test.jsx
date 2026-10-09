@@ -93,6 +93,27 @@ afterEach(() => {
 });
 
 describe('Command Center restored-source reanalysis', () => {
+  it('shows restoring state until backend readiness and both persisted sources are confirmed', async () => {
+    let resolveReady;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => { resolveReady = resolve; })));
+    render(<Dashboard />);
+
+    expect(screen.getAllByText('RESTORING CLOUD SOURCE...')).toHaveLength(2);
+    expect(screen.getAllByText('RESTORING CAMERA STATE').length).toBeGreaterThan(0);
+    expect(screen.queryByText('NO VIDEO SOURCE')).not.toBeInTheDocument();
+    expect(screen.queryAllByRole('button', { name: 'ADD VIDEO' })).toHaveLength(0);
+
+    resolveReady({ ok: true });
+    await screen.findAllByRole('button', { name: 'REANALYZE' });
+    expect(screen.getByText('SOURCE: vid 1.mp4')).toBeInTheDocument();
+    expect(screen.getByText('SOURCE: vid 2.mp4')).toBeInTheDocument();
+    expect(screen.getAllByText('ANALYSIS COMPLETED').length).toBeGreaterThanOrEqual(2);
+    expect(mocks.authFetch.mock.calls.some(([path, options]) =>
+      path === '/api/dashboard/video/scenario'
+      && options?.method === 'POST')).toBe(false);
+    expect(mocks.authFetch.mock.calls.some(([path]) => path === '/api/dashboard/video/reanalyze')).toBe(false);
+  });
+
   it('automatically starts exactly one analysis after a new Camera 1 upload is ready', async () => {
     const user = userEvent.setup();
     mocks.authUpload.mockResolvedValue(response({

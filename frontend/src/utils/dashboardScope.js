@@ -72,6 +72,7 @@ export function cameraInventoryIsRestoring(cameraIds = [], sourceStates = {}, ba
 }
 
 export function lifecycleStatus(sourceState, telemetry, now = Date.now()) {
+  if (sourceState?.restoring) return 'RESTORING';
   const telemetryStatus = telemetryStatusAt(telemetry, now);
   if (telemetryStatus === 'LIVE') return 'ONLINE';
   if (telemetryStatus === 'STALE') return 'STALE';

@@ -20,8 +20,9 @@ export function deriveSyncState({ isConnected, queued = 0, failed = 0, hasActivi
 
 export function deriveCameraOperationalState({ nodeStatus, sourceState, telemetry, now = Date.now() } = {}) {
   const node = !nodeStatus ? 'NOT REPORTED' : nodeStatus === 'READY' ? 'READY' : nodeStatus === 'TIMEOUT' ? 'UNAVAILABLE' : 'WARMING';
-  const source = sourceState?.sourceMode ? (sourceState.restoring ? 'LOADING' : 'READY') : 'NOT LOADED';
+  const source = sourceState?.restoring ? 'LOADING' : sourceState?.sourceMode ? 'READY' : 'NOT LOADED';
   const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
+  if (sourceState?.restoring) return { node, source, analysis: 'RESTORING', telemetry: 'RESTORING' };
   const observed = Number(telemetry?.timestamp || telemetry?.processed_timestamp || 0);
   const ageMs = observed > 1e12 ? now - observed : observed > 0 ? now - (observed * 1000) : Infinity;
   const telemetryState = !telemetry ? 'NONE' : ageMs <= 30_000 ? 'LIVE' : 'STALE';
