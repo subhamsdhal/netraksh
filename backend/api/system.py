@@ -730,14 +730,11 @@ async def post_tracking_frame(
                 video_time=payload.video_time,
                 sample_json=compact_sample,
             ))
-        if payload.camera_id == "cam-border-01":
-            # The durable sample transport is sufficient to establish/update
-            # Camera 1's run summary too. Optional JPEG/diagnostic telemetry
-            # may be dropped; it must not leave this run without the summary
-            # required by its acknowledged EOF completion callback.
-            _record_run_summary(db, payload)
-        if persisted is None or payload.camera_id == "cam-border-01":
-            db.commit()
+        # Durable tracking is sufficient to establish/update either camera's
+        # run summary. Optional diagnostic telemetry can arrive later or be
+        # dropped; the completed replay must still retain its real final frame.
+        _record_run_summary(db, payload)
+        db.commit()
         if payload.camera_id == "cam-border-01":
             # Durable tracking is authoritative even if the separate optional
             # telemetry transport was unavailable. Ensure this exact run owns

@@ -3,7 +3,12 @@ import time
 from edge.demo_runner import _scenario, _poll_scenario
 from unittest.mock import patch, MagicMock
 
-def test_source_session_switching():
+def test_source_session_switching(tmp_path):
+    # The edge deliberately rejects a control-plane path it cannot resolve.
+    # Use a local fixture path so this tests session switching, not that guard.
+    source_path = tmp_path / "source.avi"
+    source_path.write_bytes(b"source fixture")
+    source = str(source_path)
     # Reset state
     _scenario["current"] = "normal"
     _scenario["video_source"] = None
@@ -19,7 +24,7 @@ def test_source_session_switching():
         # First poll with initial values
         mock_resp.json.return_value = {
             "scenario": "normal",
-            "video_source": "demo/videos/vtest.avi",
+            "video_source": source,
             "video_session_id": "session-123"
         }
         
@@ -33,14 +38,14 @@ def test_source_session_switching():
                 pass
         
         # On first poll (when video_source was None), should_restart should NOT be True
-        assert _scenario["video_source"] == "demo/videos/vtest.avi"
+        assert _scenario["video_source"] == source
         assert _scenario["video_session_id"] == "session-123"
         assert not _scenario["should_restart"]
 
         # Now simulate a second poll with a new session ID
         mock_resp.json.return_value = {
             "scenario": "normal",
-            "video_source": "demo/videos/vtest.avi",
+            "video_source": source,
             "video_session_id": "session-456"
         }
 
@@ -51,7 +56,7 @@ def test_source_session_switching():
                 pass
 
         # Because video_source was not None, should_restart should now be True
-        assert _scenario["video_source"] == "demo/videos/vtest.avi"
+        assert _scenario["video_source"] == source
         assert _scenario["video_session_id"] == "session-456"
         assert _scenario["should_restart"]
 
