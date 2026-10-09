@@ -218,9 +218,10 @@ class EdgePipeline:
         self._last_processed_frame_index: Optional[int] = None
         self.timeline_incomplete = False
         self._last_tracking_persist_log_at = 0.0
-        # Retain only the actual final decoded image of a Camera 2 durable
-        # finite source. EOF needs one last image-grounded detector anchor.
+        # Retain only the actual final decoded image of a stored finite source.
+        # Camera-specific EOF handling decides whether an anchor is needed.
         self._last_finite_detector_frame = None
+        self._final_authoritative_sample = None
         self._last_frame_width = None
         self._last_frame_height = None
         # We need a small bounded queue so if the backend goes down or network
@@ -537,6 +538,10 @@ class EdgePipeline:
             # lifecycle record synchronously.
             if completed:
                 self._flush_finite_detector_at_eof()
+                if (self.camera_id == "cam-border-01"
+                        and self.adapter.source_kind == "LOCAL_FINITE_FILE"
+                        and self.adapter.preserve_finite_frames):
+                    self._flush_camera1_final_sample_at_eof()
                 # The adapter has stopped producing by this point. Let the
                 # lossy visualization workers drain briefly, but never allow
                 # a slow hosted HTTP request to prevent the terminal state
@@ -579,6 +584,14 @@ class EdgePipeline:
                             queue_name,
                             abandoned,
                         )
+                    if (queue_name == "tracking"
+                            and self.camera_id == "cam-border-01"
+                            and self.adapter.source_kind == "LOCAL_FINITE_FILE"
+                            and self.adapter.preserve_finite_frames):
+                        # A completed Camera 1 run must durably acknowledge
+                        # its real final detector sample before completion.
+                        if not self._persist_final_authoritative_sample():
+                            self.timeline_incomplete = True
                 if self._tracking_metrics["dropped"] or not self._tracking_metrics["transmitted"]:
                     self.timeline_incomplete = True
             else:
@@ -606,6 +619,13 @@ class EdgePipeline:
                         self._tracking_metrics["dropped"], self._last_processed_frame_index,
                     )
                     self._publish_analysis_state("FAILED")
+                elif (self.camera_id == "cam-border-01"
+                        and self.adapter.source_kind == "LOCAL_FINITE_FILE"
+                        and self.adapter.preserve_finite_frames):
+                    # The runner owns the durable internal-complete callback.
+                    # Do not advertise COMPLETED until that callback has
+                    # verified the acknowledged final timeline sample.
+                    self._publish_analysis_state("FINALIZING")
                 else:
                     self._publish_analysis_state("COMPLETED")
             elif self.adapter.state == StreamState.FAILED:
@@ -724,6 +744,122 @@ class EdgePipeline:
             logger.warning("[Pipeline] EOF final image detection unavailable")
             return
         logger.info("[Pipeline] EOF final detector frame=%d emitted", meta.frame_index)
+
+    def _flush_camera1_final_sample_at_eof(self) -> bool:
+        """Detect Camera 1's actual last stored-video frame at EOF.
+
+        This creates a real terminal sample from the final decoded image; it
+        never copies detections forward from an earlier detector keyframe.
+        """
+        if (self.adapter.source_kind != "LOCAL_FINITE_FILE"
+                or not self.adapter.preserve_finite_frames):
+            return True
+        final = self._last_finite_detector_frame
+        if final is None:
+            self.timeline_incomplete = True
+            logger.error("[Tracking] Camera 1 EOF final image unavailable; completion prohibited")
+            return False
+        frame, meta, health, condition = final
+
+        def wait_for_detector() -> bool:
+            deadline = time.monotonic() + 20.0
+            while self.detector_worker.busy and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if self.detector_worker.busy:
+                self.timeline_incomplete = True
+                logger.error("[Tracking] Camera 1 EOF detector drain timed out frame=%s", meta.frame_index)
+                return False
+            return True
+
+        if not wait_for_detector():
+            return False
+        packet = self.detector_worker.poll_latest()
+        if packet is not None:
+            if packet.error is not None:
+                self.timeline_incomplete = True
+                logger.error("[Tracking] Camera 1 EOF pending detector failed frame=%s", meta.frame_index)
+                return False
+            if (self._last_detector_frame_index is None
+                    or packet.job.frame_index > self._last_detector_frame_index):
+                self._prime_stored_lost_tracks(packet.tracks)
+                tracks = self._apply_continuity_guard(packet.tracks, packet.job.frame)
+                self._emit_detector_sample(packet, tracks)
+                self._last_detector_frame_index = packet.job.frame_index
+        if self._last_detector_frame_index == int(meta.frame_index):
+            return self._final_authoritative_sample is not None
+
+        policy = self.condition_router.route(condition.condition)
+        detection_frame = enhance_for_detection(frame, policy)
+        enhanced = detection_frame is not frame
+        source_copy = frame.copy()
+        job = DetectorJob(
+            frame=source_copy,
+            detector_frame=detection_frame.copy() if enhanced else source_copy,
+            frame_index=int(meta.frame_index),
+            meta=meta,
+            health=health,
+            condition=condition,
+            confidence_threshold=self._detector_confidence_threshold(condition.condition),
+            enhancement_applied=enhanced,
+            submitted_at=time.time(),
+            new_track_threshold=self._detector_new_track_threshold(condition.condition),
+        )
+        if not self.detector_worker.submit(job) or not wait_for_detector():
+            self.timeline_incomplete = True
+            logger.error("[Tracking] Camera 1 EOF final image detection unavailable frame=%s", meta.frame_index)
+            return False
+        packet = self.detector_worker.poll_latest()
+        if packet is None or packet.error is not None or packet.job.frame_index != int(meta.frame_index):
+            self.timeline_incomplete = True
+            logger.error("[Tracking] Camera 1 EOF final image detection unavailable frame=%s", meta.frame_index)
+            return False
+        self._prime_stored_lost_tracks(packet.tracks)
+        tracks = self._apply_continuity_guard(packet.tracks, packet.job.frame)
+        # Do not leave this critical terminal result in the ordinary queue.
+        self._emit_detector_sample(packet, tracks, enqueue=False)
+        self._last_detector_frame_index = packet.job.frame_index
+        logger.info(
+            "[Tracking] Camera 1 EOF final detector frame=%d video_time=%.6f emitted",
+            meta.frame_index, float(meta.video_time_seconds),
+        )
+        return self._final_authoritative_sample is not None
+
+    def _persist_final_authoritative_sample(self) -> bool:
+        """Retry the final Camera 1 sample until acknowledged or bounded failure."""
+        import httpx
+
+        payload = self._final_authoritative_sample
+        if not payload:
+            logger.error("[Tracking] Camera 1 EOF has no authoritative final sample")
+            return False
+        verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(connect=3.0, read=6.0, write=6.0, pool=3.0),
+                verify=verify,
+                cert=self.sync_client._client_cert,
+            ) as client:
+                persisted = self._post_tracking_with_retry(
+                    client,
+                    f"{self._backend_url}/system/tracking-frame",
+                    payload,
+                    max_attempts=5,
+                )
+        except Exception as exc:
+            self._record_tracking_transport_error(exception=exc)
+            persisted = False
+        if not persisted:
+            self.timeline_incomplete = True
+            logger.error(
+                "[Tracking] Camera 1 EOF final sample not durably acknowledged run_id=%s frame=%s",
+                self.stream_id, payload.get("frame_index"),
+            )
+            return False
+        logger.info(
+            "[Tracking] Camera 1 EOF final sample durably acknowledged run_id=%s frame=%s video_time=%.6f",
+            self.stream_id, payload.get("frame_index"), float(payload.get("video_time") or 0),
+        )
+        return True
 
     def _clear_live_queues(self) -> None:
         """Discard lossy live packets before a replay/terminal transition."""
@@ -944,7 +1080,7 @@ class EdgePipeline:
             self._tracking_metrics["dropped"] += 1
             logger.error("[Tracking] bounded queue enqueue race run_id=%s frame=%s", self.stream_id, payload.get("frame_index"))
 
-    def _emit_detector_sample(self, packet, tracks) -> None:
+    def _emit_detector_sample(self, packet, tracks, *, enqueue: bool = True) -> dict:
         """Publish the detector's own source frame, never a later flow frame.
 
         The decoupled HUD path emits only optical-flow samples. Without this
@@ -1010,7 +1146,11 @@ class EdgePipeline:
                 else None
             ),
         }
-        self._queue_tracking_payload(payload)
+        if self.camera_id == "cam-border-01":
+            self._final_authoritative_sample = payload
+        if enqueue:
+            self._queue_tracking_payload(payload)
+        return payload
 
     def _run_tracking_loop(self) -> None:
         """Push idempotent frame samples with bounded, isolated transport retries."""
@@ -1036,15 +1176,17 @@ class EdgePipeline:
                 logger.warning("[Tracking] Unexpected transport error: %s", type(exc).__name__)
         client.close()
 
-    def _post_tracking_with_retry(self, client, url: str, payload: dict) -> bool:
-        """At most eight sends; never let a backend transport fault stop inference.
+    def _post_tracking_with_retry(
+        self, client, url: str, payload: dict, *, max_attempts: int = 8,
+    ) -> bool:
+        """Retry boundedly; never let a backend transport fault stop inference.
 
         Backend sample writes are idempotent by run/sequence/frame. A terminal
         failure is counted and logged rather than represented as persisted.
+        Ordinary frames default to eight attempts; EOF uses a shorter bound.
         """
         import httpx
 
-        max_attempts = 8
         for attempt in range(max_attempts):
             try:
                 response = client.post(url, json=payload, headers=self._edge_auth_headers())
@@ -1203,6 +1345,7 @@ class EdgePipeline:
         self._last_detector_frame_index = None
         self._last_processed_frame_index = None
         self._last_finite_detector_frame = None
+        self._final_authoritative_sample = None
         with self._hud_state_lock:
             self._hud_anchor = None
             self._hud_anchor_frame_index = None
@@ -1481,7 +1624,7 @@ class EdgePipeline:
         ):
             self._last_condition = self.condition_classifier.classify(frame)
         condition = self._last_condition
-        if (self.camera_id == "cam-checkpoint-01"
+        if ((self.camera_id == "cam-checkpoint-01" or self.camera_id == "cam-border-01")
                 and self.adapter.source_kind == "LOCAL_FINITE_FILE"
                 and self.adapter.preserve_finite_frames):
             self._last_finite_detector_frame = (frame, meta, health, condition)

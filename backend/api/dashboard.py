@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import asyncio
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -42,7 +43,7 @@ from sqlalchemy.orm import Session
 
 from backend.config import settings
 from backend.database.session import SessionLocal, get_db
-from backend.models.orm import AnalysisRunSummary, Camera
+from backend.models.orm import AnalysisRunSummary, AnalysisTrackingSample, Camera
 from backend.security.auth import audit, enforce_command_access, require_admin, require_edge_auth, require_operator_or_admin
 from backend.services.video_storage import (
     activate_bundled_source,
@@ -1247,6 +1248,35 @@ async def complete_dashboard_video(
         raise HTTPException(status_code=400, detail="analysis_generation is required")
     if not camera_id or not session_id:
         raise HTTPException(status_code=400, detail="camera_id and video_session_id are required")
+    analysis_session_id = str(payload.get("analysis_session_id") or "")
+    summary = db.get(AnalysisRunSummary, analysis_session_id) if analysis_session_id else None
+    if camera_id == "cam-border-01":
+        try:
+            processed_frame = int(payload.get("final_processed_frame_index", payload.get("final_frame_index")))
+            processed_time = float(payload.get("final_processed_video_time", payload.get("final_video_time")))
+            sample_frame = int(payload.get("final_authoritative_sample_frame_index"))
+            sample_time = float(payload.get("final_authoritative_sample_video_time"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=409, detail="Camera 1 final authoritative sample identity is required")
+        if processed_frame != sample_frame or not math.isclose(processed_time, sample_time, rel_tol=0.0, abs_tol=0.002):
+            raise HTTPException(status_code=409, detail="Camera 1 final sample does not match the final processed source frame")
+        if summary is None:
+            raise HTTPException(status_code=409, detail="Camera 1 run summary is missing at EOF")
+        if (summary.camera_id, summary.stream_id, summary.analysis_generation) != (camera_id, session_id, generation):
+            raise HTTPException(status_code=409, detail="Completion run identity conflict")
+        final_rows = db.query(AnalysisTrackingSample).filter(
+            AnalysisTrackingSample.analysis_session_id == analysis_session_id,
+            AnalysisTrackingSample.camera_id == camera_id,
+            AnalysisTrackingSample.stream_id == session_id,
+            AnalysisTrackingSample.analysis_generation == generation,
+            AnalysisTrackingSample.frame_index == sample_frame,
+        ).all()
+        if not any(
+            row.video_time is not None
+            and math.isclose(float(row.video_time), sample_time, rel_tol=0.0, abs_tol=0.002)
+            for row in final_rows
+        ):
+            raise HTTPException(status_code=409, detail="Camera 1 final authoritative sample is not durably persisted")
     changes = {
         "latest_analysis_session_id": payload.get("analysis_session_id"),
         "final_frame_index": payload.get("final_frame_index"),
@@ -1254,21 +1284,56 @@ async def complete_dashboard_video(
     }
     if payload.get("final_video_time") is not None:
         changes["video_time"] = float(payload["final_video_time"])
+    if camera_id == "cam-border-01":
+        active = get_valid_active_session(camera_id)
+        if (
+            active is None
+            or active.get("session_id") != session_id
+            or int(active.get("analysis_generation") or 0) != generation
+            or (active.get("latest_analysis_session_id") not in {None, analysis_session_id})
+            or str(active.get("analysis_state") or "").upper() not in {"WAKING", "ACTIVE", "COMPLETED"}
+        ):
+            raise HTTPException(status_code=409, detail="Completion does not match active durable generation")
+        if (summary.camera_id, summary.stream_id, summary.analysis_generation) != (camera_id, session_id, generation):
+            raise HTTPException(status_code=409, detail="Completion run identity conflict")
+        summary.completed_at = time.time()
+        if payload.get("final_frame_index") is not None:
+            summary.final_frame_index = int(payload["final_frame_index"])
+        if payload.get("final_video_time") is not None:
+            summary.final_video_time = float(payload["final_video_time"])
+        durable_rows = db.query(AnalysisTrackingSample).filter(
+            AnalysisTrackingSample.analysis_session_id == analysis_session_id,
+            AnalysisTrackingSample.camera_id == camera_id,
+            AnalysisTrackingSample.stream_id == session_id,
+            AnalysisTrackingSample.analysis_generation == generation,
+        ).order_by(
+            AnalysisTrackingSample.video_time,
+            AnalysisTrackingSample.sequence,
+            AnalysisTrackingSample.frame_index,
+        ).all()
+        timeline = [dict(row.sample_json or {}) for row in durable_rows]
+        summary.tracking_timeline_json = timeline
+        summary.tracking_sample_count = len(timeline)
+        if len(timeline) > 1:
+            duration = float(timeline[-1].get("video_time") or 0) - float(timeline[0].get("video_time") or 0)
+            if duration > 0:
+                summary.hud_fps = (len(timeline) - 1) / duration
+        # Commit the run summary/timeline before the active session becomes
+        # COMPLETED. A transaction failure therefore cannot falsely finalize.
+        db.commit()
+
     completed = complete_active_session(camera_id, session_id, generation, changes)
     if completed is None:
         raise HTTPException(status_code=409, detail="Completion does not match active durable generation")
-    analysis_session_id = str(payload.get("analysis_session_id") or "")
-    if analysis_session_id:
-        summary = db.get(AnalysisRunSummary, analysis_session_id)
-        if summary is not None:
-            if (summary.camera_id, summary.stream_id, summary.analysis_generation) != (camera_id, session_id, generation):
-                raise HTTPException(status_code=409, detail="Completion run identity conflict")
-            summary.completed_at = time.time()
-            if payload.get("final_frame_index") is not None:
-                summary.final_frame_index = int(payload["final_frame_index"])
-            if payload.get("final_video_time") is not None:
-                summary.final_video_time = float(payload["final_video_time"])
-            db.commit()
+    if camera_id != "cam-border-01" and analysis_session_id and summary is not None:
+        if (summary.camera_id, summary.stream_id, summary.analysis_generation) != (camera_id, session_id, generation):
+            raise HTTPException(status_code=409, detail="Completion run identity conflict")
+        summary.completed_at = time.time()
+        if payload.get("final_frame_index") is not None:
+            summary.final_frame_index = int(payload["final_frame_index"])
+        if payload.get("final_video_time") is not None:
+            summary.final_video_time = float(payload["final_video_time"])
+        db.commit()
     return {"status": "completed", "analysis_state": "COMPLETED", "analysis_generation": completed.get("analysis_generation")}
 
 

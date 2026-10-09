@@ -12,6 +12,15 @@ from backend.models.orm import AnalysisRunSummary, AnalysisTrackingSample, Base
 from shared.schemas import TrackingFramePayload
 
 
+def _run_sync_async_handler(coroutine):
+    """Run a handler that has no await points without creating a Windows loop."""
+    try:
+        coroutine.send(None)
+    except StopIteration as completed:
+        return completed.value
+    raise AssertionError("handler unexpectedly yielded control")
+
+
 def _session():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -62,6 +71,9 @@ def test_tracking_frame_is_visualization_only_and_durably_checkpointed():
     stored = db.get(AnalysisTrackingSample, ("run-1", 4, 12))
     assert stored is not None
     assert stored.sample_json["frame_index"] == 12
+    summary = db.get(AnalysisRunSummary, "run-1")
+    assert summary is not None
+    assert (summary.final_frame_index, summary.final_video_time) == (12, 0.5)
 
 
 def test_tracking_frame_rejects_a_different_authenticated_edge_identity():
@@ -156,3 +168,69 @@ def test_completion_uses_durable_samples_after_memory_loss():
     summary = db.get(AnalysisRunSummary, "run-1")
     assert summary.tracking_sample_count == 1
     assert summary.tracking_timeline_json[0]["frame_index"] == 12
+
+
+def test_camera1_eof_completion_requires_exact_durable_final_sample(monkeypatch):
+    from backend.api import dashboard
+
+    identity = ("cam-border-01", "source-1", "run-1", 2)
+    _tracking_timelines.pop(identity, None)
+    db = _session()
+    accepted = []
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda _camera: {
+        "session_id": "source-1", "analysis_generation": 2,
+        "latest_analysis_session_id": "run-1", "analysis_state": "ACTIVE",
+    })
+
+    def complete_after_summary_commit(camera, source, generation, changes):
+        committed = db.get(AnalysisRunSummary, "run-1")
+        assert committed.completed_at is not None
+        assert committed.tracking_sample_count == 1
+        accepted.append(changes)
+        return {"analysis_generation": generation, "analysis_state": "COMPLETED"}
+
+    monkeypatch.setattr(
+        dashboard, "complete_active_session", complete_after_summary_commit,
+    )
+    completion = {
+        "camera_id": "cam-border-01", "video_session_id": "source-1",
+        "analysis_session_id": "run-1", "analysis_generation": 2,
+        "final_frame_index": 2385, "final_video_time": 79.4666667,
+        "final_processed_frame_index": 2385, "final_processed_video_time": 79.4666667,
+        "final_authoritative_sample_frame_index": 2385,
+        "final_authoritative_sample_video_time": 79.4666667,
+    }
+    with pytest.raises(HTTPException) as exc_info:
+        _run_sync_async_handler(dashboard.complete_dashboard_video(
+            completion, SimpleNamespace(edge_id="cam-border-01"), db,
+        ))
+    assert exc_info.value.status_code == 409
+    assert accepted == []
+
+    final_sample = _payload().model_copy(update={
+        "camera_id": "cam-border-01", "stream_id": "source-1",
+        "analysis_session_id": "run-1", "analysis_generation": 2,
+        "sequence": 701, "frame_index": 2385, "video_time": 79.4666667,
+    })
+    with patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock):
+        _run_sync_async_handler(post_tracking_frame(
+            final_sample, SimpleNamespace(edge_id="cam-border-01"), db,
+        ))
+        _run_sync_async_handler(post_tracking_frame(
+            final_sample, SimpleNamespace(edge_id="cam-border-01"), db,
+        ))
+    assert db.query(AnalysisTrackingSample).filter_by(
+        analysis_session_id="run-1", frame_index=2385,
+    ).count() == 1
+    analysis_summary = db.get(AnalysisRunSummary, "run-1")
+    assert analysis_summary is not None
+    assert db.get(AnalysisTrackingSample, ("run-1", 701, 2385)) is not None
+
+    result = _run_sync_async_handler(dashboard.complete_dashboard_video(
+        completion, SimpleNamespace(edge_id="cam-border-01"), db,
+    ))
+    assert result["analysis_state"] == "COMPLETED"
+    assert len(accepted) == 1
+    assert analysis_summary.completed_at is not None
+    assert analysis_summary.tracking_sample_count == 1
+    assert analysis_summary.tracking_timeline_json[0]["frame_index"] == 2385

@@ -730,6 +730,13 @@ async def post_tracking_frame(
                 video_time=payload.video_time,
                 sample_json=compact_sample,
             ))
+        if payload.camera_id == "cam-border-01":
+            # The durable sample transport is sufficient to establish/update
+            # Camera 1's run summary too. Optional JPEG/diagnostic telemetry
+            # may be dropped; it must not leave this run without the summary
+            # required by its acknowledged EOF completion callback.
+            _record_run_summary(db, payload)
+        if persisted is None or payload.camera_id == "cam-border-01":
             db.commit()
         timeline = _tracking_timelines.setdefault(identity, [])
         # Multiple transport workers can complete HTTPS requests out of order.

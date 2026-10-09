@@ -882,8 +882,7 @@ def run_demo_pipeline(
             if _scenario.get("video_session_id"):
                 eof_persist_failed = bool(getattr(pipeline, "timeline_incomplete", False))
                 if pipeline.adapter.eof_reached and pipeline.adapter.state.name != "FAILED" and not eof_persist_failed:
-                    completed = _persist_durable_eof(
-                        backend_url, os.environ.get("EDGE_AUTH_TOKEN", ""), {
+                    eof_payload = {
                             "camera_id": camera_id,
                             "video_session_id": current_session,
                             "analysis_session_id": pipeline.stream_id,
@@ -892,14 +891,50 @@ def run_demo_pipeline(
                             # the decoder's potentially ahead-of-work counter.
                             "final_frame_index": getattr(pipeline, "_last_processed_frame_index", None),
                             "final_video_time": getattr(pipeline, "_last_video_time", None),
-                        },
+                    }
+                    if camera_id == "cam-border-01":
+                        final_sample = getattr(pipeline, "_final_authoritative_sample", None)
+                        processed_frame = eof_payload["final_frame_index"]
+                        processed_time = eof_payload["final_video_time"]
+                        if (
+                            not final_sample
+                            or processed_frame is None
+                            or processed_time is None
+                            or int(final_sample.get("frame_index", -1)) != int(processed_frame)
+                            or abs(float(final_sample.get("video_time", -1)) - float(processed_time)) > 0.002
+                        ):
+                            eof_persist_failed = True
+                            logger.error(
+                                "[DemoRunner] Camera 1 final sample identity mismatch; refusing completion "
+                                "generation=%s processed_frame=%s sample_frame=%s",
+                                _scenario.get("analysis_generation", 0), processed_frame,
+                                final_sample.get("frame_index") if final_sample else None,
+                            )
+                        else:
+                            eof_payload.update({
+                                "final_processed_frame_index": processed_frame,
+                                "final_processed_video_time": processed_time,
+                                "final_authoritative_sample_frame_index": final_sample["frame_index"],
+                                "final_authoritative_sample_video_time": final_sample["video_time"],
+                            })
+                    completed = (
+                        _persist_durable_eof(
+                            backend_url, os.environ.get("EDGE_AUTH_TOKEN", ""), eof_payload,
+                        )
+                        if not eof_persist_failed else False
                     )
                     if completed:
                         _scenario["analysis_state"] = "COMPLETED"
                         _scenario["current"] = "paused"
                         logger.info("[DemoRunner] Durable EOF persisted for generation %s", _scenario.get("analysis_generation", 0))
+                        if camera_id == "cam-border-01":
+                            # Publish COMPLETED only after the backend has
+                            # acknowledged the exact durable terminal sample.
+                            pipeline._publish_analysis_state("COMPLETED")
                     else:
                         eof_persist_failed = True
+                        if camera_id == "cam-border-01":
+                            pipeline._publish_analysis_state("FAILED_EOF")
                         logger.error(
                             "[DemoRunner] Durable EOF not persisted camera_id=%s generation=%s run_id=%s final_frame=%s",
                             camera_id, _scenario.get("analysis_generation", 0),
