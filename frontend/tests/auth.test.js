@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { authFetch, authUpload, getRole, getToken, getUsername, login } from '../src/services/auth';
+import { AUTH_CHANGE_EVENT, authFetch, authUpload, getRole, getToken, getUsername, login, logout } from '../src/services/auth';
 
 describe('authentication client', () => {
   beforeEach(() => {
@@ -27,6 +27,22 @@ describe('authentication client', () => {
     fetch.mockResolvedValueOnce({ ok: false, status: 401 });
     await authFetch('/events');
     expect(getToken()).toBeNull();
+  });
+
+  it('clears all stored session fields and broadcasts the auth change on logout', () => {
+    localStorage.setItem('netraksh_token', 'session-token');
+    localStorage.setItem('netraksh_role', 'ADMIN');
+    localStorage.setItem('netraksh_username', 'admin');
+    const onAuthChange = vi.fn();
+    window.addEventListener(AUTH_CHANGE_EVENT, onAuthChange);
+
+    logout();
+
+    expect(getToken()).toBeNull();
+    expect(getRole()).toBeNull();
+    expect(getUsername()).toBeNull();
+    expect(onAuthChange).toHaveBeenCalledTimes(1);
+    window.removeEventListener(AUTH_CHANGE_EVENT, onAuthChange);
   });
 
   it('reports real upload bytes and preserves authenticated transport', async () => {

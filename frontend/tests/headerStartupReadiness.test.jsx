@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   snapshot: null,
   subscribe: vi.fn(() => () => {}),
   authFetch: vi.fn(),
+  logout: vi.fn(),
   startupRequests: vi.fn(),
 }));
 
@@ -27,7 +28,7 @@ vi.mock('../src/hooks/useWebSocket', () => ({
 vi.mock('../src/services/auth', () => ({
   BACKEND_URL: 'https://backend.example',
   WS_URL: 'wss://backend.example',
-  logout: vi.fn(),
+  logout: (...args) => mocks.logout(...args),
   authFetch: (...args) => mocks.authFetch(...args),
 }));
 
@@ -81,6 +82,7 @@ describe('Header startup readiness hydration', () => {
     mocks.subscribe.mockClear();
     mocks.startupRequests.mockClear();
     mocks.authFetch.mockResolvedValue({ ok: false });
+    mocks.logout.mockClear();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
   });
 
@@ -149,5 +151,14 @@ describe('Header startup readiness hydration', () => {
       expect(screen.getByRole('button', { name: accountButtonName })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /Sign Out/ })).toBeInTheDocument();
     }
+  });
+
+  it('invokes logout and closes the account menu when Sign Out is selected', () => {
+    render(<RouteShell />);
+    fireEvent.click(screen.getByRole('button', { name: 'Account menu for admin (ADMIN)' }));
+    fireEvent.click(screen.getByRole('button', { name: /Sign Out/ }));
+
+    expect(mocks.logout).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: /Sign Out/ })).not.toBeInTheDocument();
   });
 });
