@@ -76,6 +76,40 @@ def test_tracking_frame_is_visualization_only_and_durably_checkpointed():
     assert (summary.final_frame_index, summary.final_video_time) == (12, 0.5)
 
 
+def test_duplicate_sample_can_reconstruct_a_missing_run_summary():
+    payload = _payload().model_copy(update={
+        "person_count": 2, "vehicle_count": 1, "track_count": 3,
+    })
+    db = _session()
+    db.add(AnalysisTrackingSample(
+        analysis_session_id=payload.analysis_session_id,
+        sequence=payload.sequence,
+        frame_index=payload.frame_index,
+        camera_id=payload.camera_id,
+        stream_id=payload.stream_id,
+        analysis_generation=payload.analysis_generation,
+        video_time=payload.video_time,
+        sample_json={"frame_index": payload.frame_index, "video_time": payload.video_time},
+    ))
+    db.commit()
+    _latest_tracking_sequence.clear()
+
+    with (
+        patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock),
+        patch("backend.api.system.promote_active_session"),
+    ):
+        result = asyncio.run(post_tracking_frame(
+            payload, SimpleNamespace(edge_id=payload.camera_id), db,
+        ))
+
+    summary = db.get(AnalysisRunSummary, payload.analysis_session_id)
+    assert result == {"status": "ok"}
+    assert summary is not None
+    assert summary.final_frame_index == payload.frame_index
+    assert summary.final_video_time == payload.video_time
+    assert (summary.person_count, summary.vehicle_count, summary.track_count) == (2, 1, 3)
+
+
 def test_tracking_frame_rejects_a_different_authenticated_edge_identity():
     _latest_tracking_sequence.clear()
     with pytest.raises(HTTPException) as exc_info:
@@ -111,6 +145,55 @@ def test_tracking_frame_keeps_out_of_order_packet_for_replay_without_rebroadcast
         assert {item["coordinate_space"] for item in _tracking_timelines[identity]} == {"NORMALIZED_FRAME"}
         assert db.query(AnalysisTrackingSample).count() == 2
         broadcast.assert_awaited_once()
+    finally:
+        _tracking_timelines.pop(identity, None)
+
+
+@pytest.mark.parametrize("camera_id", ["cam-border-01", "cam-checkpoint-01"])
+def test_delayed_or_duplicate_tracking_frames_do_not_roll_back_summary(camera_id):
+    _latest_tracking_sequence.clear()
+    identity = (camera_id, "source-1", "run-1", 2)
+    _tracking_timelines.pop(identity, None)
+    db = _session()
+    newest = _payload().model_copy(update={
+        "camera_id": camera_id,
+        "sequence": 9, "frame_index": 27, "video_time": 1.08,
+        "person_count": 3, "vehicle_count": 1, "track_count": 4,
+        "timestamp": 2.0, "processed_timestamp": 2.0,
+    })
+    delayed = _payload().model_copy(update={
+        "camera_id": camera_id,
+        "sequence": 8, "frame_index": 24, "video_time": 0.96,
+        "person_count": 1, "vehicle_count": 0, "track_count": 1,
+        "timestamp": 1.8, "processed_timestamp": 1.8,
+    })
+    try:
+        with (
+            patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock),
+            patch("backend.api.system.promote_active_session"),
+        ):
+            asyncio.run(post_tracking_frame(
+                newest, SimpleNamespace(edge_id=camera_id), db
+            ))
+            # A retried duplicate with conflicting ancillary counts must remain
+            # idempotent and cannot replace the values for the accepted frame.
+            duplicate = newest.model_copy(update={
+                "person_count": 99, "vehicle_count": 99, "track_count": 198,
+            })
+            asyncio.run(post_tracking_frame(
+                duplicate, SimpleNamespace(edge_id=camera_id), db
+            ))
+            result = asyncio.run(post_tracking_frame(
+                delayed, SimpleNamespace(edge_id=camera_id), db
+            ))
+
+        assert result == {"status": "accepted_for_replay", "live_broadcast": False}
+        summary = db.get(AnalysisRunSummary, "run-1")
+        assert summary.final_frame_index == 27
+        assert summary.final_video_time == 1.08
+        assert (summary.person_count, summary.vehicle_count, summary.track_count) == (3, 1, 4)
+        assert db.query(AnalysisTrackingSample).count() == 2
+        assert {item["frame_index"] for item in _tracking_timelines[identity]} == {24, 27}
     finally:
         _tracking_timelines.pop(identity, None)
 
