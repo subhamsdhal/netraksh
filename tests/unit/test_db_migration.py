@@ -1,13 +1,14 @@
 import os
+import pytest
 from pathlib import Path
 from alembic.config import Config
 from alembic import command
 from sqlalchemy import create_engine, inspect
 
-def test_alembic_upgrade_and_downgrade(tmp_path):
+def test_alembic_fresh_upgrade_and_safe_irreversible_downgrade(tmp_path):
     """
-    Verifies that 'alembic upgrade head' and 'alembic downgrade base' 
-    can run successfully on a fresh SQLite database, mimicking the CI/CD guard.
+    Apply the full schema to a fresh SQLite database, and confirm historical
+    account repairs still reject an unsafe downgrade.
     """
     db_path = str(tmp_path / "test_alembic.db")
     db_url = f"sqlite:///{db_path}"
@@ -34,15 +35,15 @@ def test_alembic_upgrade_and_downgrade(tmp_path):
         assert "events" in tables
         assert "analysis_session_id" in {column["name"] for column in inspector.get_columns("events")}
         
-        # Verify we can downgrade back to base
-        command.downgrade(alembic_cfg, "base")
-        
-        # We should only see alembic_version and maybe sqlite_sequence
-        # but the main tables should be dropped
+        # Production account repairs intentionally cannot reconstruct old
+        # passwords. Do not pretend the full migration history is reversible.
+        with pytest.raises(RuntimeError, match="intentionally irreversible"):
+            command.downgrade(alembic_cfg, "base")
+
         inspector = inspect(engine)
         tables_after = inspector.get_table_names()
-        assert "cameras" not in tables_after
-        assert "events" not in tables_after
+        assert "cameras" in tables_after
+        assert "events" in tables_after
     finally:
         if orig_url is not None:
             os.environ["DATABASE_URL"] = orig_url

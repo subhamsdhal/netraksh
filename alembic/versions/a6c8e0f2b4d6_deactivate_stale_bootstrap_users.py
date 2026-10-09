@@ -34,6 +34,10 @@ STALE_ACCOUNTS = {
 
 def upgrade() -> None:
     connection = op.get_bind()
+    # Fresh installations have no historical bootstrap accounts to retire.
+    # Never skip validation merely because the named accounts are missing.
+    if connection.execute(sa.text("SELECT 1 FROM users LIMIT 1")).first() is None:
+        return
 
     guarded_names = [PRIMARY_ADMIN, LEGACY_ADMIN, *STALE_ACCOUNTS]
     rows = connection.execute(
