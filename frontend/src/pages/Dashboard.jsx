@@ -791,26 +791,6 @@ export default function Dashboard() {
             source_generation: state.source_generation ?? null,
             analysis_generation: state.analysis_generation ?? null,
           });
-          if (diagnosticsEnabled && cameraId === 'cam-border-01'
-              && state.latest_analysis_session_id === 'ce25c9fc-7eb7-4396-9c43-25ba7633d269') {
-            authFetch('/api/dashboard/admin/media-diagnostics/camera1-completed-run')
-              .then(async (diagnosticResponse) => ({
-                stage: 'MEDIA_RESPONSE_DIAGNOSTIC_COMPLETE',
-                diagnostic_http_status: diagnosticResponse.status,
-                media_response_diagnostic: diagnosticResponse.ok
-                  ? await diagnosticResponse.json()
-                  : null,
-              }))
-              .then((diagnostic) => {
-                if (mounted) recordRestoreDiagnostic(diagnostic);
-              })
-              .catch((error) => {
-                if (mounted) recordRestoreDiagnostic({
-                  stage: 'MEDIA_RESPONSE_DIAGNOSTIC_FAILED',
-                  diagnostic_error_category: error?.name || 'Error',
-                });
-              });
-          }
           const restoredSource = sourceStateFromCurrentVideo(state);
           if (restoredSource) {
             // Commit backend authority before making the control available.

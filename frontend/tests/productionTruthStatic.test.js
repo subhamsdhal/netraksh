@@ -34,12 +34,6 @@ describe('production UI contains no retired operational claims', () => {
     expect(dashboard).toContain("!completedRun && mediaState.edgeStatus === 'WAKING'");
   });
 
-  it('keys the one-off Camera 1 media probe to the analysis session, not the source stream', () => {
-    const dashboard = read('../src/pages/Dashboard.jsx');
-    expect(dashboard).toContain("state.latest_analysis_session_id === 'ce25c9fc-7eb7-4396-9c43-25ba7633d269'");
-    expect(dashboard).not.toContain("state.session_id === 'ce25c9fc-7eb7-4396-9c43-25ba7633d269'");
-  });
-
   it('uses shared freshness and age truth in the command center', () => {
     const dashboard = read('../src/pages/Dashboard.jsx');
     expect(dashboard).toContain('cameraHealthPresentation(health[activeCameraId], now)');
