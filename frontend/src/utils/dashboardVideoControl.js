@@ -67,6 +67,24 @@ export async function fetchWithTimeout(fetcher, path, timeoutMs = 5000) {
   }
 }
 
+// Preparation state is an optimization for an in-flight upload, not source
+// authority. A transient failure here must not prevent the caller from asking
+// GET /video/current for the authoritative durable source.
+export async function fetchPreparationForRestore(fetcher, path, onDiagnostic = () => {}) {
+  try {
+    const response = await fetchWithTimeout(fetcher, path, 5000);
+    onDiagnostic({ stage: 'PREPARATION_CHECK_COMPLETE', http_status: response.status });
+    return response;
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      onDiagnostic({ stage: 'PREPARATION_CHECK_TIMEOUT', timeout_ms: 5000 });
+    } else {
+      onDiagnostic({ stage: 'PREPARATION_CHECK_ERROR', preparation_error_name: error?.name || 'Error' });
+    }
+    return null;
+  }
+}
+
 export function sourceStateFromPreparation(job) {
   if (!job?.available || !job?.preparation_job_id || !job?.camera_id) return null;
   const preparationState = String(job.state || 'UPLOADED').toUpperCase();

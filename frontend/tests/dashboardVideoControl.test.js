@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, canReanalyzeSource, claimUploadAutoStart, durableHeartbeat, fetchWithTimeout, lifecycleAction, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, canReanalyzeSource, claimUploadAutoStart, durableHeartbeat, fetchPreparationForRestore, fetchWithTimeout, lifecycleAction, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
 
 describe('dashboard video control ownership', () => {
   it('settles only the exact Camera 1 live generation from backend authority', () => {
@@ -65,6 +65,24 @@ describe('dashboard video control ownership', () => {
 
     await expect(fetchWithTimeout(fetcher, '/read-only', 5)).rejects.toMatchObject({ name: 'AbortError' });
     expect(requestSignal.aborted).toBe(true);
+  });
+
+  it('treats preparation lookup rejection as non-authoritative so current source can be queried', async () => {
+    const diagnostic = vi.fn();
+    const fetcher = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+
+    const response = await fetchPreparationForRestore(
+      fetcher,
+      '/api/dashboard/video/preparation/current?camera_id=cam-border-01',
+      diagnostic,
+    );
+
+    expect(response).toBeNull();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(diagnostic).toHaveBeenCalledWith({
+      stage: 'PREPARATION_CHECK_ERROR',
+      preparation_error_name: 'TypeError',
+    });
   });
 
   it('replaces a stale browser session with the bundled source contract', () => {
