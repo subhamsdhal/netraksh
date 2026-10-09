@@ -6,12 +6,41 @@ import {
   updateCameraMediaState,
   uploadResultIsCurrent,
   visibleUploadState,
+  restoredPreviewStatus,
 } from '../src/utils/cameraMediaState';
 
 const CAM1 = 'cam-border-01';
 const CAM2 = 'cam-checkpoint-01';
 
 describe('camera media state isolation', () => {
+  it('keeps a restored preview in a loading state until media fetch finishes', () => {
+    expect(restoredPreviewStatus({
+      sourceRestoring: false,
+      previewLoading: true,
+      sourceMode: 'durable',
+      expectedSessionId: 'session-1',
+    })).toBe('LOADING STORED VIDEO PREVIEW');
+    expect(restoredPreviewStatus({
+      sourceRestoring: true,
+      previewLoading: false,
+      sourceMode: 'durable',
+      expectedSessionId: null,
+    })).toBe('VERIFYING DURABLE SOURCE AUTHORITY');
+    expect(restoredPreviewStatus({
+      sourceRestoring: false,
+      previewLoading: false,
+      sourceMode: 'durable',
+      expectedSessionId: 'session-1',
+    })).toBe('PREVIEW UNAVAILABLE FOR THIS RESTORED SESSION');
+    expect(restoredPreviewStatus({
+      sourceRestoring: false,
+      previewLoading: false,
+      sourceMode: 'durable',
+      expectedSessionId: 'session-1',
+      isUploading: true,
+    })).toBeNull();
+  });
+
   it('keeps source IDs, sessions, previews, loading and errors camera-scoped', () => {
     let state = {};
     state = updateCameraMediaState(state, CAM1, {

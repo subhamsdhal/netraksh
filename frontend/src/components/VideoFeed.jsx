@@ -33,6 +33,7 @@ import {
 import {
   replayTimelineAssessment,
 } from '../utils/trackingTimeline';
+import { restoredPreviewStatus as getRestoredPreviewStatus } from '../utils/cameraMediaState';
 
 // ─── Threat-aware colour palette ────────────────────────────────────────────
 //
@@ -192,6 +193,7 @@ export default function VideoFeed({
   playbackEnded = false,
   demoScenario = 'normal',
   mediaUrl,
+  previewLoading = false,
   isUploading,
   uploadStage = null,
   uploadProgress = null,
@@ -254,6 +256,13 @@ export default function VideoFeed({
   const analyzedViewAvailable = Boolean(mediaUrl || analyzedFrameUrl || trackingModeActive);
   const requestHudFrame = !trackingCapable && !useTrackingTimeline && (isDurableSource || hudVisible);
   const hasStoredDurableSource = isDurableSource && Boolean(expectedSessionId);
+  const restoredPreviewStatus = getRestoredPreviewStatus({
+    sourceRestoring,
+    previewLoading,
+    sourceMode,
+    expectedSessionId,
+    isUploading,
+  });
   const uploadLabel = uploadStage === 'UPLOADING'
     ? `UPLOADING${Number.isFinite(uploadProgress) ? ` ${uploadProgress}%` : ''}`
     : uploadStage === 'PREPARING'
@@ -820,7 +829,7 @@ export default function VideoFeed({
             className="dashboard-video-title font-display font-bold text-main"
             style={{ fontSize: '1rem', letterSpacing: '0.1em' }}
           >
-            {sourceRestoring
+            {sourceRestoring || previewLoading
               ? 'RESTORING STORED SOURCE...'
               : isUploading
               ? uploadLabel
@@ -842,7 +851,9 @@ export default function VideoFeed({
                           ? 'TELEMETRY ACTIVE · LOCAL PLAYBACK OPTIONAL'
                           : 'NO VIDEO SOURCE'}
           </span>
-          {sourceRestoring ? <span className="text-muted text-xs">VERIFYING DURABLE SOURCE AUTHORITY</span> : !isUploading && sourceMode === 'durable' && expectedSessionId ? <span className="text-muted text-xs">PREVIEW UNAVAILABLE FOR THIS RESTORED SESSION</span> : <span className="text-muted text-xs">Use ADD VIDEO in the camera header</span>}
+          {restoredPreviewStatus
+            ? <span className="text-muted text-xs">{restoredPreviewStatus}</span>
+            : <span className="text-muted text-xs">Use ADD VIDEO in the camera header</span>}
           <span className="text-muted text-xs">SUPPORTED: MP4 · AVI · MOV · MKV · WEBM · M4V</span>
           {uploadError && <span className="text-danger text-xs text-center" role="alert">{uploadError}</span>}
         </div>

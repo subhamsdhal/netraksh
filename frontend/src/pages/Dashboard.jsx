@@ -807,6 +807,7 @@ export default function Dashboard() {
                     ...current[cameraId],
                     mediaUrl: null,
                     sessionId: restoredSource.sourceMode === 'durable' ? state.session_id : null,
+                    previewLoading: Boolean(state.preview_url && !reuseLoadedMedia),
                     playbackEnded: false,
                     uploadError: null,
                     isUploading: false,
@@ -816,43 +817,67 @@ export default function Dashboard() {
             }
             if (state.preview_url && !reuseLoadedMedia) {
               recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_PENDING' });
-              const mediaResponse = await authFetch(state.preview_url);
-              recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_COMPLETE', http_status: mediaResponse.status });
-              if (mediaResponse.ok) {
-                const blobUrl = URL.createObjectURL(await mediaResponse.blob());
-                setCameraMedia((current) => {
-                  const previous = current[cameraId]?.mediaUrl;
-                  if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous);
-                  return {
+              try {
+                const mediaResponse = await authFetch(state.preview_url);
+                recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_COMPLETE', http_status: mediaResponse.status });
+                if (mediaResponse.ok) {
+                  const blobUrl = URL.createObjectURL(await mediaResponse.blob());
+                  setCameraMedia((current) => {
+                    const previous = current[cameraId]?.mediaUrl;
+                    if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous);
+                    return {
+                      ...current,
+                      [cameraId]: {
+                        ...current[cameraId],
+                        mediaUrl: blobUrl,
+                        mediaType: 'video',
+                        previewLoading: false,
+                        sessionId: state.session_id,
+                        sessionStartTime: Date.now(),
+                        playbackEnded: false,
+                        uploadError: null,
+                        isUploading: false,
+                      },
+                    };
+                  });
+                  recordRestoreDiagnostic({ stage: 'PREVIEW_RESTORED' });
+                } else {
+                  if (restoredSource.sourceMode === 'durable') {
+                    // Preview transport is independent of durable activation.
+                    // Keep the session authoritative when preview fetch fails.
+                    setCameraMedia((current) => ({
+                      ...current,
+                      [cameraId]: {
+                        ...current[cameraId],
+                        mediaUrl: null,
+                        previewLoading: false,
+                        sessionId: state.session_id,
+                        uploadError: 'PREVIEW LOAD FAILED — VIDEO IS STILL STORED',
+                        isUploading: false,
+                      },
+                    }));
+                  } else {
+                    updateCameraMedia(cameraId, { previewLoading: false });
+                  }
+                  recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_FAILED', http_status: mediaResponse.status });
+                }
+              } catch (error) {
+                if (restoredSource.sourceMode === 'durable') {
+                  setCameraMedia((current) => ({
                     ...current,
                     [cameraId]: {
                       ...current[cameraId],
-                      mediaUrl: blobUrl,
-                      mediaType: 'video',
+                      mediaUrl: null,
+                      previewLoading: false,
                       sessionId: state.session_id,
-                      sessionStartTime: Date.now(),
-                      playbackEnded: false,
-                      uploadError: null,
+                      uploadError: 'PREVIEW LOAD FAILED — VIDEO IS STILL STORED',
                       isUploading: false,
                     },
-                  };
-                });
-                recordRestoreDiagnostic({ stage: 'PREVIEW_RESTORED' });
-              } else if (restoredSource.sourceMode === 'durable') {
-                // Preview transport is independent of durable activation. Do
-                // not replace a valid cloud session with the bundled demo just
-                // because a redirect/blob fetch was temporarily unavailable.
-                setCameraMedia((current) => ({
-                  ...current,
-                  [cameraId]: {
-                    ...current[cameraId],
-                    mediaUrl: null,
-                    sessionId: state.session_id,
-                    uploadError: 'PREVIEW LOAD FAILED — VIDEO IS STILL STORED',
-                    isUploading: false,
-                  },
-                }));
-                recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_FAILED', http_status: mediaResponse.status });
+                  }));
+                } else {
+                  updateCameraMedia(cameraId, { previewLoading: false });
+                }
+                recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_ERROR', error_name: error?.name || 'Error' });
               }
             }
           } else {
@@ -1565,6 +1590,7 @@ export default function Dashboard() {
                     playbackEnded={Boolean(mediaState.playbackEnded)}
                     demoScenario={demoScenario}
                     mediaUrl={mediaState.mediaUrl || null}
+                    previewLoading={Boolean(mediaState.previewLoading)}
                     mediaType={mediaState.mediaType || 'video'}
                     currentFps={cardFps}
                     onUpload={() => triggerUpload(cameraId)}
@@ -1705,6 +1731,7 @@ export default function Dashboard() {
               playbackEnded={playbackEnded}
               demoScenario={demoScenario}
               mediaUrl={mediaUrl}
+              previewLoading={Boolean(activeMediaState.previewLoading)}
               mediaType={mediaType}
               currentFps={activeProcessingFps}
               onUpload={() => triggerUpload(activeCameraId)}
@@ -1722,6 +1749,7 @@ export default function Dashboard() {
               completedSummaryLoading={Boolean(runSummaryLoading[activeCameraId])}
               diagnosticsEnabled={diagnosticsEnabled}
               sourceRunState={slotSources[activeCameraId]?.runState || null}
+              sourceRestoring={Boolean(slotSources[activeCameraId]?.restoring)}
               onVideoEnded={() => updateCameraMedia(activeCameraId, { playbackEnded: true })}
             />
           </div>
