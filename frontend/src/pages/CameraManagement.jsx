@@ -68,6 +68,9 @@ export default function CameraManagement() {
   const [newLon, setNewLon] = useState('');
   const [registering, setRegistering] = useState(false);
   const [registerError, setRegisterError] = useState(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupStatus, setBackupStatus] = useState('');
+  const temporaryBackupRequested = new URLSearchParams(window.location.search).get('temporary-db-backup') === '1';
 
   const loadCameras = useCallback(async () => {
     setStatus('loading');
@@ -170,6 +173,35 @@ export default function CameraManagement() {
     }
   };
 
+  const downloadTemporaryBackup = async () => {
+    if (backupBusy) return;
+    setBackupBusy(true);
+    setBackupStatus('Requesting the one-time encrypted database archive…');
+    try {
+      const response = await authFetch('/api/admin/database-backup');
+      if (!response.ok) {
+        setBackupStatus(response.status === 410
+          ? 'The one-time export has already been consumed.'
+          : `Encrypted backup request failed (${response.status}).`);
+        return;
+      }
+      const blob = await response.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = 'netraksh-stage-encrypted.backup';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 30000);
+      setBackupStatus('Encrypted backup downloaded. Verify and restore it locally before continuing.');
+    } catch (_error) {
+      setBackupStatus('Could not retrieve the encrypted backup. The one-time attempt may have been consumed.');
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
   return (
     <div className="h-full flex flex-col gap-4 overflow-y-auto overflow-x-hidden">
       <div className="section-header flex-shrink-0">
@@ -180,6 +212,19 @@ export default function CameraManagement() {
           </div>
         </div>
       </div>
+
+      {role === 'ADMIN' && temporaryBackupRequested && (
+        <div className="card border border-warning flex flex-wrap items-center justify-between" style={{ gap: '1rem', padding: '1rem' }}>
+          <div>
+            <div className="card-title">Temporary one-time database backup</div>
+            <div className="text-xs text-muted">Admin-only, encrypted to the local backup recipient key, and expires automatically.</div>
+            {backupStatus && <div className="text-xs text-ok mt-2" role="status">{backupStatus}</div>}
+          </div>
+          <button type="button" className="btn btn-primary" disabled={backupBusy} onClick={downloadTemporaryBackup}>
+            {backupBusy ? 'Exporting…' : 'Download encrypted backup'}
+          </button>
+        </div>
+      )}
 
       {status === 'access-denied' && (
         <div className="max-w-xs bg-panel border border-danger p-4 rounded text-center">
