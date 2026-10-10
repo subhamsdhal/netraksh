@@ -34,6 +34,7 @@ import {
   replayTimelineAssessment,
 } from '../utils/trackingTimeline';
 import { restoredPreviewStatus as getRestoredPreviewStatus } from '../utils/cameraMediaState';
+import { trackLabelPosition } from '../utils/trackLabelLayout';
 
 // ─── Threat-aware colour palette ────────────────────────────────────────────
 //
@@ -777,6 +778,7 @@ export default function VideoFeed({
     // browser clock. Production boxes are paired with one exact analyzed JPEG.
     return [];
   }, [displayedSample, demoCache, demoMediaTime, showAnalyzedFrame, useTrackingTimeline]);
+  const placedTrackLabels = [];
 
   /**
    * FIX A: Continuous Browser Playback-Time Sync
@@ -1020,6 +1022,13 @@ export default function VideoFeed({
           const labelPadV = 2;
           const labelW = trackLabel.length * (labelFontSize * 0.62) + labelPadH * 2;
           const labelH = labelFontSize + labelPadV * 2;
+          const labelPosition = trackLabelPosition(
+            { left: x, top: y, width: w, height: h },
+            { width: labelW, height: labelH },
+            videoRect,
+            placedTrackLabels,
+          );
+          placedTrackLabels.push(labelPosition);
 
           return (
             <g
@@ -1059,8 +1068,8 @@ export default function VideoFeed({
 
               {/* Label pill */}
               <rect
-                x={x} y={y - labelH}
-                width={labelW} height={labelH}
+                x={labelPosition.left} y={labelPosition.top}
+                width={labelPosition.width} height={labelPosition.height}
                 fill={color.labelFill}
                 rx={2}
                 style={{
@@ -1068,8 +1077,8 @@ export default function VideoFeed({
                 }}
               />
               <text
-                x={x + labelPadH}
-                y={y - labelPadV - 1}
+                x={labelPosition.left + labelPadH}
+                y={labelPosition.top + labelPosition.height - labelPadV - 1}
                 fill={color.labelText}
                 fontSize={labelFontSize}
                 fontFamily="'Space Grotesk', ui-monospace, monospace"
@@ -1385,3 +1394,4 @@ export default function VideoFeed({
     </div>
   );
 }
+
