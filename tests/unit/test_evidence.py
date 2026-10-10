@@ -3,6 +3,7 @@ NETRAKSH — Unit tests for cryptographic evidence chain.
 Tests the real SHA-256 / Ed25519 / SQLite chain — not mocked.
 """
 import os
+import base64
 import tempfile
 import pytest
 from datetime import datetime
@@ -92,6 +93,20 @@ class TestHashComputation:
 
 
 class TestKeyManager:
+    def test_restores_configured_signing_key_across_restart(self, temp_dir, monkeypatch):
+        original = EdgeKeyManager(os.path.join(temp_dir, "original.key"), os.path.join(temp_dir, "original.pub"))
+        original.load_or_generate(allow_generate=True)
+        with open(original.private_key_path, "rb") as key_file:
+            pem = key_file.read()
+        monkeypatch.setenv("EDGE_SIGNING_PRIVATE_KEY_B64", base64.b64encode(pem).decode())
+        restored = EdgeKeyManager(os.path.join(temp_dir, "restart.key"), os.path.join(temp_dir, "restart.pub"))
+        restored.load_or_generate()
+        assert restored.kid == original.kid
+        assert restored.sign(b"same event") == original.sign(b"same event")
+        monkeypatch.setenv("EDGE_SIGNING_PRIVATE_KEY_B64", "invalid")
+        with pytest.raises(ValueError, match="Invalid EDGE_SIGNING_PRIVATE_KEY_B64"):
+            EdgeKeyManager(os.path.join(temp_dir, "bad.key"), os.path.join(temp_dir, "bad.pub")).load_or_generate()
+
     def test_generates_keys_when_missing(self, temp_dir):
         km = EdgeKeyManager(
             private_key_path=os.path.join(temp_dir, "new.key"),
@@ -292,6 +307,17 @@ class TestServerSideVerification:
 
 
 class TestEvidenceEncryptor:
+    def test_restores_configured_evidence_key_across_restart(self, temp_dir, monkeypatch):
+        original = EvidenceEncryptor(os.path.join(temp_dir, "original.aes"))
+        original.load_or_generate()
+        monkeypatch.setenv("EDGE_EVIDENCE_KEY_B64", original.get_raw_key_b64())
+        restarted = EvidenceEncryptor(os.path.join(temp_dir, "restart.aes"))
+        restarted.load_or_generate()
+        assert restarted.decrypt(original.encrypt(b"event")) == b"event"
+        monkeypatch.setenv("EDGE_EVIDENCE_KEY_B64", base64.b64encode(b"short").decode())
+        with pytest.raises(ValueError, match="must encode 32 bytes"):
+            EvidenceEncryptor(os.path.join(temp_dir, "bad.aes")).load_or_generate()
+
     """AES-256-GCM at-rest encryption for evidence clips (architecture v4 §10)."""
 
     def test_generates_key_when_missing(self, temp_dir):
