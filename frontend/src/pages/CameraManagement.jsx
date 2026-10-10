@@ -186,20 +186,13 @@ export default function CameraManagement() {
         return;
       }
       const blob = await response.blob();
-      const receiver = 'http://127.0.0.1:41777';
-      const tokenResponse = await fetch(`${receiver}/token`, { mode: 'cors', credentials: 'omit' });
-      if (!tokenResponse.ok) throw new Error('Local backup receiver is unavailable');
-      const { token } = await tokenResponse.json();
-      const saved = await fetch(`${receiver}/receive`, {
-        method: 'POST',
-        mode: 'cors',
-        credentials: 'omit',
-        headers: { 'Content-Type': 'application/octet-stream', 'X-Transfer-Token': token },
-        body: blob,
-      });
-      if (!saved.ok) throw new Error(`Local backup receiver rejected archive (${saved.status})`);
-      const receipt = await saved.json();
-      setBackupStatus(`Encrypted backup saved locally (${receipt.bytes} bytes, SHA-256 ${receipt.sha256}). Verify and restore it before continuing.`);
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = objectUrl;
+        anchor.download = 'netraksh-stage-encrypted.backup';
+        anchor.click();
+        window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+        setBackupStatus('Encrypted backup download started. Verify and restore it before continuing.');
     } catch (_error) {
       setBackupStatus('Could not retrieve the encrypted backup. The one-time attempt may have been consumed.');
     } finally {
