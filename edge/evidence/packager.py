@@ -27,6 +27,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
 
 from shared import crypto
 from shared.schemas import (
@@ -38,6 +40,22 @@ from shared.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _cloud_key_material(key_path: str, purpose: str) -> bytes | None:
+    """Stable, domain-separated keys for stateless Free Render edge instances."""
+    if os.environ.get("EDGE_CONSTRAINED_CLOUD", "").lower() != "true":
+        return None
+    token = os.environ.get("EDGE_AUTH_TOKEN", "")
+    if not token:
+        return None
+    camera_id = os.path.splitext(os.path.basename(key_path))[0]
+    return HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=b"NETRAKSH_EDGE_KEYS_V1",
+        info=f"{purpose}:{camera_id}".encode("utf-8"),
+    ).derive(token.encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +80,15 @@ class EdgeKeyManager:
         """Load existing keys or generate new ones."""
         os.makedirs(os.path.dirname(self.private_key_path) or ".", exist_ok=True)
         configured = os.environ.get("EDGE_SIGNING_PRIVATE_KEY_B64", "")
+        derived = _cloud_key_material(self.private_key_path, "ed25519-signing") if not configured else None
+        if derived is not None:
+            configured = base64.b64encode(
+                Ed25519PrivateKey.from_private_bytes(derived).private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.PKCS8,
+                    serialization.NoEncryption(),
+                )
+            ).decode("ascii")
         if configured:
             try:
                 pem = base64.b64decode(configured, validate=True)
@@ -180,6 +207,9 @@ class EvidenceEncryptor:
     def load_or_generate(self) -> None:
         os.makedirs(os.path.dirname(self.key_path) or ".", exist_ok=True)
         configured = os.environ.get("EDGE_EVIDENCE_KEY_B64", "")
+        derived = _cloud_key_material(self.key_path, "aes256-evidence") if not configured else None
+        if derived is not None:
+            configured = base64.b64encode(derived).decode("ascii")
         if configured:
             try:
                 configured_key = base64.b64decode(configured, validate=True)

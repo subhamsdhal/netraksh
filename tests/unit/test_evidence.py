@@ -93,6 +93,21 @@ class TestHashComputation:
 
 
 class TestKeyManager:
+    def test_cloud_key_is_stable_and_camera_scoped(self, temp_dir, monkeypatch):
+        monkeypatch.setenv("EDGE_CONSTRAINED_CLOUD", "true")
+        monkeypatch.setenv("EDGE_AUTH_TOKEN", "test-only-secret")
+        first = EdgeKeyManager(os.path.join(temp_dir, "a", "cam-border-01.key"), os.path.join(temp_dir, "a", "cam-border-01.pub"))
+        first.load_or_generate()
+        restarted = EdgeKeyManager(os.path.join(temp_dir, "b", "cam-border-01.key"), os.path.join(temp_dir, "b", "cam-border-01.pub"))
+        restarted.load_or_generate()
+        other = EdgeKeyManager(os.path.join(temp_dir, "c", "cam-checkpoint-01.key"), os.path.join(temp_dir, "c", "cam-checkpoint-01.pub"))
+        other.load_or_generate()
+        assert first.kid == restarted.kid
+        assert first.kid != other.kid
+        monkeypatch.setenv("EDGE_AUTH_TOKEN", "rotated-test-only-secret")
+        with pytest.raises(RuntimeError, match="differs from configured key"):
+            first.load_or_generate()
+
     def test_restores_configured_signing_key_across_restart(self, temp_dir, monkeypatch):
         original = EdgeKeyManager(os.path.join(temp_dir, "original.key"), os.path.join(temp_dir, "original.pub"))
         original.load_or_generate(allow_generate=True)
@@ -307,6 +322,19 @@ class TestServerSideVerification:
 
 
 class TestEvidenceEncryptor:
+    def test_cloud_evidence_key_survives_restart(self, temp_dir, monkeypatch):
+        monkeypatch.setenv("EDGE_CONSTRAINED_CLOUD", "true")
+        monkeypatch.setenv("EDGE_AUTH_TOKEN", "test-only-secret")
+        first = EvidenceEncryptor(os.path.join(temp_dir, "a", "cam-border-01.aes"))
+        first.load_or_generate()
+        restarted = EvidenceEncryptor(os.path.join(temp_dir, "b", "cam-border-01.aes"))
+        restarted.load_or_generate()
+        assert restarted.decrypt(first.encrypt(b"durable evidence")) == b"durable evidence"
+        other = EvidenceEncryptor(os.path.join(temp_dir, "c", "cam-checkpoint-01.aes"))
+        other.load_or_generate()
+        with pytest.raises(Exception):
+            other.decrypt(first.encrypt(b"camera scoped"))
+
     def test_restores_configured_evidence_key_across_restart(self, temp_dir, monkeypatch):
         original = EvidenceEncryptor(os.path.join(temp_dir, "original.aes"))
         original.load_or_generate()
