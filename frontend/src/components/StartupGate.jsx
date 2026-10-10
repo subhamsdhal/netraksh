@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { retryStartupWake, STARTUP_STATUS } from '../services/startupWake';
 
@@ -9,17 +9,25 @@ const labels = [
 ];
 
 function displayStatus(status) {
-  if (status === STARTUP_STATUS.TIMEOUT) return 'TIMEOUT';
+  if (status === STARTUP_STATUS.TIMEOUT) return 'UNAVAILABLE';
+  if (status === STARTUP_STATUS.RETRYING) return 'RETRYING';
   if (status === STARTUP_STATUS.READY) return 'READY';
   return 'WARMING';
 }
 
 export default function StartupGate({ children }) {
   const startup = useStartupReadiness();
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   if (startup.admitted || startup.allReady) return children;
 
   const timedOut = labels.some(([key]) => startup[key].status === STARTUP_STATUS.TIMEOUT);
+  const elapsedSeconds = startup.startedAt ? Math.max(0, Math.floor((now - startup.startedAt) / 1000)) : 0;
   return (
     <main
       aria-label="NETRAKSH startup readiness"
@@ -38,16 +46,23 @@ export default function StartupGate({ children }) {
             </div>
           ))}
         </div>
-        <p>{timedOut ? 'One or more required services did not become ready.' : 'Starting required services…'}</p>
-        {!timedOut && (
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', lineHeight: 1.5 }}>
-            Cloud services are starting. This can take up to 2 minutes on first launch. Please keep this tab open. If the screen remains here for more than 2 minutes, refresh the tab once.
-          </p>
+        <p role="status">Elapsed: {Math.floor(elapsedSeconds / 60)}:{String(elapsedSeconds % 60).padStart(2, '0')}</p>
+        {elapsedSeconds >= 60 && !timedOut && (
+          <p>Services are taking longer than expected to start.</p>
         )}
+        {!timedOut && elapsedSeconds < 60 && <p>Waking and checking all three services concurrently…</p>}
+        {labels.map(([key, label]) => startup[key].detail && (
+          <p key={`${key}-detail`} style={{ color: 'var(--text-muted)', fontSize: '0.8rem', lineHeight: 1.5 }}>
+            {label}: {startup[key].detail}
+          </p>
+        ))}
         {timedOut && (
-          <button type="button" onClick={() => retryStartupWake()}>
+          <>
+            <p>One or more required services did not become ready. Check the service status and retry.</p>
+            <button type="button" onClick={() => retryStartupWake()}>
             RETRY STARTUP
-          </button>
+            </button>
+          </>
         )}
       </section>
     </main>

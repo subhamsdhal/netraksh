@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   snapshot: null,
   subscribe: vi.fn(() => () => {}),
   authFetch: vi.fn(),
+  logout: vi.fn(),
   startupRequests: vi.fn(),
 }));
 
@@ -27,7 +28,7 @@ vi.mock('../src/hooks/useWebSocket', () => ({
 vi.mock('../src/services/auth', () => ({
   BACKEND_URL: 'https://backend.example',
   WS_URL: 'wss://backend.example',
-  logout: vi.fn(),
+  logout: (...args) => mocks.logout(...args),
   authFetch: (...args) => mocks.authFetch(...args),
 }));
 
@@ -50,16 +51,26 @@ function RouteShell({ initial = '/watchlist' }) {
     <MemoryRouter initialEntries={[initial]}>
       <Header />
       <nav>
+        <Link to="/camera-health">System Health route</Link>
         <Link to="/watchlist">Watchlist route</Link>
         <Link to="/evidence">Evidence route</Link>
         <Link to="/map">Map route</Link>
+        <Link to="/cross-command-alerts">Alerts route</Link>
         <Link to="/analytics">Analytics route</Link>
+        <Link to="/audit">Audit route</Link>
+        <Link to="/architecture">Architecture route</Link>
+        <Link to="/camera-management">Camera Management route</Link>
       </nav>
       <Routes>
+        <Route path="/camera-health" element={<div>System Health module</div>} />
         <Route path="/watchlist" element={<div>Watchlist module</div>} />
         <Route path="/evidence" element={<div>Evidence module</div>} />
         <Route path="/map" element={<div>Map module</div>} />
+        <Route path="/cross-command-alerts" element={<div>Alerts module</div>} />
         <Route path="/analytics" element={<div>Analytics module</div>} />
+        <Route path="/audit" element={<div>Audit module</div>} />
+        <Route path="/architecture" element={<div>Architecture module</div>} />
+        <Route path="/camera-management" element={<div>Camera Management module</div>} />
       </Routes>
     </MemoryRouter>
   );
@@ -71,6 +82,7 @@ describe('Header startup readiness hydration', () => {
     mocks.subscribe.mockClear();
     mocks.startupRequests.mockClear();
     mocks.authFetch.mockResolvedValue({ ok: false });
+    mocks.logout.mockClear();
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
   });
 
@@ -115,5 +127,38 @@ describe('Header startup readiness hydration', () => {
       expect(screen.getByText('READY · 2/2')).toBeInTheDocument();
     }
     expect(mocks.startupRequests).not.toHaveBeenCalled();
+  });
+
+  it('keeps the account menu and sign-out action available across every primary route', () => {
+    render(<RouteShell />);
+    const accountButtonName = 'Account menu for admin (ADMIN)';
+    fireEvent.click(screen.getByRole('button', { name: accountButtonName }));
+    expect(screen.getByRole('button', { name: /Sign Out/ })).toBeInTheDocument();
+
+    for (const [link, module] of [
+      ['System Health route', 'System Health module'],
+      ['Map route', 'Map module'],
+      ['Alerts route', 'Alerts module'],
+      ['Evidence route', 'Evidence module'],
+      ['Watchlist route', 'Watchlist module'],
+      ['Analytics route', 'Analytics module'],
+      ['Audit route', 'Audit module'],
+      ['Architecture route', 'Architecture module'],
+      ['Camera Management route', 'Camera Management module'],
+    ]) {
+      fireEvent.click(screen.getByRole('link', { name: link }));
+      expect(screen.getByText(module)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: accountButtonName })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Sign Out/ })).toBeInTheDocument();
+    }
+  });
+
+  it('invokes logout and closes the account menu when Sign Out is selected', () => {
+    render(<RouteShell />);
+    fireEvent.click(screen.getByRole('button', { name: 'Account menu for admin (ADMIN)' }));
+    fireEvent.click(screen.getByRole('button', { name: /Sign Out/ }));
+
+    expect(mocks.logout).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('button', { name: /Sign Out/ })).not.toBeInTheDocument();
   });
 });

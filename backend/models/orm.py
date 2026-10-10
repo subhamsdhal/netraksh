@@ -10,6 +10,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     JSON,
+    LargeBinary,
     Boolean,
     DateTime,
     Float,
@@ -25,6 +26,34 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     pass
+
+
+class VideoMediaObject(Base):
+    __tablename__ = "video_media_objects"
+    __table_args__ = (Index("ix_video_media_camera_session", "camera_id", "session_id"),)
+
+    object_key: Mapped[str] = mapped_column(String(320), primary_key=True)
+    camera_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    duration_seconds: Mapped[Optional[float]] = mapped_column(Float)
+    fps: Mapped[Optional[float]] = mapped_column(Float)
+    source_generation: Mapped[Optional[int]] = mapped_column(Integer)
+    prepared_source_key: Mapped[Optional[str]] = mapped_column(String(320))
+    ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class VideoControlRecord(Base):
+    __tablename__ = "video_control_records"
+
+    object_key: Mapped[str] = mapped_column(String(320), primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 def new_uuid() -> str:
@@ -516,6 +545,12 @@ class AnalysisRunSummary(Base):
     first_telemetry_at: Mapped[float] = mapped_column(Float, nullable=False)
     last_telemetry_at: Mapped[float] = mapped_column(Float, nullable=False)
     completed_at: Mapped[Optional[float]] = mapped_column(Float)
+    interrupted_at: Mapped[Optional[float]] = mapped_column(Float)
+    interruption_reason: Mapped[Optional[str]] = mapped_column(String(64))
+    worker_boot_id: Mapped[Optional[str]] = mapped_column(String(36))
+    worker_instance_id: Mapped[Optional[str]] = mapped_column(String(128))
+    worker_started_at: Mapped[Optional[float]] = mapped_column(Float)
+    last_worker_heartbeat: Mapped[Optional[float]] = mapped_column(Float)
     final_frame_index: Mapped[Optional[int]] = mapped_column(Integer)
     final_video_time: Mapped[Optional[float]] = mapped_column(Float)
     processing_fps: Mapped[Optional[float]] = mapped_column(Float)
@@ -534,6 +569,47 @@ class AnalysisRunSummary(Base):
     tracking_timeline_json: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class AnalysisTrackingSample(Base):
+    """Durable analyzed-HUD sample retained across backend restarts."""
+    __tablename__ = "analysis_tracking_samples"
+    __table_args__ = (
+        Index(
+            "ix_analysis_tracking_sample_run_time",
+            "analysis_session_id",
+            "video_time",
+            "sequence",
+        ),
+    )
+
+    analysis_session_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True)
+    frame_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    camera_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    stream_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    analysis_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    video_time: Mapped[Optional[float]] = mapped_column(Float)
+    sample_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AnalysisWorkerLease(Base):
+    """Latest authenticated edge process and exact run ownership per camera."""
+    __tablename__ = "analysis_worker_leases"
+
+    camera_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    boot_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    instance_id: Mapped[Optional[str]] = mapped_column(String(128))
+    registered_at: Mapped[float] = mapped_column(Float, nullable=False)
+    worker_started_at: Mapped[float] = mapped_column(Float, nullable=False)
+    last_heartbeat_at: Mapped[float] = mapped_column(Float, nullable=False)
+    phase: Mapped[str] = mapped_column(String(24), nullable=False)
+    analysis_session_id: Mapped[Optional[str]] = mapped_column(String(36))
+    stream_id: Mapped[Optional[str]] = mapped_column(String(36))
+    analysis_generation: Mapped[Optional[int]] = mapped_column(Integer)
+    last_frame_index: Mapped[Optional[int]] = mapped_column(Integer)
+    last_video_time: Mapped[Optional[float]] = mapped_column(Float)
 
 
 # ---------------------------------------------------------------------------

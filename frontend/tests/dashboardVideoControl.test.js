@@ -1,7 +1,28 @@
 import { describe, expect, it, vi } from 'vitest';
-import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, canReanalyzeSource, claimUploadAutoStart, durableHeartbeat, fetchWithTimeout, lifecycleAction, reanalyzeRequestPayload, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, canReanalyzeSource, claimUploadAutoStart, durableHeartbeat, fetchPreparationForRestore, fetchReadOnlyWithRetry, fetchWithTimeout, lifecycleAction, normalizeReadyUploadResponse, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
 
 describe('dashboard video control ownership', () => {
+  it('settles only the exact Camera 1 live generation from backend authority', () => {
+    const live = {
+      sourceMode: 'durable', sourceId: 'source-1', analysisGeneration: 8,
+      analysisState: 'LIVE', runState: 'LIVE', latestAnalysisSessionId: 'run-8',
+    };
+    const interrupted = {
+      session_id: 'source-1', analysis_generation: 8, analysis_state: 'INTERRUPTED',
+      scenario: 'paused', latest_analysis_session_id: 'run-8',
+    };
+    expect(reconcileTerminalCameraSource(live, interrupted)).toMatchObject({
+      analysisState: 'INTERRUPTED', runState: 'INTERRUPTED', scenario: 'paused',
+      latestAnalysisSessionId: 'run-8',
+    });
+    expect(canReanalyzeSource('cam-border-01', reconcileTerminalCameraSource(live, interrupted))).toBe(true);
+    expect(reconcileTerminalCameraSource(live, { ...interrupted, session_id: 'other-source' })).toBe(live);
+    expect(reconcileTerminalCameraSource(live, { ...interrupted, analysis_generation: 7 })).toBe(live);
+    expect(reconcileTerminalCameraSource(live, { ...interrupted, analysis_state: 'ACTIVE' })).toBe(live);
+    expect(reconcileTerminalCameraSource(live, { ...interrupted, analysis_state: 'COMPLETED' })).toMatchObject({
+      analysisState: 'COMPLETED', runState: 'COMPLETED',
+    });
+  });
   it('offers reanalysis for either completed durable camera source', () => {
     const completed = { sourceMode: 'durable', sourceId: 'stored-camera-1-video', analysisState: 'COMPLETED' };
     expect(canReanalyzeSource('cam-border-01', completed)).toBe(true);
@@ -12,6 +33,7 @@ describe('dashboard video control ownership', () => {
     });
     expect(reanalyzeRequestPayload('cam-border-01', completed, 'request-1')).not.toHaveProperty('file');
     expect(canReanalyzeSource('cam-checkpoint-01', completed)).toBe(true);
+    expect(canReanalyzeSource('cam-border-01', { ...completed, analysisState: 'INTERRUPTED' })).toBe(true);
     expect(reanalyzeRequestPayload('cam-checkpoint-01', completed, 'request-2')).toEqual({
       camera_id: 'cam-checkpoint-01',
       video_session_id: 'stored-camera-1-video',
@@ -24,6 +46,16 @@ describe('dashboard video control ownership', () => {
     expect(reanalyzeRequestPayload('cam-border-01', completed, '')).toBeNull();
   });
 
+  it('keeps interrupted history truthful while presenting the normal card as ready', () => {
+    const interrupted = { sourceMode: 'durable', sourceId: 'source-1', analysisState: 'INTERRUPTED' };
+    expect(analysisLifecyclePresentation(interrupted)).toMatchObject({
+      label: 'ANALYSIS INTERRUPTED', badge: 'INTERRUPTED', tone: 'failed',
+    });
+    expect(analysisLifecyclePresentation(interrupted, {}, false, { hideInterrupted: true })).toMatchObject({
+      label: 'SOURCE READY', badge: 'SOURCE READY', tone: 'ready',
+    });
+  });
+
   it('aborts a stalled read-only restore preflight after the timeout', async () => {
     let requestSignal;
     const fetcher = vi.fn((_path, { signal }) => new Promise((_resolve, reject) => {
@@ -33,6 +65,57 @@ describe('dashboard video control ownership', () => {
 
     await expect(fetchWithTimeout(fetcher, '/read-only', 5)).rejects.toMatchObject({ name: 'AbortError' });
     expect(requestSignal.aborted).toBe(true);
+  });
+
+  it('treats preparation lookup rejection as non-authoritative so current source can be queried', async () => {
+    const diagnostic = vi.fn();
+    const fetcher = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+
+    const response = await fetchPreparationForRestore(
+      fetcher,
+      '/api/dashboard/video/preparation/current?camera_id=cam-border-01',
+      diagnostic,
+    );
+
+    expect(response).toBeNull();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(diagnostic).toHaveBeenCalledWith({
+      stage: 'PREPARATION_CHECK_ERROR',
+      preparation_error_name: 'TypeError',
+    });
+  });
+
+  it('retries transient read-only restore fetch failures and returns the successful response', async () => {
+    const onRetry = vi.fn();
+    const success = { ok: true, status: 200 };
+    const fetcher = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce(success);
+
+    await expect(fetchReadOnlyWithRetry(fetcher, '/system/analysis-runs/run-1', {
+      attempts: 3,
+      retryDelayMs: 0,
+      onRetry,
+    })).resolves.toBe(success);
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(onRetry).toHaveBeenCalledWith({ attempt: 1, error_name: 'TypeError' });
+  });
+
+  it('retries a transient server error but does not retry a client response', async () => {
+    const onRetry = vi.fn();
+    const success = { ok: true, status: 200 };
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce({ status: 503 })
+      .mockResolvedValueOnce(success);
+
+    await expect(fetchReadOnlyWithRetry(fetcher, '/api/dashboard/video/current', {
+      attempts: 3,
+      retryDelayMs: 0,
+      onRetry,
+    })).resolves.toBe(success);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(onRetry).toHaveBeenCalledWith({ attempt: 1, http_status: 503 });
   });
 
   it('replaces a stale browser session with the bundled source contract', () => {
@@ -184,6 +267,9 @@ describe('dashboard video control ownership', () => {
     expect(analysisLifecyclePresentation({ analysisState: 'COMPLETED' })).toMatchObject({
       label: 'ANALYSIS COMPLETED', badge: 'COMPLETED', retry: false,
     });
+    expect(analysisLifecyclePresentation({ analysisState: 'INTERRUPTED' })).toMatchObject({
+      label: 'ANALYSIS INTERRUPTED', badge: 'INTERRUPTED', tone: 'failed',
+    });
     expect(analysisLifecyclePresentation({ analysisState: 'FAILED' }).label).toBe('ANALYSIS FAILED');
   });
 
@@ -225,6 +311,27 @@ describe('dashboard video control ownership', () => {
       analysis_state: 'WAKING',
       analysis_generation: 3,
     })).toMatchObject({ runState: 'WAKING', analysisState: 'WAKING', analysisGeneration: 3 });
+  });
+
+  it('recognizes temporary local uploads without granting them analysis authority', () => {
+    const syncResponse = {
+      status: 'ok', source_state: 'READY', camera_id: 'cam-border-01',
+      session_id: 'upload-1', upload_intent_id: 'upload-1', source_name: 'vid 1.mp4',
+    };
+    expect(normalizeReadyUploadResponse(syncResponse, 'cam-border-01', 'upload-1')).toMatchObject({
+      local_only: true, camera_id: 'cam-border-01', source_name: 'vid 1.mp4',
+    });
+    expect(normalizeReadyUploadResponse({
+      ...syncResponse, source_mode: 'durable', source_generation: 1,
+    }, 'cam-border-01', 'upload-1')).toMatchObject({
+      local_only: false, source_mode: 'durable', source_generation: 1,
+    });
+    const asyncResponse = { preparation_job_id: 'intent-2', camera_id: 'cam-checkpoint-01', state: 'NORMALIZING' };
+    expect(normalizeReadyUploadResponse(asyncResponse, 'cam-checkpoint-01', 'intent-2')).toBe(asyncResponse);
+    expect(normalizeReadyUploadResponse(asyncResponse, 'cam-border-01', 'intent-2')).toBeNull();
+    expect(normalizeReadyUploadResponse(syncResponse, 'cam-checkpoint-01', 'upload-1')).toBeNull();
+    expect(normalizeReadyUploadResponse(syncResponse, 'cam-border-01', 'different-upload')).toBeNull();
+    expect(normalizeReadyUploadResponse({ ...syncResponse, source_state: 'UPLOADED' }, 'cam-border-01', 'upload-1')).toBeNull();
   });
 
   it('claims one automatic start for one authoritative new upload only', () => {

@@ -9,10 +9,34 @@ from __future__ import annotations
 import json
 import mimetypes
 import time
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
 from backend.services.evidence_storage import EvidenceNotFoundError, get_evidence_storage
+
+
+def _video_store():
+    from backend.config import settings
+    if settings.OBJECT_STORAGE_PROVIDER == "postgres":
+        from backend.services.postgres_video_storage import PostgresVideoStorage
+        return PostgresVideoStorage()
+    return get_evidence_storage()
+
+
+def _serialized_camera_control(function):
+    """Serialize source/generation updates across backend processes in PG mode."""
+    @wraps(function)
+    def call(camera_id, *args, **kwargs):
+        from backend.config import settings
+        if settings.OBJECT_STORAGE_PROVIDER != "postgres":
+            return function(camera_id, *args, **kwargs)
+        from sqlalchemy import text
+        from backend.database.session import SessionLocal
+        with SessionLocal.begin() as db:
+            db.execute(text("SELECT pg_advisory_xact_lock(72419012, hashtext(:camera))"), {"camera": camera_id})
+            return function(camera_id, *args, **kwargs)
+    return call
 
 
 def _safe_camera_id(camera_id: str) -> str:
@@ -59,7 +83,7 @@ def media_key(camera_id: str, session_id: str, *, preview: bool, suffix: str) ->
 
 
 def _put_json(key: str, payload: dict[str, Any]) -> None:
-    get_evidence_storage().put_object(
+    _video_store().put_object(
         key,
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"),
         "application/json",
@@ -68,7 +92,7 @@ def _put_json(key: str, payload: dict[str, Any]) -> None:
 
 def _get_json(key: str) -> dict[str, Any] | None:
     try:
-        raw = get_evidence_storage().get_object(key)
+        raw = _video_store().get_object(key)
     except EvidenceNotFoundError:
         return None
     value = json.loads(raw.decode("utf-8"))
@@ -87,7 +111,7 @@ def store_uploaded_session(
     content_type: str,
 ) -> dict[str, Any]:
     """Persist one immutable upload and its non-secret metadata."""
-    storage = get_evidence_storage()
+    storage = _video_store()
     source_key = media_key(camera_id, session_id, preview=False, suffix=source_path.suffix)
     storage.put_file(source_key, str(source_path), content_type)
     preview_key = None
@@ -144,7 +168,7 @@ def create_preparation_job(
         "upload_intent_id": _safe_session_id(job_id),
         "updated_at": now,
     })
-    get_evidence_storage().put_file(raw_key, str(source_path), content_type)
+    _video_store().put_file(raw_key, str(source_path), content_type)
     return update_preparation_job(camera_id, job_id, {"state": "UPLOADED"})
 
 
@@ -184,7 +208,7 @@ def retry_preparation_job(camera_id: str, job_id: str) -> dict[str, Any]:
     if str(job.get("state", "")).upper() != "FAILED":
         raise ValueError("Only a failed video preparation job can be retried")
     raw_key = job.get("raw_object_key")
-    if not raw_key or not get_evidence_storage().object_exists(raw_key):
+    if not raw_key or not _video_store().object_exists(raw_key):
         raise FileNotFoundError("The received upload is no longer available for retry")
     return update_preparation_job(camera_id, job_id, {
         "state": "UPLOADED",
@@ -198,16 +222,17 @@ def download_preparation_upload(camera_id: str, job_id: str, destination: Path) 
     if job is None or not job.get("raw_object_key"):
         raise FileNotFoundError("Video preparation upload was not found")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    get_evidence_storage().get_file(job["raw_object_key"], str(destination))
+    _video_store().get_file(job["raw_object_key"], str(destination))
     return job
 
 
 def delete_preparation_upload(camera_id: str, job_id: str) -> None:
     job = get_preparation_job(camera_id, job_id)
     if job and job.get("raw_object_key"):
-        get_evidence_storage().delete_object(job["raw_object_key"])
+        _video_store().delete_object(job["raw_object_key"])
 
 
+@_serialized_camera_control
 def activate_session(camera_id: str, session_id: str) -> dict[str, Any]:
     metadata = get_uploaded_session(camera_id, session_id)
     if metadata is None:
@@ -237,6 +262,7 @@ def activate_session(camera_id: str, session_id: str) -> dict[str, Any]:
     return control
 
 
+@_serialized_camera_control
 def activate_bundled_source(
     camera_id: str,
     *,
@@ -284,11 +310,12 @@ def get_valid_active_session(camera_id: str) -> dict[str, Any] | None:
     metadata = get_uploaded_session(camera_id, session_id)
     if not metadata or metadata.get("source_object_key") != source_key:
         return None
-    if not get_evidence_storage().object_exists(source_key):
+    if not _video_store().object_exists(source_key):
         return None
     return current
 
 
+@_serialized_camera_control
 def update_active_session(camera_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
     current = get_active_session(camera_id)
     if current is None:
@@ -306,6 +333,7 @@ def update_active_session(camera_id: str, changes: dict[str, Any]) -> dict[str, 
     return current
 
 
+@_serialized_camera_control
 def reconcile_inactive_control(camera_id: str, telemetry: dict[str, Any] | None = None, *, now: float | None = None) -> dict[str, Any] | None:
     """Repair only a stale paused durable lifecycle without waking a worker."""
     current = get_valid_active_session(camera_id)
@@ -328,6 +356,38 @@ def reconcile_inactive_control(camera_id: str, telemetry: dict[str, Any] | None 
     return current
 
 
+@_serialized_camera_control
+def interrupt_active_session(
+    camera_id: str,
+    session_id: str,
+    generation: int,
+    *,
+    reason: str,
+    analysis_session_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Truthfully settle one exact stale generation without rewriting its history."""
+    current = get_valid_active_session(camera_id)
+    if current is None or current.get("session_id") != session_id:
+        return None
+    if int(current.get("analysis_generation") or 0) != int(generation):
+        return None
+    if analysis_session_id is not None and current.get("latest_analysis_session_id") != analysis_session_id:
+        return None
+    if str(current.get("analysis_state") or "").upper() not in {"WAKING", "ACTIVE"}:
+        return None
+    now = time.time()
+    current.update({
+        "scenario": "paused",
+        "analysis_state": "INTERRUPTED",
+        "state_updated_at": now,
+        "interrupted_at": now,
+        "interruption_reason": reason,
+    })
+    _put_json(control_key(camera_id), current)
+    return current
+
+
+@_serialized_camera_control
 def start_active_session(
     camera_id: str,
     session_id: str,
@@ -378,6 +438,7 @@ def start_active_session(
     return {**current, "control_repaired": False}, True
 
 
+@_serialized_camera_control
 def promote_active_session(
     camera_id: str,
     session_id: str,
@@ -403,6 +464,7 @@ def promote_active_session(
     return current
 
 
+@_serialized_camera_control
 def complete_active_session(camera_id: str, session_id: str, generation: int, changes: dict[str, Any]) -> dict[str, Any] | None:
     """Persist a successful finite-run terminal state without rewriting history."""
     current = get_valid_active_session(camera_id)
@@ -410,8 +472,16 @@ def complete_active_session(camera_id: str, session_id: str, generation: int, ch
         return None
     if int(current.get("analysis_generation") or 0) != int(generation):
         return None
+    expected_run_id = changes.get("latest_analysis_session_id")
+    if expected_run_id and current.get("latest_analysis_session_id") != expected_run_id:
+        return None
     if current.get("analysis_state") == "COMPLETED":
         return current
+    if current.get("analysis_state") == "INTERRUPTED":
+        # A late EOF callback must not rewrite the settled historical truth.
+        return None
+    if str(current.get("analysis_state") or "").upper() not in {"WAKING", "ACTIVE"}:
+        return None
     current.update({
         "scenario": "paused",
         "analysis_state": "COMPLETED",
@@ -424,4 +494,4 @@ def complete_active_session(camera_id: str, session_id: str, generation: int, ch
 
 
 def signed_media_url(object_key: str, expires_in: int = 900) -> str | None:
-    return get_evidence_storage().generate_signed_url(object_key, expires_in=expires_in)
+    return _video_store().generate_signed_url(object_key, expires_in=expires_in)

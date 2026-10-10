@@ -20,13 +20,18 @@ describe('production UI contains no retired operational claims', () => {
 
   it('uses lifecycle status instead of primary evaluator START or STOP controls', () => {
     const dashboard = read('../src/pages/Dashboard.jsx');
-    expect(dashboard).toContain('analysisLifecyclePresentation(sourceState, mediaState');
+    expect(dashboard).toMatch(/analysisLifecyclePresentation\(\s*sourceState,\s*mediaState,/);
     expect(dashboard).toContain('RETRY ANALYSIS');
     expect(dashboard).not.toContain('START / ANALYZE');
     expect(dashboard).not.toContain('STOP ANALYSIS');
     expect(dashboard).not.toContain('data-action="stop-analysis"');
     // The normal backend stop contract remains available for operational use.
     expect(read('../src/utils/dashboardVideoControl.js')).toContain("payload.control_action = 'stop'");
+  });
+
+  it('does not show a worker wake warning after a run has completed', () => {
+    const dashboard = read('../src/pages/Dashboard.jsx');
+    expect(dashboard).toContain("!completedRun && mediaState.edgeStatus === 'WAKING'");
   });
 
   it('uses shared freshness and age truth in the command center', () => {

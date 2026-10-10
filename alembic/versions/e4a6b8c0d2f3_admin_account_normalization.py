@@ -27,11 +27,17 @@ LEGACY_USERNAME = "admin_legacy_disabled"
 
 
 def upgrade() -> None:
+    connection = op.get_bind()
+    # This production-only data repair has nothing to transform on a fresh
+    # installation. User provisioning runs after ALL schema migrations.
+    # Check the entire table so partial/unexpected account sets still fail.
+    if connection.execute(sa.text("SELECT 1 FROM users LIMIT 1")).first() is None:
+        return
+
     admin_password = os.environ.get("ADMIN_PASSWORD")
     if not admin_password:
         raise RuntimeError("ADMIN_PASSWORD is required for admin account normalization")
 
-    connection = op.get_bind()
     rows = connection.execute(
         sa.text(
             """

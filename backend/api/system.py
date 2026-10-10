@@ -17,14 +17,14 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response as PlainResponse
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from backend.config import settings
 from backend.database.session import get_db
 from backend.models.orm import (
     Alert, Camera, Event, PipelineMetricsSnapshot, SyncQueue, AuditLog,
-    CameraHealth, AnalysisTelemetrySnapshot, AnalysisRunSummary,
+    CameraHealth, AnalysisTelemetrySnapshot, AnalysisRunSummary, AnalysisTrackingSample,
 )
 from backend.security.auth import require_edge_auth
 from backend.security.auth import require_any_role
@@ -89,6 +89,29 @@ def _compact_tracking_sample(payload: TrackingFramePayload, received_at: float) 
         "detector_frame_index": payload.detector_frame_index,
         "tracks": [track.model_dump() for track in payload.tracks],
     }
+
+
+def _durable_tracking_timeline(
+    db: Session,
+    identity: tuple[str, str, str, int],
+) -> list[dict[str, Any]]:
+    camera_id, stream_id, analysis_session_id, analysis_generation = identity
+    records = (
+        db.query(AnalysisTrackingSample)
+        .filter(
+            AnalysisTrackingSample.camera_id == camera_id,
+            AnalysisTrackingSample.stream_id == stream_id,
+            AnalysisTrackingSample.analysis_session_id == analysis_session_id,
+            AnalysisTrackingSample.analysis_generation == analysis_generation,
+        )
+        .order_by(
+            AnalysisTrackingSample.video_time,
+            AnalysisTrackingSample.sequence,
+            AnalysisTrackingSample.frame_index,
+        )
+        .all()
+    )
+    return [dict(record.sample_json or {}) for record in records]
 
 
 @router.get("/metrics")
@@ -368,13 +391,19 @@ _SUMMARY_FIELDS = (
 )
 
 
-def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[AnalysisRunSummary]:
+def _record_run_summary(
+    db: Session,
+    payload: LiveTelemetryPayload,
+    *,
+    measurement_is_newer: bool = True,
+) -> Optional[AnalysisRunSummary]:
     if not (payload.stream_id and payload.analysis_session_id and payload.analysis_generation is not None):
         return None
     observed_at = float(payload.processed_timestamp or payload.timestamp)
     summary = db.query(AnalysisRunSummary).filter(
         AnalysisRunSummary.analysis_session_id == payload.analysis_session_id,
     ).first()
+    summary_is_new = summary is None
     if summary is None:
         summary = AnalysisRunSummary(
             analysis_session_id=payload.analysis_session_id,
@@ -390,43 +419,52 @@ def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[
         payload.camera_id, payload.stream_id, payload.analysis_generation
     ):
         raise HTTPException(status_code=409, detail="analysis_session_id identity conflict")
+    measurement_is_newer = measurement_is_newer or summary_is_new
     summary.last_telemetry_at = max(float(summary.last_telemetry_at), observed_at)
     # Sparse lifecycle packets must not replace a real final sample with a
     # decoder/transport artifact that is older or less complete. The edge
     # reports its last processed frame explicitly; retain monotonic source
     # identity for delayed packets from the same run as well.
-    if payload.frame_index is not None and (
+    if measurement_is_newer and payload.frame_index is not None and (
         summary.final_frame_index is None
         or int(payload.frame_index) >= int(summary.final_frame_index)
     ):
         summary.final_frame_index = payload.frame_index
-    if payload.video_time is not None and (
+    if measurement_is_newer and payload.video_time is not None and (
         summary.final_video_time is None
         or float(payload.video_time) >= float(summary.final_video_time)
     ):
         summary.final_video_time = payload.video_time
-    if payload.processing_fps is not None:
+    if measurement_is_newer and payload.processing_fps is not None:
         summary.processing_fps = payload.processing_fps
-    if payload.source_generation is not None:
+    if measurement_is_newer and payload.source_generation is not None:
         summary.source_generation = payload.source_generation
-    if payload.detector_fps is not None:
+    if measurement_is_newer and payload.detector_fps is not None:
         summary.detector_fps = payload.detector_fps
-    if payload.hud_fps is not None:
+    if measurement_is_newer and payload.hud_fps is not None:
         summary.hud_fps = payload.hud_fps
     reported_source_fps = payload.source_fps if payload.source_fps is not None else payload.fps_declared
-    if reported_source_fps is not None:
+    if measurement_is_newer and reported_source_fps is not None:
         summary.source_fps = reported_source_fps
-    for field in _SUMMARY_FIELDS:
-        value = getattr(payload, field)
-        if value is not None:
-            setattr(summary, field, value)
+    if measurement_is_newer:
+        for field in _SUMMARY_FIELDS:
+            value = getattr(payload, field)
+            if value is not None:
+                setattr(summary, field, value)
     if str(payload.analysis_state or "").upper() == "COMPLETED":
-        summary.completed_at = observed_at
+        summary.completed_at = max(float(summary.completed_at or observed_at), observed_at)
         identity = _tracking_identity(payload)
-        timeline = sorted(
-            list(_tracking_timelines.get(identity, [])) if identity else [],
-            key=lambda item: (float(item.get("video_time") or 0), int(item.get("sequence") or 0)),
-        )
+        durable = _durable_tracking_timeline(db, identity) if identity else []
+        memory = list(_tracking_timelines.get(identity, [])) if identity else []
+        samples_by_key = {
+            (int(item.get("sequence") or 0), int(item.get("frame_index") or 0)): item
+            for item in (*durable, *memory)
+        }
+        timeline = sorted(samples_by_key.values(), key=lambda item: (
+            float(item.get("video_time") or 0),
+            int(item.get("sequence") or 0),
+            int(item.get("frame_index") or 0),
+        ))
         summary.tracking_timeline_json = timeline
         summary.tracking_sample_count = len(timeline)
         if len(timeline) > 1:
@@ -671,18 +709,57 @@ async def post_telemetry(
 async def post_tracking_frame(
     payload: TrackingFramePayload,
     edge_identity=Depends(require_edge_auth),
+    db: Session = Depends(get_db),
 ):
-    """Broadcast one lossy live-HUD sample without a database write.
+    """Durably checkpoint and broadcast one live-HUD sample.
 
-    This endpoint is deliberately separate from event/evidence ingestion and
-    the durable latest telemetry snapshot.  Slow consumers receive only the
-    newest frame through the existing bounded WebSocket batcher.
+    Slow consumers receive only the newest frame through the existing bounded
+    WebSocket batcher. Each compact sample is also written independently so a
+    backend restart cannot erase the beginning of a completed replay.
     """
     if edge_identity and edge_identity.edge_id != payload.camera_id:
         raise HTTPException(status_code=403, detail="Authenticated edge identity does not match camera_id")
     received_at = __import__("time").time()
     identity = _tracking_identity(payload)
     if identity is not None:
+        compact_sample = _compact_tracking_sample(payload, received_at)
+        latest_sequence = db.query(func.max(AnalysisTrackingSample.sequence)).filter(
+            AnalysisTrackingSample.camera_id == payload.camera_id,
+            AnalysisTrackingSample.stream_id == payload.stream_id,
+            AnalysisTrackingSample.analysis_session_id == payload.analysis_session_id,
+            AnalysisTrackingSample.analysis_generation == payload.analysis_generation,
+        ).scalar()
+        measurement_is_newer = latest_sequence is None or int(payload.sequence) > int(latest_sequence)
+        persisted = db.get(
+            AnalysisTrackingSample,
+            (payload.analysis_session_id, int(payload.sequence), int(payload.frame_index)),
+        )
+        if persisted is None:
+            db.add(AnalysisTrackingSample(
+                analysis_session_id=payload.analysis_session_id,
+                sequence=int(payload.sequence),
+                frame_index=int(payload.frame_index),
+                camera_id=payload.camera_id,
+                stream_id=payload.stream_id,
+                analysis_generation=int(payload.analysis_generation),
+                video_time=payload.video_time,
+                sample_json=compact_sample,
+            ))
+        # Durable tracking is sufficient to establish/update either camera's
+        # run summary. Optional diagnostic telemetry can arrive later or be
+        # dropped; the completed replay must still retain its real final frame.
+        _record_run_summary(db, payload, measurement_is_newer=measurement_is_newer)
+        db.commit()
+        if payload.camera_id == "cam-border-01":
+            # Durable tracking is authoritative even if the separate optional
+            # telemetry transport was unavailable. Ensure this exact run owns
+            # the active generation before its EOF completion callback.
+            promote_active_session(
+                payload.camera_id,
+                payload.stream_id,
+                int(payload.analysis_generation),
+                payload.analysis_session_id,
+            )
         timeline = _tracking_timelines.setdefault(identity, [])
         # Multiple transport workers can complete HTTPS requests out of order.
         # Preserve every unique source frame for durable replay even when it is
@@ -692,7 +769,7 @@ async def post_tracking_frame(
             and int(item.get("frame_index") or -1) == int(payload.frame_index)
             for item in timeline
         ):
-            timeline.append(_compact_tracking_sample(payload, received_at))
+            timeline.append(compact_sample)
         if len(timeline) > _MAX_TRACKING_SAMPLES_PER_RUN:
             del timeline[:-_MAX_TRACKING_SAMPLES_PER_RUN]
         # Keep at most four completed/in-flight run buffers per camera.

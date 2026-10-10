@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import threading
 import time
 import uuid
@@ -32,7 +33,6 @@ _state = {
 
 
 def _set_run_state(phase: str, pipeline) -> None:
-    """Publish the current pipeline identity to the independent lease sender."""
     _state["analysis_phase"] = phase
     _state["pipeline"] = pipeline
     logger.info(
@@ -45,12 +45,13 @@ def _set_run_state(phase: str, pipeline) -> None:
 
 def _heartbeat_payload(camera_id: str) -> dict:
     pipeline = _state["pipeline"]
+    phase = _state["analysis_phase"] if pipeline is not None else "IDLE"
     payload = {
         "camera_id": camera_id,
         "boot_id": _state["boot_id"],
         "instance_id": _state["instance_id"],
         "worker_started_at": _state["started_at"],
-        "phase": _state["analysis_phase"] if pipeline is not None else "IDLE",
+        "phase": phase,
     }
     if pipeline is not None:
         payload.update({
@@ -64,7 +65,7 @@ def _heartbeat_payload(camera_id: str) -> dict:
 
 
 def _heartbeat_loop() -> None:
-    """Maintain this process's per-camera backend lease without starting analysis."""
+    """Best-effort bounded ownership signal, independent of image inference."""
     camera_id = _required("CAMERA_ID")
     backend_url = _required("BACKEND_URL").rstrip("/")
     token = _required("EDGE_AUTH_TOKEN")
@@ -262,13 +263,29 @@ def main() -> None:
         level=os.environ.get("LOG_LEVEL", "INFO"),
         format="%(asctime)s | %(levelname)-8s | [cloud-edge] %(name)s | %(message)s",
     )
+    # httpx INFO includes full signed media URLs, which contain one-time
+    # access parameters. Never expose them in production logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     port = int(os.environ.get("PORT", "10000"))
     server = CloudHealthServer(("0.0.0.0", port), HealthHandler)
     logger.info("[CloudWorker] Health listener bound on 0.0.0.0:%s", port)
     logger.info(
-        "[WorkerLease] process boot camera_id=%s boot_id=%s instance_id=%s",
-        os.environ.get("CAMERA_ID", "unknown"), _state["boot_id"], _state["instance_id"],
+        "[WorkerLease] process boot camera_id=%s boot_id=%s instance_id=%s pid=%s",
+        os.environ.get("CAMERA_ID", "unknown"), _state["boot_id"], _state["instance_id"], os.getpid(),
     )
+    def _shutdown_signal(signum, _frame):
+        pipeline = _state["pipeline"]
+        logger.warning(
+            "[WorkerLease] process shutdown signal=%s camera_id=%s boot_id=%s phase=%s run_id=%s last_frame=%s last_video_time=%s",
+            signum, os.environ.get("CAMERA_ID", "unknown"), _state["boot_id"],
+            _state["analysis_phase"], getattr(pipeline, "stream_id", None),
+            getattr(pipeline, "_last_processed_frame_index", None),
+            getattr(pipeline, "_last_video_time", None),
+        )
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, _shutdown_signal)
+    signal.signal(signal.SIGINT, _shutdown_signal)
     threading.Thread(target=_heartbeat_loop, daemon=True, name="worker-lease-heartbeat").start()
     thread = threading.Thread(target=_run_edge, daemon=True, name="netraksh-edge")
     thread.start()

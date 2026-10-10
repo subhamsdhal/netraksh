@@ -27,11 +27,16 @@ LEGACY_USERNAME = "admin_legacy_disabled"
 
 
 def upgrade() -> None:
+    connection = op.get_bind()
+    # No historical password exists before fresh-install user provisioning.
+    # Any populated user table retains the original production guards below.
+    if connection.execute(sa.text("SELECT 1 FROM users LIMIT 1")).first() is None:
+        return
+
     admin_password = os.environ.get("ADMIN_PASSWORD")
     if not admin_password:
         raise RuntimeError("ADMIN_PASSWORD is required for primary admin password synchronization")
 
-    connection = op.get_bind()
     primary_rows = connection.execute(
         sa.text(
             """

@@ -38,6 +38,25 @@ export function restoringSourceState() {
   return { restoring: true, runState: 'RESTORING' };
 }
 
+// Only a terminal backend control response for the same exact source and
+// generation may settle a locally live card. Old responses cannot reclaim a
+// newer generation or change another camera's presentation.
+export function reconcileTerminalCameraSource(current, response) {
+  const terminal = String(response?.analysis_state || '').toUpperCase();
+  if (!['INTERRUPTED', 'COMPLETED'].includes(terminal)
+      || current?.sourceMode !== 'durable'
+      || response?.session_id !== current.sourceId
+      || Number(response?.analysis_generation) !== Number(current.analysisGeneration)) return current;
+  if (current.analysisState === terminal && current.runState === terminal) return current;
+  return {
+    ...current,
+    analysisState: terminal,
+    runState: terminal,
+    scenario: String(response.scenario || 'paused').toLowerCase(),
+    latestAnalysisSessionId: response.latest_analysis_session_id || current.latestAnalysisSessionId || null,
+  };
+}
+
 export async function fetchWithTimeout(fetcher, path, timeoutMs = 5000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -46,6 +65,45 @@ export async function fetchWithTimeout(fetcher, path, timeoutMs = 5000) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+// Preparation state is an optimization for an in-flight upload, not source
+// authority. A transient failure here must not prevent the caller from asking
+// GET /video/current for the authoritative durable source.
+export async function fetchPreparationForRestore(fetcher, path, onDiagnostic = () => {}) {
+  try {
+    const response = await fetchWithTimeout(fetcher, path, 5000);
+    onDiagnostic({ stage: 'PREPARATION_CHECK_COMPLETE', http_status: response.status });
+    return response;
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      onDiagnostic({ stage: 'PREPARATION_CHECK_TIMEOUT', timeout_ms: 5000 });
+    } else {
+      onDiagnostic({ stage: 'PREPARATION_CHECK_ERROR', preparation_error_name: error?.name || 'Error' });
+    }
+    return null;
+  }
+}
+
+export async function fetchReadOnlyWithRetry(
+  fetcher,
+  path,
+  { timeoutMs = 10000, attempts = 3, retryDelayMs = 350, onRetry = () => {} } = {},
+) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetchWithTimeout(fetcher, path, timeoutMs);
+      if (response.status < 500 || attempt === attempts) return response;
+      onRetry({ attempt, http_status: response.status });
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts) throw error;
+      onRetry({ attempt, error_name: error?.name || 'Error' });
+    }
+    await new Promise(resolve => setTimeout(resolve, retryDelayMs * attempt));
+  }
+  throw lastError || new Error('Read-only request did not complete');
 }
 
 export function sourceStateFromPreparation(job) {
@@ -69,6 +127,33 @@ export function sourceStateFromPreparation(job) {
   };
 }
 
+// The upload API has two success contracts. With durable object storage it
+// returns an asynchronous preparation job. The free/local fallback returns a
+// normalized file from ephemeral backend storage, which is not a worker source
+// and must never be auto-started as if it were durable.
+export function normalizeReadyUploadResponse(response, cameraId, uploadRequestId) {
+  if (
+    response?.preparation_job_id
+    && response.camera_id === cameraId
+    && String(response.preparation_job_id) === uploadRequestId
+  ) return response;
+  const sessionId = String(response?.session_id || '');
+  if (
+    response?.status !== 'ok'
+    || String(response?.source_state || '').toUpperCase() !== 'READY'
+    || !cameraId
+    || response?.camera_id !== cameraId
+    || !sessionId
+    || sessionId !== uploadRequestId
+  ) return null;
+  return {
+    ...response,
+    local_only: response.source_mode !== 'durable'
+      || !Number.isInteger(Number(response.source_generation))
+      || Number(response.source_generation) < 1,
+  };
+}
+
 export function lifecycleAction(sourceState) {
   const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
   // A stale WAKING/paused record is repaired by START / ANALYZE. STOP would
@@ -77,7 +162,7 @@ export function lifecycleAction(sourceState) {
   return ['WAKING', 'ACTIVE', 'LIVE'].includes(lifecycle) ? 'STOP' : 'START';
 }
 
-export function analysisLifecyclePresentation(sourceState, mediaState = {}, controlPending = false) {
+export function analysisLifecyclePresentation(sourceState, mediaState = {}, controlPending = false, options = {}) {
   const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
   const uploadStage = String(mediaState?.uploadStage || '').toUpperCase();
 
@@ -118,6 +203,12 @@ export function analysisLifecyclePresentation(sourceState, mediaState = {}, cont
   if (lifecycle === 'COMPLETED') {
     return { label: 'ANALYSIS COMPLETED', badge: 'COMPLETED', tone: 'completed', retry: false };
   }
+  if (lifecycle === 'INTERRUPTED') {
+    if (options.hideInterrupted) {
+      return { label: 'SOURCE READY', badge: 'SOURCE READY', tone: 'ready', retry: false };
+    }
+    return { label: 'ANALYSIS INTERRUPTED', badge: 'INTERRUPTED', tone: 'failed', retry: false };
+  }
   if (['FAILED', 'ERROR'].includes(lifecycle) || uploadStage === 'ERROR') {
     return { label: 'ANALYSIS FAILED', badge: 'FAILED', tone: 'failed', retry: false };
   }
@@ -134,7 +225,7 @@ export function canReanalyzeSource(cameraId, sourceState) {
   return ['cam-border-01', 'cam-checkpoint-01'].includes(cameraId)
     && sourceState?.sourceMode === 'durable'
     && Boolean(sourceState.sourceId)
-    && String(sourceState.analysisState || sourceState.runState || '').toUpperCase() === 'COMPLETED';
+    && ['COMPLETED', 'INTERRUPTED'].includes(String(sourceState.analysisState || sourceState.runState || '').toUpperCase());
 }
 
 export function reanalyzeRequestPayload(cameraId, sourceState, requestId) {

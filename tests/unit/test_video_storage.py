@@ -1,12 +1,20 @@
 import json
 import uuid
-import asyncio
 from pathlib import Path
 
 import pytest
 
 from backend.services import video_storage
 from backend.services.evidence_storage import EvidenceNotFoundError, S3Storage
+
+
+def _run_sync_async_handler(coroutine):
+    """Execute mocked handlers with no await points without a Windows Proactor loop."""
+    try:
+        coroutine.send(None)
+    except StopIteration as completed:
+        return completed.value
+    raise AssertionError("handler unexpectedly yielded control")
 
 
 class MemoryStorage:
@@ -357,6 +365,9 @@ def test_eof_completion_is_idempotent_and_stops_durable_run(monkeypatch, tmp_pat
     )
     video_storage.activate_session("cam-border-01", session_id)
     running, _ = video_storage.start_active_session("cam-border-01", session_id)
+    assert video_storage.promote_active_session(
+        "cam-border-01", session_id, running["analysis_generation"], "analysis-run-1",
+    )["analysis_state"] == "ACTIVE"
     completed = video_storage.complete_active_session(
         "cam-border-01", session_id, running["analysis_generation"],
         {"latest_analysis_session_id": "analysis-run-1", "final_frame_index": 12, "video_time": 4.5},
@@ -436,7 +447,7 @@ def test_internal_sync_empty_camera_control_returns_200_shape(monkeypatch):
     monkeypatch.setattr(dashboard, "_durable_video_enabled", lambda: True)
     monkeypatch.setattr(dashboard, "get_valid_active_session", lambda camera_id: None)
     request = Request({"type": "http", "query_string": b"camera_id=cam-border-01"})
-    result = asyncio.run(dashboard.get_internal_sync(request))
+    result = _run_sync_async_handler(dashboard.get_internal_sync(request))
     assert result["camera_id"] == "cam-border-01"
     assert "download_url" not in result
 
@@ -458,6 +469,6 @@ def test_scenario_rejects_obsolete_session_when_no_durable_control_exists(monkey
     }
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(dashboard.post_video_scenario(payload))
+        _run_sync_async_handler(dashboard.post_video_scenario(payload))
 
     assert exc.value.status_code == 409

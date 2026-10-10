@@ -1,43 +1,36 @@
-// Coordinated, bounded cold-start readiness for the three independent Render
-// services. This module only calls /ready and /wake; it never invokes camera
-// control, uploads, analysis, telemetry, events, or evidence endpoints.
+// One browser-session coordinator for the three independent Render services.
+// Startup only wakes and checks processes; it never starts camera analysis.
 
 const backendUrl = String(import.meta.env.VITE_BACKEND_URL || '').replace(/\/$/, '');
-const configuredServices = {
-  backend: {
-    url: backendUrl && `${backendUrl}/ready`,
-    kind: 'backend',
-  },
-  camBorder01: {
-    url: String(import.meta.env.VITE_EDGE_WAKE_URL_CAM_BORDER_01 || '').replace(/\/$/, '') + '/wake',
+const edgeService = (envName, cameraId) => {
+  const baseUrl = String(import.meta.env[envName] || '').replace(/\/$/, '');
+  return {
+    url: baseUrl && `${baseUrl}/health`,
+    wakeUrl: baseUrl && `${baseUrl}/wake`,
     kind: 'edge',
-    cameraId: 'cam-border-01',
-  },
-  camCheckpoint01: {
-    url: String(import.meta.env.VITE_EDGE_WAKE_URL_CAM_CHECKPOINT_01 || '').replace(/\/$/, '') + '/wake',
-    kind: 'edge',
-    cameraId: 'cam-checkpoint-01',
-  },
+    cameraId,
+  };
 };
 
-const configuredPrewarm = {
-  triggerUrl: backendUrl && `${backendUrl}/api/dashboard/startup/prewarm`,
-  statusUrl: backendUrl && `${backendUrl}/api/dashboard/startup/prewarm/status`,
+const configuredServices = {
+  backend: { url: backendUrl && `${backendUrl}/ready`, wakeUrl: backendUrl && `${backendUrl}/ready`, kind: 'backend' },
+  camBorder01: edgeService('VITE_EDGE_WAKE_URL_CAM_BORDER_01', 'cam-border-01'),
+  camCheckpoint01: edgeService('VITE_EDGE_WAKE_URL_CAM_CHECKPOINT_01', 'cam-checkpoint-01'),
 };
 
 const SERVICE_KEYS = Object.freeze(['backend', 'camBorder01', 'camCheckpoint01']);
 export const STARTUP_STATUS = Object.freeze({
   UNKNOWN: 'UNKNOWN',
   WAKING: 'WAKING',
+  RETRYING: 'RETRYING',
   READY: 'READY',
   TIMEOUT: 'TIMEOUT',
 });
 
-const DEFAULT_MAX_STARTUP_MS = 305_000;
-const DEFAULT_POLL_INTERVAL_MS = 1_750;
-const DEFAULT_BACKEND_TIMEOUT_MS = 12_000;
-const DEFAULT_EDGE_TIMEOUT_MS = 5_000;
-const DEFAULT_PREWARM_TIMEOUT_MS = 8_000;
+const DEFAULT_MAX_STARTUP_MS = 240_000;
+const DEFAULT_POLL_INTERVAL_MS = 5_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const MAX_RETRY_BACKOFF_MS = 20_000;
 export const RESUME_AFTER_MS = 60_000;
 
 function initialSnapshot() {
@@ -58,18 +51,22 @@ function initialSnapshot() {
 
 function backendReady(response, payload) {
   return Boolean(
-    response?.ok
-    && payload?.status === 'ready'
-    && payload?.database === 'connected',
+    response?.status === 200
+    && response?.ok
+    && payload && typeof payload === 'object' && !Array.isArray(payload)
+    && payload.status === 'ready'
+    && payload.database === 'connected',
   );
 }
 
 function edgeReady(response, payload, expectedCameraId) {
   return Boolean(
-    response?.ok
-    && payload?.camera_id === expectedCameraId
-    && payload?.worker_alive === true
-    && !payload?.last_error,
+    response?.status === 200
+    && response?.ok
+    && payload && typeof payload === 'object' && !Array.isArray(payload)
+    && payload.camera_id === expectedCameraId
+    && payload.worker_alive === true
+    && !payload.last_error,
   );
 }
 
@@ -84,17 +81,13 @@ export function classifyStartupResponse(service, response, payload) {
 
 export function createStartupCoordinator({
   services = configuredServices,
-  prewarm = configuredPrewarm,
   fetchImpl = (...args) => fetch(...args),
   now = () => Date.now(),
   setTimer = (...args) => setTimeout(...args),
   clearTimer = (timer) => clearTimeout(timer),
   maxStartupMs = DEFAULT_MAX_STARTUP_MS,
   pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
-  requestTimeoutMs = null,
-  backendTimeoutMs = DEFAULT_BACKEND_TIMEOUT_MS,
-  edgeTimeoutMs = DEFAULT_EDGE_TIMEOUT_MS,
-  prewarmTimeoutMs = DEFAULT_PREWARM_TIMEOUT_MS,
+  requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
 } = {}) {
   let snapshot = initialSnapshot();
   let activeCycle = null;
@@ -103,13 +96,23 @@ export function createStartupCoordinator({
   const timers = new Set();
   const sleepResolvers = new Map();
   const inFlight = new Map();
-  let prewarmAccepted = false;
+  let retryAttempts = new Map();
+  let nextProbeAt = new Map();
+  let wakeSent = new Set();
+
+  const clearAllTimers = () => {
+    timers.forEach((timer) => {
+      clearTimer(timer);
+      const resolve = sleepResolvers.get(timer);
+      if (resolve) resolve();
+    });
+    timers.clear();
+    sleepResolvers.clear();
+  };
 
   const publish = (updates = {}) => {
     snapshot = { ...snapshot, ...updates };
-    snapshot.allReady = SERVICE_KEYS.every(
-      (key) => snapshot[key].status === STARTUP_STATUS.READY,
-    );
+    snapshot.allReady = SERVICE_KEYS.every((key) => snapshot[key].status === STARTUP_STATUS.READY);
     if (snapshot.allReady && !snapshot.readyAt) {
       const completedAt = now();
       snapshot.readyAt = completedAt;
@@ -127,18 +130,6 @@ export function createStartupCoordinator({
     return snapshot;
   };
 
-  const updateService = (key, result) => publish({ [key]: result });
-
-  const clearAllTimers = () => {
-    timers.forEach((timer) => {
-      clearTimer(timer);
-      const resolve = sleepResolvers.get(timer);
-      if (resolve) resolve();
-    });
-    timers.clear();
-    sleepResolvers.clear();
-  };
-
   const sleep = (delay) => new Promise((resolve) => {
     const timer = setTimer(() => {
       timers.delete(timer);
@@ -149,34 +140,69 @@ export function createStartupCoordinator({
     sleepResolvers.set(timer, resolve);
   });
 
-  const requestTimeoutFor = (service) => requestTimeoutMs
-    ?? (service.kind === 'edge' ? edgeTimeoutMs : backendTimeoutMs);
-
-  const launchProbe = (key, generation) => {
+  const launchProbe = (key, generation, { wake = false } = {}) => {
     if (inFlight.has(key)) return inFlight.get(key).promise;
     const service = services[key];
-    if (!service?.url || service.url === '/wake') return Promise.resolve();
+    const url = wake && !wakeSent.has(key) ? service?.wakeUrl : service?.url;
+    if (!url) {
+      publish({ [key]: { status: STARTUP_STATUS.RETRYING, detail: 'Service URL is not configured.' } });
+      return Promise.resolve();
+    }
+    if (wake) wakeSent.add(key);
 
     const controller = new AbortController();
-    const timeout = setTimer(() => controller.abort(), requestTimeoutFor(service));
+    let timedOut = false;
+    const timeout = setTimer(() => {
+      timedOut = true;
+      controller.abort();
+    }, requestTimeoutMs);
     timers.add(timeout);
     let request;
     try {
-      request = fetchImpl(service.url, {
-        cache: 'no-store',
-        signal: controller.signal,
-      });
+      request = fetchImpl(url, { cache: 'no-store', signal: controller.signal });
     } catch {
-      request = Promise.reject(new Error('startup request failed'));
+      request = Promise.reject(new Error('request failed'));
     }
     const promise = Promise.resolve(request).then(async (response) => {
       let payload = null;
       try { payload = await response.json(); } catch { payload = null; }
-      return { status: classifyStartupResponse(service, response, payload), payload };
-    }).catch(() => ({ status: STARTUP_STATUS.WAKING, payload: null })).then((result) => {
-      if (generation === cycleGeneration
-        && ![STARTUP_STATUS.READY, STARTUP_STATUS.TIMEOUT].includes(snapshot[key].status)) {
-        updateService(key, result);
+      const classified = classifyStartupResponse(service, response, payload);
+      if (classified === STARTUP_STATUS.READY) {
+        retryAttempts.set(key, 0);
+        nextProbeAt.set(key, 0);
+        return { status: STARTUP_STATUS.READY, payload, checkedAt: now() };
+      }
+      const retryable = !response.ok || response.status === 429 || !payload || typeof payload !== 'object';
+      if (retryable) {
+        const attempts = (retryAttempts.get(key) || 0) + 1;
+        retryAttempts.set(key, attempts);
+        const backoff = Math.min(pollIntervalMs * (2 ** Math.min(attempts - 1, 4)), MAX_RETRY_BACKOFF_MS);
+        nextProbeAt.set(key, now() + backoff);
+        return {
+          status: STARTUP_STATUS.RETRYING,
+          detail: response.status === 429 ? 'Service asked the browser to retry later (HTTP 429).' : `Health request returned HTTP ${response.status}.`,
+          checkedAt: now(),
+        };
+      }
+      retryAttempts.set(key, 0);
+      nextProbeAt.set(key, 0);
+      return { status: STARTUP_STATUS.WAKING, detail: 'Service responded and is still warming.', checkedAt: now() };
+    }).catch(() => {
+      if (generation !== cycleGeneration) return null;
+      const attempts = (retryAttempts.get(key) || 0) + 1;
+      retryAttempts.set(key, attempts);
+      const backoff = Math.min(pollIntervalMs * (2 ** Math.min(attempts - 1, 4)), MAX_RETRY_BACKOFF_MS);
+      nextProbeAt.set(key, now() + backoff);
+      return {
+        status: STARTUP_STATUS.RETRYING,
+        detail: timedOut ? `Health request timed out after ${Math.round(requestTimeoutMs / 1000)} seconds.` : 'Health request failed or was blocked by the browser.',
+        checkedAt: now(),
+      };
+    }).then((result) => {
+      if (result && generation === cycleGeneration
+        && snapshot[key].status !== STARTUP_STATUS.READY
+        && snapshot[key].status !== STARTUP_STATUS.TIMEOUT) {
+        publish({ [key]: result });
       }
       return result;
     }).finally(() => {
@@ -188,93 +214,17 @@ export function createStartupCoordinator({
     return promise;
   };
 
-  const applyBackendAuthority = (payload) => {
-    const mappings = [
-      ['camBorder01', 'cam-border-01'],
-      ['camCheckpoint01', 'cam-checkpoint-01'],
-    ];
-    mappings.forEach(([key, cameraId]) => {
-      const item = payload?.cameras?.[cameraId];
-      if (item?.camera_id === cameraId
-        && item?.status === 'ready'
-        && snapshot[key].status !== STARTUP_STATUS.TIMEOUT) {
-        updateService(key, { status: STARTUP_STATUS.READY, payload: item, authority: 'backend' });
-      }
-    });
-  };
-
-  const launchPrewarmStatus = (generation) => {
-    const key = 'prewarmStatus';
-    if (!prewarm?.statusUrl || inFlight.has(key) || snapshot.allReady) return;
-    const controller = new AbortController();
-    const timeout = setTimer(() => controller.abort(), prewarmTimeoutMs);
-    timers.add(timeout);
-    let request;
-    try {
-      request = fetchImpl(prewarm.statusUrl, { cache: 'no-store', signal: controller.signal });
-    } catch {
-      request = Promise.reject(new Error('prewarm status request failed'));
-    }
-    const promise = Promise.resolve(request).then(async (response) => {
-      if (!response.ok) return null;
-      try { return await response.json(); } catch { return null; }
-    }).then((payload) => {
-      if (generation === cycleGeneration && payload) applyBackendAuthority(payload);
-    }).catch(() => {}).finally(() => {
-      clearTimer(timeout);
-      timers.delete(timeout);
-      if (inFlight.get(key)?.promise === promise) inFlight.delete(key);
-    });
-    inFlight.set(key, { controller, promise });
-  };
-
-  const launchPrewarmTrigger = (generation) => {
-    const key = 'prewarmTrigger';
-    if (!prewarm?.triggerUrl || inFlight.has(key) || prewarmAccepted) return;
-    const controller = new AbortController();
-    const timeout = setTimer(() => controller.abort(), prewarmTimeoutMs);
-    timers.add(timeout);
-    let request;
-    try {
-      request = fetchImpl(prewarm.triggerUrl, {
-        method: 'POST', cache: 'no-store', signal: controller.signal,
-      });
-    } catch {
-      request = Promise.reject(new Error('prewarm trigger request failed'));
-    }
-    const promise = Promise.resolve(request).then(async (response) => {
-      if (!response.ok) return null;
-      try { return await response.json(); } catch { return {}; }
-    }).then((payload) => {
-      if (generation !== cycleGeneration || payload === null) return;
-      prewarmAccepted = true;
-      applyBackendAuthority(payload);
-      launchPrewarmStatus(generation);
-    }).catch(() => {}).finally(() => {
-      clearTimer(timeout);
-      timers.delete(timeout);
-      if (inFlight.get(key)?.promise === promise) inFlight.delete(key);
-    });
-    inFlight.set(key, { controller, promise });
-  };
-
-  const dispatch = (keys, generation) => {
-    // Keep these calls synchronous and await-free: all direct requests plus
-    // the redundant backend prewarm leave the browser in the first turn.
-    keys.forEach((key) => launchProbe(key, generation));
-    if (prewarmAccepted) launchPrewarmStatus(generation);
-    else launchPrewarmTrigger(generation);
+  const dispatch = (keys, generation, { wake = false } = {}) => {
+    keys.forEach((key) => launchProbe(key, generation, { wake }));
   };
 
   const runCycle = async (generation) => {
     const deadline = snapshot.startedAt + maxStartupMs;
-    let unfinished = [...SERVICE_KEYS];
+    let unfinished = SERVICE_KEYS.filter((key) => snapshot[key].status !== STARTUP_STATUS.READY);
 
-    dispatch(unfinished, generation);
+    dispatch(unfinished, generation, { wake: true });
     while (generation === cycleGeneration) {
-      unfinished = SERVICE_KEYS.filter(
-        (key) => snapshot[key].status !== STARTUP_STATUS.READY,
-      );
+      unfinished = SERVICE_KEYS.filter((key) => snapshot[key].status !== STARTUP_STATUS.READY);
       if (unfinished.length === 0) {
         clearAllTimers();
         return snapshot;
@@ -283,7 +233,9 @@ export function createStartupCoordinator({
       const remaining = deadline - now();
       if (remaining <= 0) {
         const updates = {};
-        unfinished.forEach((key) => { updates[key] = { status: STARTUP_STATUS.TIMEOUT }; });
+        unfinished.forEach((key) => {
+          updates[key] = { ...snapshot[key], status: STARTUP_STATUS.TIMEOUT };
+        });
         publish({ ...updates, revalidating: false });
         clearAllTimers();
         return snapshot;
@@ -291,11 +243,12 @@ export function createStartupCoordinator({
 
       await sleep(Math.min(pollIntervalMs, remaining));
       if (generation !== cycleGeneration) return snapshot;
-      unfinished = SERVICE_KEYS.filter(
-        (key) => snapshot[key].status !== STARTUP_STATUS.READY,
-      );
-      if (unfinished.length === 0) return snapshot;
-      dispatch(unfinished, generation);
+      const due = SERVICE_KEYS.filter((key) => (
+        snapshot[key].status !== STARTUP_STATUS.READY
+        && !inFlight.has(key)
+        && (nextProbeAt.get(key) || 0) <= now()
+      ));
+      dispatch(due, generation);
     }
     return snapshot;
   };
@@ -307,18 +260,28 @@ export function createStartupCoordinator({
     clearAllTimers();
     inFlight.forEach(({ controller }) => controller.abort());
     inFlight.clear();
-    prewarmAccepted = false;
+    retryAttempts = new Map();
+    nextProbeAt = new Map();
+    wakeSent = new Set(
+      force
+        ? SERVICE_KEYS.filter((key) => snapshot[key].status === STARTUP_STATUS.READY)
+        : [],
+    );
     const startedAt = now();
+    const preserveReady = force && !snapshot.allReady;
     const priorReadyEdgeCount = ['camBorder01', 'camCheckpoint01'].filter(
       (key) => snapshot[key].status === STARTUP_STATUS.READY,
     ).length;
     const revalidating = Boolean(force && (snapshot.allReady || snapshot.lastReadyAt));
-    const waking = Object.fromEntries(
-      SERVICE_KEYS.map((key) => [key, { status: STARTUP_STATUS.WAKING }]),
-    );
+    const updates = Object.fromEntries(SERVICE_KEYS.map((key) => [
+      key,
+      preserveReady && snapshot[key].status === STARTUP_STATUS.READY
+        ? snapshot[key]
+        : { status: STARTUP_STATUS.WAKING },
+    ]));
     publish({
       requested: true,
-      ...waking,
+      ...updates,
       allReady: false,
       revalidating,
       lastReadyEdgeCount: revalidating
@@ -336,7 +299,19 @@ export function createStartupCoordinator({
 
   const subscribe = (listener) => {
     listeners.add(listener);
-    return () => listeners.delete(listener);
+    return () => {
+      listeners.delete(listener);
+      // React StrictMode may immediately remount the hook; defer cancellation
+      // one microtask so a replacement subscriber can keep the same cycle.
+      Promise.resolve().then(() => {
+        if (listeners.size !== 0 || !activeCycle) return;
+        cycleGeneration += 1;
+        activeCycle = null;
+        clearAllTimers();
+        inFlight.forEach(({ controller }) => controller.abort());
+        inFlight.clear();
+      });
+    };
   };
 
   const waitForBackend = () => {
@@ -364,7 +339,6 @@ export function createStartupCoordinator({
     clearAllTimers();
     inFlight.forEach(({ controller }) => controller.abort());
     inFlight.clear();
-    prewarmAccepted = false;
     snapshot = initialSnapshot();
   };
 

@@ -72,6 +72,7 @@ export function cameraInventoryIsRestoring(cameraIds = [], sourceStates = {}, ba
 }
 
 export function lifecycleStatus(sourceState, telemetry, now = Date.now()) {
+  if (sourceState?.restoring) return 'RESTORING';
   const telemetryStatus = telemetryStatusAt(telemetry, now);
   if (telemetryStatus === 'LIVE') return 'ONLINE';
   if (telemetryStatus === 'STALE') return 'STALE';
@@ -103,6 +104,7 @@ export function isActiveTelemetry(telemetry, now = Date.now()) {
 
 export function telemetryForSource(telemetry, sourceState, cameraId = null) {
   if (!telemetry) return null;
+  if (String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase() === 'INTERRUPTED') return null;
   if (cameraId && telemetry.camera_id && telemetry.camera_id !== cameraId) return null;
   if (['UPLOADING', 'SELECTING', 'VALIDATING', 'QUEUED_FOR_NORMALIZATION', 'NORMALIZING', 'ACTIVATING'].includes(sourceState?.runState)) return null;
   if (sourceState?.sourceMode !== 'durable') return telemetry;
@@ -291,6 +293,9 @@ export function shouldDispatchAnalyzedSample(current, incoming) {
 }
 
 export function completedRunMetrics(cameraId, source, telemetry, presented, summary) {
+  if (String(source?.analysisState || source?.runState || '').toUpperCase() === 'INTERRUPTED') {
+    return { summary: null, sample: null };
+  }
   const completed = lifecycleStatus(source, telemetry) === 'COMPLETED';
   const sessionId = analysisSessionIdForSource(telemetry, source);
   const validSummary = completed && summary?.camera_id === cameraId

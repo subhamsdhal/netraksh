@@ -23,7 +23,7 @@ import time
 import uuid
 from collections import deque
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -86,6 +86,11 @@ def hud_sample_is_due(last_video_time: Optional[float], current_video_time: floa
     if last_video_time is None or current_video_time < last_video_time:
         return True
     return (current_video_time - last_video_time) >= interval
+
+
+def preserve_stored_file_frames(camera_id: str, source_stream_id: object) -> bool:
+    """Keep every decoded frame for a one-shot stored Camera 1/2 source."""
+    return camera_id in {"cam-border-01", "cam-checkpoint-01"} and bool(source_stream_id)
 
 
 def should_capture_abstain_snapshot(last_snapshot_time: float, now: float) -> bool:
@@ -197,7 +202,7 @@ class EdgePipeline:
             simulate_frozen=config.get("simulate_frozen", False),
             simulate_night=config.get("simulate_night", False),
             loop_video=config.get("loop_video", os.environ.get("DEMO_LOOP_VIDEO", "false").lower() == "true"),
-            preserve_finite_frames=self.camera_id == "cam-checkpoint-01" and bool(config.get("source_stream_id")),
+            preserve_finite_frames=preserve_stored_file_frames(self.camera_id, config.get("source_stream_id")),
         )
         self.adapter.set_frame_tap(self._capture_hud_frame)
 
@@ -211,18 +216,26 @@ class EdgePipeline:
         # dropped by its bounded queue. Completion must report the last frame
         # that this pipeline actually processed instead.
         self._last_processed_frame_index: Optional[int] = None
-        # Retain only the actual final decoded image of a Camera 2 durable
-        # finite source. EOF needs one last image-grounded detector anchor.
+        self.timeline_incomplete = False
+        self._last_tracking_persist_log_at = 0.0
+        # Retain only the actual final decoded image of a stored finite source.
+        # Camera-specific EOF handling decides whether an anchor is needed.
         self._last_finite_detector_frame = None
+        self._final_authoritative_sample = None
         self._last_frame_width = None
         self._last_frame_height = None
         # We need a small bounded queue so if the backend goes down or network
         # is durable/offline-capable. Telemetry is explicitly lossy.
         self.telemetry_queue = Queue(maxsize=2)
-        # Keep a little more burst headroom for the lightweight HUD channel.
-        # The queue remains bounded and lossy; this only prevents short hosted
-        # response-latency spikes from erasing an entire visible interval.
-        self.tracking_queue = Queue(maxsize=128)
+        # Bounded retry headroom for ~51 seconds of 10 Hz analyzed samples.
+        # Accepted samples are idempotently persisted by the backend.
+        self.tracking_queue = Queue(maxsize=512)
+        # Health and performance snapshots are current-state diagnostics, not
+        # evidence. Keep them off the frame loop and retain only a small,
+        # bounded amount of pending work when the backend is slow.
+        self.status_queue = Queue(maxsize=4)
+        self._status_transport_metrics = {"produced": 0, "dropped": 0, "errors": 0}
+        self._status_transport_stop = threading.Event()
         self._hud_frame_queue = Queue(maxsize=2)
         self._hud_decoupled = False
         self._hud_tracker = OpticalFlowBoxTracker(
@@ -458,6 +471,7 @@ class EdgePipeline:
         logger.info("[Pipeline] Sync thread started")
 
         self._running = True
+        self._status_transport_stop.clear()
         logger.info(f"[Pipeline] Starting frame loop for camera {self.camera_id}")
 
         telemetry_thread = threading.Thread(
@@ -467,6 +481,14 @@ class EdgePipeline:
         )
         telemetry_thread.start()
         logger.info("[Pipeline] Telemetry thread started")
+
+        status_thread = threading.Thread(
+            target=self._run_status_transport_loop,
+            daemon=True,
+            name=f"status-transport-{self.camera_id}",
+        )
+        status_thread.start()
+        logger.info("[Pipeline] Bounded status transport started")
 
         self._hud_decoupled = True
         hud_thread = threading.Thread(
@@ -487,7 +509,7 @@ class EdgePipeline:
                 # A smaller hosted fan-out avoids synchronized request bursts
                 # against the backend while still carrying the HUD above the
                 # required live cadence.
-                "6" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
+                "3" if os.environ.get("EDGE_CONSTRAINED_CLOUD", "false").lower() == "true" else "4",
             )),
         )
         tracking_threads = []
@@ -516,25 +538,39 @@ class EdgePipeline:
             # lifecycle record synchronously.
             if completed:
                 self._flush_finite_detector_at_eof()
+                if (self.camera_id == "cam-border-01"
+                        and self.adapter.source_kind == "LOCAL_FINITE_FILE"
+                        and self.adapter.preserve_finite_frames):
+                    self._flush_camera1_final_sample_at_eof()
                 # The adapter has stopped producing by this point. Let the
                 # lossy visualization workers drain briefly, but never allow
                 # a slow hosted HTTP request to prevent the terminal state
                 # from being published. Evidence/event queues retain their
                 # existing durable flush path below.
-                self._hud_frame_queue.join()
+                hud_deadline = time.monotonic() + 30.0
+                while self._hud_frame_queue.unfinished_tasks and time.monotonic() < hud_deadline:
+                    time.sleep(0.1)
+                if self._hud_frame_queue.unfinished_tasks:
+                    self.timeline_incomplete = True
+                    logger.error(
+                        "[Tracking] EOF HUD drain timed out run_id=%s pending=%s",
+                        self.stream_id, self._hud_frame_queue.unfinished_tasks,
+                    )
                 self._running = False
                 for queue_name, queue, timeout_seconds in (
                     # The HUD queue carries compact replay samples, not
                     # evidence. Give the bounded transport enough time to
                     # finish the intentional 10 Hz source-time timeline at
                     # EOF, while still bounding a failed backend drain.
-                    ("tracking", self.tracking_queue, 45.0),
+                    ("tracking", self.tracking_queue, 90.0),
                     ("telemetry", self.telemetry_queue, 12.0),
                 ):
                     deadline = time.monotonic() + timeout_seconds
                     while queue.unfinished_tasks and time.monotonic() < deadline:
                         time.sleep(0.1)
                     if queue.unfinished_tasks:
+                        if queue_name == "tracking":
+                            self.timeline_incomplete = True
                         abandoned = 0
                         while True:
                             try:
@@ -548,6 +584,16 @@ class EdgePipeline:
                             queue_name,
                             abandoned,
                         )
+                    if (queue_name == "tracking"
+                            and self.camera_id == "cam-border-01"
+                            and self.adapter.source_kind == "LOCAL_FINITE_FILE"
+                            and self.adapter.preserve_finite_frames):
+                        # A completed Camera 1 run must durably acknowledge
+                        # its real final detector sample before completion.
+                        if not self._persist_final_authoritative_sample():
+                            self.timeline_incomplete = True
+                if self._tracking_metrics["dropped"] or not self._tracking_metrics["transmitted"]:
+                    self.timeline_incomplete = True
             else:
                 self._running = False
             if not completed:
@@ -565,9 +611,47 @@ class EdgePipeline:
                 # Publish one final metrics snapshot after the drain so the
                 # command-center sync indicator sees the real zero queue.
                 self._report_metrics()
-                self._publish_analysis_state("COMPLETED")
+                if self.timeline_incomplete:
+                    logger.error(
+                        "[Tracking] run timeline incomplete camera_id=%s run_id=%s generation=%s produced=%s transmitted=%s dropped=%s final_frame=%s",
+                        self.camera_id, self.stream_id, self.analysis_generation,
+                        self._tracking_metrics["produced"], self._tracking_metrics["transmitted"],
+                        self._tracking_metrics["dropped"], self._last_processed_frame_index,
+                    )
+                    self._publish_analysis_state("FAILED")
+                elif (self.camera_id == "cam-border-01"
+                        and self.adapter.source_kind == "LOCAL_FINITE_FILE"
+                        and self.adapter.preserve_finite_frames):
+                    # The runner owns the durable internal-complete callback.
+                    # Do not advertise COMPLETED until that callback has
+                    # verified the acknowledged final timeline sample.
+                    self._publish_analysis_state("FINALIZING")
+                else:
+                    self._publish_analysis_state("COMPLETED")
             elif self.adapter.state == StreamState.FAILED:
                 self._publish_analysis_state("FAILED")
+            # Keep the best-effort status worker alive until the final metrics
+            # snapshot has been enqueued. _running is cleared before queue
+            # drains, so using it as the worker's stop signal can race EOF.
+            self._status_transport_stop.set()
+            status_deadline = time.monotonic() + 2.0
+            while self.status_queue.unfinished_tasks and time.monotonic() < status_deadline:
+                time.sleep(0.1)
+            if self.status_queue.unfinished_tasks:
+                abandoned_status = 0
+                while True:
+                    try:
+                        self.status_queue.get_nowait()
+                        self.status_queue.task_done()
+                        abandoned_status += 1
+                    except Empty:
+                        break
+                if abandoned_status:
+                    logger.info(
+                        "[Pipeline] EOF status drain timed out; discarded %d best-effort report(s)",
+                        abandoned_status,
+                    )
+            status_thread.join(timeout=2.0)
             if hasattr(self, 'sync_client') and self.sync_client:
                 try:
                     self.sync_client.stop()
@@ -579,6 +663,14 @@ class EdgePipeline:
 
     def _detector_confidence_threshold(self, condition) -> float:
         calibrated = self.calibration.get_threshold(condition)
+        if (self.camera_id == "cam-border-01"
+                and self.adapter.source_kind == "LOCAL_FINITE_FILE"
+                and self.adapter.preserve_finite_frames
+                and condition == SceneCondition.CLEAR_DAY):
+            # Preserve an already-established person when the partly occluded
+            # detection dips below the prototype 0.45 cutoff. New tracks still
+            # require the calibrated threshold; see DetectorJob below.
+            return min(calibrated, 0.40)
         if (self.camera_id == "cam-checkpoint-01"
                 and self.adapter.source_kind == "LOCAL_FINITE_FILE"
                 and self.adapter.preserve_finite_frames):
@@ -587,6 +679,13 @@ class EdgePipeline:
             # the person without extra people/vehicles; 0.30 added duplicates.
             return min(calibrated, 0.35)
         return calibrated
+
+    def _detector_new_track_threshold(self, condition) -> float | None:
+        calibrated = self.calibration.get_threshold(condition)
+        effective = self._detector_confidence_threshold(condition)
+        if self.camera_id == "cam-border-01" and effective < calibrated:
+            return calibrated
+        return None
 
     def _flush_finite_detector_at_eof(self) -> None:
         """Finish Camera 2's real final frame before freezing its replay timeline.
@@ -615,7 +714,7 @@ class EdgePipeline:
                     return False
                 if (self._last_detector_frame_index is None
                         or packet.job.frame_index > self._last_detector_frame_index):
-                    self._prime_camera2_lost_tracks(packet.tracks)
+                    self._prime_stored_lost_tracks(packet.tracks)
                     tracks = self._apply_continuity_guard(packet.tracks, packet.job.frame)
                     self._emit_detector_sample(packet, tracks)
                     self._last_detector_frame_index = packet.job.frame_index
@@ -639,11 +738,128 @@ class EdgePipeline:
             confidence_threshold=self._detector_confidence_threshold(condition.condition),
             enhancement_applied=enhanced,
             submitted_at=time.time(),
+            new_track_threshold=self._detector_new_track_threshold(condition.condition),
         )
         if not self.detector_worker.submit(job) or not receive(20.0):
             logger.warning("[Pipeline] EOF final image detection unavailable")
             return
         logger.info("[Pipeline] EOF final detector frame=%d emitted", meta.frame_index)
+
+    def _flush_camera1_final_sample_at_eof(self) -> bool:
+        """Detect Camera 1's actual last stored-video frame at EOF.
+
+        This creates a real terminal sample from the final decoded image; it
+        never copies detections forward from an earlier detector keyframe.
+        """
+        if (self.adapter.source_kind != "LOCAL_FINITE_FILE"
+                or not self.adapter.preserve_finite_frames):
+            return True
+        final = self._last_finite_detector_frame
+        if final is None:
+            self.timeline_incomplete = True
+            logger.error("[Tracking] Camera 1 EOF final image unavailable; completion prohibited")
+            return False
+        frame, meta, health, condition = final
+
+        def wait_for_detector() -> bool:
+            deadline = time.monotonic() + 20.0
+            while self.detector_worker.busy and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if self.detector_worker.busy:
+                self.timeline_incomplete = True
+                logger.error("[Tracking] Camera 1 EOF detector drain timed out frame=%s", meta.frame_index)
+                return False
+            return True
+
+        if not wait_for_detector():
+            return False
+        packet = self.detector_worker.poll_latest()
+        if packet is not None:
+            if packet.error is not None:
+                self.timeline_incomplete = True
+                logger.error("[Tracking] Camera 1 EOF pending detector failed frame=%s", meta.frame_index)
+                return False
+            if (self._last_detector_frame_index is None
+                    or packet.job.frame_index > self._last_detector_frame_index):
+                self._prime_stored_lost_tracks(packet.tracks)
+                tracks = self._apply_continuity_guard(packet.tracks, packet.job.frame)
+                self._emit_detector_sample(packet, tracks)
+                self._last_detector_frame_index = packet.job.frame_index
+        if self._last_detector_frame_index == int(meta.frame_index):
+            return self._final_authoritative_sample is not None
+
+        policy = self.condition_router.route(condition.condition)
+        detection_frame = enhance_for_detection(frame, policy)
+        enhanced = detection_frame is not frame
+        source_copy = frame.copy()
+        job = DetectorJob(
+            frame=source_copy,
+            detector_frame=detection_frame.copy() if enhanced else source_copy,
+            frame_index=int(meta.frame_index),
+            meta=meta,
+            health=health,
+            condition=condition,
+            confidence_threshold=self._detector_confidence_threshold(condition.condition),
+            enhancement_applied=enhanced,
+            submitted_at=time.time(),
+            new_track_threshold=self._detector_new_track_threshold(condition.condition),
+        )
+        if not self.detector_worker.submit(job) or not wait_for_detector():
+            self.timeline_incomplete = True
+            logger.error("[Tracking] Camera 1 EOF final image detection unavailable frame=%s", meta.frame_index)
+            return False
+        packet = self.detector_worker.poll_latest()
+        if packet is None or packet.error is not None or packet.job.frame_index != int(meta.frame_index):
+            self.timeline_incomplete = True
+            logger.error("[Tracking] Camera 1 EOF final image detection unavailable frame=%s", meta.frame_index)
+            return False
+        self._prime_stored_lost_tracks(packet.tracks)
+        tracks = self._apply_continuity_guard(packet.tracks, packet.job.frame)
+        # Do not leave this critical terminal result in the ordinary queue.
+        self._emit_detector_sample(packet, tracks, enqueue=False)
+        self._last_detector_frame_index = packet.job.frame_index
+        logger.info(
+            "[Tracking] Camera 1 EOF final detector frame=%d video_time=%.6f emitted",
+            meta.frame_index, float(meta.video_time_seconds),
+        )
+        return self._final_authoritative_sample is not None
+
+    def _persist_final_authoritative_sample(self) -> bool:
+        """Retry the final Camera 1 sample until acknowledged or bounded failure."""
+        import httpx
+
+        payload = self._final_authoritative_sample
+        if not payload:
+            logger.error("[Tracking] Camera 1 EOF has no authoritative final sample")
+            return False
+        verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
+        try:
+            with httpx.Client(
+                timeout=httpx.Timeout(connect=3.0, read=6.0, write=6.0, pool=3.0),
+                verify=verify,
+                cert=self.sync_client._client_cert,
+            ) as client:
+                persisted = self._post_tracking_with_retry(
+                    client,
+                    f"{self._backend_url}/system/tracking-frame",
+                    payload,
+                    max_attempts=5,
+                )
+        except Exception as exc:
+            self._record_tracking_transport_error(exception=exc)
+            persisted = False
+        if not persisted:
+            self.timeline_incomplete = True
+            logger.error(
+                "[Tracking] Camera 1 EOF final sample not durably acknowledged run_id=%s frame=%s",
+                self.stream_id, payload.get("frame_index"),
+            )
+            return False
+        logger.info(
+            "[Tracking] Camera 1 EOF final sample durably acknowledged run_id=%s frame=%s video_time=%.6f",
+            self.stream_id, payload.get("frame_index"), float(payload.get("video_time") or 0),
+        )
+        return True
 
     def _clear_live_queues(self) -> None:
         """Discard lossy live packets before a replay/terminal transition."""
@@ -840,17 +1056,31 @@ class EdgePipeline:
             "detector_fps": (1000.0 / self._detector_refresh_interval_ms if self._detector_refresh_interval_ms and self._detector_refresh_interval_ms > 0 else None),
             "hud_fps": measured_hud_fps,
         }
+        self._queue_tracking_payload(payload)
+
+    def _queue_tracking_payload(self, payload: dict) -> None:
+        """Keep newest samples within the fixed queue budget and report loss."""
         try:
             if self.tracking_queue.full():
-                self.tracking_queue.get_nowait()
-                self.tracking_queue.task_done()
-                self._tracking_metrics["dropped"] += 1
+                try:
+                    lost = self.tracking_queue.get_nowait()
+                except Empty:
+                    lost = None  # A transport worker drained it concurrently.
+                if lost is not None:
+                    self.tracking_queue.task_done()
+                    self._tracking_metrics["dropped"] += 1
+                    logger.error(
+                        "[Tracking] bounded queue overflow dropped frame=%s run_id=%s total_dropped=%s",
+                        lost.get("frame_index"), self.stream_id, self._tracking_metrics["dropped"],
+                    )
             self.tracking_queue.put_nowait(payload)
             self._tracking_metrics["produced"] += 1
-        except Exception:
+        except (Empty, Full):
             self._tracking_metrics["errors"] += 1
+            self._tracking_metrics["dropped"] += 1
+            logger.error("[Tracking] bounded queue enqueue race run_id=%s frame=%s", self.stream_id, payload.get("frame_index"))
 
-    def _emit_detector_sample(self, packet, tracks) -> None:
+    def _emit_detector_sample(self, packet, tracks, *, enqueue: bool = True) -> dict:
         """Publish the detector's own source frame, never a later flow frame.
 
         The decoupled HUD path emits only optical-flow samples. Without this
@@ -916,18 +1146,14 @@ class EdgePipeline:
                 else None
             ),
         }
-        try:
-            if self.tracking_queue.full():
-                self.tracking_queue.get_nowait()
-                self.tracking_queue.task_done()
-                self._tracking_metrics["dropped"] += 1
-            self.tracking_queue.put_nowait(payload)
-            self._tracking_metrics["produced"] += 1
-        except Exception:
-            self._tracking_metrics["errors"] += 1
+        if self.camera_id == "cam-border-01":
+            self._final_authoritative_sample = payload
+        if enqueue:
+            self._queue_tracking_payload(payload)
+        return payload
 
     def _run_tracking_loop(self) -> None:
-        """Push small current-frame box metadata without persistence/JPEGs."""
+        """Push idempotent frame samples with bounded, isolated transport retries."""
         import httpx
         verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
         client = httpx.Client(
@@ -940,13 +1166,7 @@ class EdgePipeline:
             try:
                 payload = self.tracking_queue.get(timeout=0.25)
                 try:
-                    response = client.post(url, json=payload, headers=self._edge_auth_headers())
-                    if response.status_code != 202:
-                        self._record_tracking_transport_error(status_code=response.status_code)
-                    else:
-                        self._tracking_metrics["transmitted"] += 1
-                except httpx.RequestError as exc:
-                    self._record_tracking_transport_error(exception=exc)
+                    self._post_tracking_with_retry(client, url, payload)
                 finally:
                     self.tracking_queue.task_done()
             except Empty:
@@ -955,6 +1175,52 @@ class EdgePipeline:
                 self._tracking_metrics["errors"] += 1
                 logger.warning("[Tracking] Unexpected transport error: %s", type(exc).__name__)
         client.close()
+
+    def _post_tracking_with_retry(
+        self, client, url: str, payload: dict, *, max_attempts: int = 8,
+    ) -> bool:
+        """Retry boundedly; never let a backend transport fault stop inference.
+
+        Backend sample writes are idempotent by run/sequence/frame. A terminal
+        failure is counted and logged rather than represented as persisted.
+        Ordinary frames default to eight attempts; EOF uses a shorter bound.
+        """
+        import httpx
+
+        for attempt in range(max_attempts):
+            try:
+                response = client.post(url, json=payload, headers=self._edge_auth_headers())
+                if response.status_code == 202:
+                    self._tracking_metrics["transmitted"] += 1
+                    log_at = time.monotonic()
+                    if log_at - self._last_tracking_persist_log_at >= 10:
+                        self._last_tracking_persist_log_at = log_at
+                        logger.info(
+                            "[Tracking] timeline persisted camera_id=%s run_id=%s generation=%s frame=%s transmitted=%s",
+                            self.camera_id, self.stream_id, self.analysis_generation,
+                            payload.get("frame_index"), self._tracking_metrics["transmitted"],
+                        )
+                    if attempt:
+                        logger.info(
+                            "[Tracking] delivery recovered run_id=%s frame=%s attempt=%s",
+                            self.stream_id, payload.get("frame_index"), attempt + 1,
+                        )
+                    return True
+                self._record_tracking_transport_error(status_code=response.status_code)
+                retryable = response.status_code in {429, 502, 503, 504}
+            except httpx.RequestError as exc:
+                self._record_tracking_transport_error(exception=exc)
+                retryable = True
+            if not retryable or attempt == max_attempts - 1:
+                self._tracking_metrics["dropped"] += 1
+                logger.error(
+                    "[Tracking] delivery permanently failed run_id=%s frame=%s attempts=%s total_dropped=%s",
+                    self.stream_id, payload.get("frame_index"), attempt + 1,
+                    self._tracking_metrics["dropped"],
+                )
+                return False
+            time.sleep(min(0.25 * (2 ** attempt), 2.0))
+        return False
 
     def _record_tracking_transport_error(
         self, *, status_code: Optional[int] = None, exception: Optional[Exception] = None,
@@ -1079,6 +1345,7 @@ class EdgePipeline:
         self._last_detector_frame_index = None
         self._last_processed_frame_index = None
         self._last_finite_detector_frame = None
+        self._final_authoritative_sample = None
         with self._hud_state_lock:
             self._hud_anchor = None
             self._hud_anchor_frame_index = None
@@ -1109,28 +1376,86 @@ class EdgePipeline:
         health = getattr(self, "_last_health", None)
         if health is None:
             return
-        try:
-            import httpx
-            verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
-            httpx.post(
-                f"{self.sync_client.backend_url}/cameras/{self.camera_id}/health",
-                content=health.model_dump_json(),
-                headers={"Content-Type": "application/json", **self._edge_auth_headers()},
-                timeout=3.0,
-                verify=verify,
-                cert=self.sync_client._client_cert
-            )
-        except Exception as exc:
-            logger.debug(f"[Health] Periodic health report failed (non-fatal): {exc}")
+        self._enqueue_status_report("health", health.model_dump(mode="json"))
 
-    def _prime_camera2_lost_tracks(self, incoming_tracks: List) -> None:
-        """Make same-packet losses available to Camera 2 re-identification.
+    def _enqueue_status_report(self, kind: str, payload: dict) -> None:
+        """Queue a latest-state report without making the caller wait on HTTP."""
+        item = (kind, payload)
+        try:
+            self.status_queue.put_nowait(item)
+        except Full:
+            try:
+                self.status_queue.get_nowait()
+                self.status_queue.task_done()
+                self._status_transport_metrics["dropped"] += 1
+            except Empty:
+                pass
+            try:
+                self.status_queue.put_nowait(item)
+            except Full:
+                self._status_transport_metrics["dropped"] += 1
+                return
+        self._status_transport_metrics["produced"] += 1
+
+    def _run_status_transport_loop(self) -> None:
+        """Deliver best-effort health/metrics reports off the frame thread."""
+        import httpx
+
+        verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
+        client = httpx.Client(
+            timeout=httpx.Timeout(connect=2.0, read=2.0, write=2.0, pool=2.0),
+            verify=verify,
+            cert=self.sync_client._client_cert,
+        )
+        try:
+            while not self._status_transport_stop.is_set() or not self.status_queue.empty():
+                try:
+                    kind, payload = self.status_queue.get(timeout=0.25)
+                except Empty:
+                    continue
+                try:
+                    if kind == "health":
+                        url = f"{self.sync_client.backend_url}/cameras/{self.camera_id}/health"
+                    elif kind == "metrics":
+                        url = f"{self.sync_client.backend_url}/system/metrics"
+                    else:
+                        logger.warning("[Status Transport] discarded unknown report kind=%s", kind)
+                        continue
+
+                    # These endpoints append history rows. A retry after a
+                    # read timeout could duplicate a report already committed
+                    # by the backend, so use the next periodic snapshot as
+                    # the retry opportunity instead of resending this item.
+                    try:
+                        response = client.post(
+                            url,
+                            json=payload,
+                            headers=self._edge_auth_headers(),
+                        )
+                        delivered = 200 <= response.status_code < 300
+                        error_type = f"HTTP{response.status_code}"
+                    except httpx.RequestError as exc:
+                        delivered = False
+                        error_type = type(exc).__name__
+                    if not delivered:
+                        self._status_transport_metrics["errors"] += 1
+                        logger.debug(
+                            "[Status Transport] report failed kind=%s error_type=%s",
+                            kind, error_type,
+                        )
+                finally:
+                    self.status_queue.task_done()
+        finally:
+            client.close()
+
+    def _prime_stored_lost_tracks(self, incoming_tracks: List) -> None:
+        """Make same-packet losses available to stored-camera re-identification.
 
         ByteTrack may assign a new native ID after a pose change. Previously
         the guard checked that new ID before the old track was remembered,
         making an otherwise strong spatial/appearance match impossible.
         """
-        if (self.camera_id != "cam-checkpoint-01"
+        if (self.camera_id not in {"cam-border-01", "cam-checkpoint-01"}
                 or self.adapter.source_kind != "LOCAL_FINITE_FILE"
                 or not self.adapter.preserve_finite_frames):
             return
@@ -1159,6 +1484,63 @@ class EdgePipeline:
         dwell/stationary tracking) resumes exactly where it left off.
         """
         now = time.time()
+        adapter = getattr(self, "adapter", None)
+        stored_camera1 = (
+            getattr(self, "camera_id", None) == "cam-border-01"
+            and getattr(adapter, "source_kind", None) == "LOCAL_FINITE_FILE"
+            and bool(getattr(adapter, "preserve_finite_frames", False))
+        )
+        if stored_camera1:
+            # A native tracker ID and a previously re-associated native ID can
+            # coexist in one detector packet. They must never share a public
+            # identity: downstream keyed timelines would otherwise erase one
+            # of the two real detections. Keep the identity closest to its last
+            # observed position and give the other native track a distinct ID.
+            candidates = {}
+            for track in tracks:
+                native = int(track.track_id)
+                canonical = self._track_id_map.get(native, native)
+                candidates.setdefault(canonical, []).append(track)
+            occupied = set(candidates)
+            native_ids = {int(track.track_id) for track in tracks}
+            for canonical, group in candidates.items():
+                if len(group) < 2:
+                    continue
+                previous = self._track_last_snapshot.get(canonical)
+                centroid = previous.get("centroid") if previous else None
+                owner = min(
+                    group,
+                    key=lambda track: (
+                        ((track.bbox.centroid.x - centroid.x) ** 2
+                         + (track.bbox.centroid.y - centroid.y) ** 2)
+                        if centroid is not None else float(int(track.track_id) != canonical),
+                        int(track.track_id),
+                    ),
+                )
+                for track in group:
+                    if track is owner:
+                        continue
+                    native = int(track.track_id)
+                    replacement = native
+                    if replacement in occupied or replacement in self._known_track_ids:
+                        replacement = max(
+                            occupied | self._known_track_ids | native_ids
+                            | set(self._track_id_map.values()) | {0}
+                        ) + 1
+                    self._track_id_map[native] = replacement
+                    self._known_track_ids.add(replacement)
+                    occupied.add(replacement)
+                    track.track_id = replacement
+                    logger.warning(
+                        "[Pipeline] Camera 1 prevented simultaneous track-ID collision "
+                        "canonical=%d native=%d distinct=%d",
+                        canonical, native, replacement,
+                    )
+        occupied_ids = {
+            self._track_id_map.get(track.track_id, track.track_id)
+            for track in tracks
+        }
+        packet_native_ids = {int(track.track_id) for track in tracks}
         for track in tracks:
             native_id = track.track_id
             
@@ -1172,7 +1554,18 @@ class EdgePipeline:
                 continue
 
             histogram = compute_track_histogram(frame, track.bbox)
-            match = self.continuity_guard.resolve_new_track(histogram, track.bbox.centroid, now)
+            match = self.continuity_guard.resolve_new_track(
+                histogram,
+                track.bbox.centroid,
+                now,
+                # Camera 1's wide scene changes a person's crop substantially
+                # during ordinary lateral motion.  Keep this relaxation local
+                # to restored Camera 1 files and pair it with a tighter spatial
+                # bound so Camera 2 and live-source behavior remain unchanged.
+                histogram_similarity_threshold=0.50 if stored_camera1 else None,
+                max_centroid_distance=100.0 if stored_camera1 else None,
+                excluded_track_ids=(occupied_ids | (packet_native_ids - {native_id})) if stored_camera1 else None,
+            )
             if match is not None:
                 matched_id, matched_trajectory = match
                 logger.info(
@@ -1183,8 +1576,10 @@ class EdgePipeline:
                 track.track_id = matched_id
                 track.trajectory = list(matched_trajectory) + list(track.trajectory)
                 self._known_track_ids.add(matched_id)
+                occupied_ids.add(matched_id)
             else:
                 self._known_track_ids.add(native_id)
+                occupied_ids.add(native_id)
         return tracks
 
     def _process_frame(self, frame, meta) -> None:
@@ -1229,7 +1624,7 @@ class EdgePipeline:
         ):
             self._last_condition = self.condition_classifier.classify(frame)
         condition = self._last_condition
-        if (self.camera_id == "cam-checkpoint-01"
+        if ((self.camera_id == "cam-checkpoint-01" or self.camera_id == "cam-border-01")
                 and self.adapter.source_kind == "LOCAL_FINITE_FILE"
                 and self.adapter.preserve_finite_frames):
             self._last_finite_detector_frame = (frame, meta, health, condition)
@@ -1282,7 +1677,7 @@ class EdgePipeline:
         detector_tracks = None
         if detector_packet is not None:
             if detector_packet.error is None:
-                self._prime_camera2_lost_tracks(detector_packet.tracks)
+                self._prime_stored_lost_tracks(detector_packet.tracks)
                 detector_tracks = self._apply_continuity_guard(
                     detector_packet.tracks, detector_packet.job.frame,
                 )
@@ -1385,6 +1780,7 @@ class EdgePipeline:
                 confidence_threshold=calibrated_threshold,
                 enhancement_applied=enhancement_applied,
                 submitted_at=time.time(),
+                new_track_threshold=self._detector_new_track_threshold(condition.condition),
             ))
             if submitted:
                 self._last_detector_source_time = float(meta.video_time_seconds)
@@ -1506,18 +1902,7 @@ class EdgePipeline:
                 except OSError as exc:
                     logger.debug("[Telemetry] Trace write failed: %s", exc)
             if not self._hud_decoupled:
-                try:
-                    if self.tracking_queue.full():
-                        try:
-                            self.tracking_queue.get_nowait()
-                            self.tracking_queue.task_done()
-                            self._tracking_metrics["dropped"] += 1
-                        except Empty:
-                            pass
-                    self.tracking_queue.put_nowait(dict(payload))
-                    self._tracking_metrics["produced"] += 1
-                except Exception:
-                    self._tracking_metrics["errors"] += 1
+                self._queue_tracking_payload(dict(payload))
 
             # Full JPEG + durable latest-state telemetry stays diagnostic and
             # low-cadence.  Its encoding/upload can no longer gate HUD boxes.
@@ -1995,36 +2380,21 @@ class EdgePipeline:
         # evidence.
         summary["events"]["queue_depth"] = self.sync_client.get_queue_depth() if hasattr(self, "sync_client") and self.sync_client else 0
         
-        try:
-            import httpx
-            verify: object = self.sync_client._ca_cert if self.sync_client._ca_cert else True
-            with httpx.Client(
-                timeout=3.0,
-                verify=verify,
-                cert=self.sync_client._client_cert,
-            ) as client:
-                response = client.post(
-                    f"{self.sync_client.backend_url}/system/metrics",
-                    json={
-                        "edge_device_id": self.camera_id,
-                        "uptime_seconds": summary["uptime_seconds"],
-                        "fps": summary["fps"],
-                        "frames": summary["frames"],
-                        "events": summary["events"],
-                        "alerts_generated": summary["alerts_generated"],
-                        "telemetry_produced": self._telemetry_metrics["produced"],
-                        "telemetry_dropped": self._telemetry_metrics["dropped"],
-                        "telemetry_errors": self._telemetry_metrics["errors"],
-                        "cpu_percent": summary["cpu_percent"],
-                        "rss_mb": summary["rss_mb"],
-                        "psutil_available": summary["psutil_available"],
-                        "adaptive_gate": gate_stats,
-                    },
-                    headers=self._edge_auth_headers(),
-                )
-                response.raise_for_status()
-        except Exception as exc:
-            logger.debug(f"[Metrics] Backend report failed (non-fatal): {exc}")
+        self._enqueue_status_report("metrics", {
+            "edge_device_id": self.camera_id,
+            "uptime_seconds": summary["uptime_seconds"],
+            "fps": summary["fps"],
+            "frames": summary["frames"],
+            "events": summary["events"],
+            "alerts_generated": summary["alerts_generated"],
+            "telemetry_produced": self._telemetry_metrics["produced"],
+            "telemetry_dropped": self._telemetry_metrics["dropped"],
+            "telemetry_errors": self._telemetry_metrics["errors"],
+            "cpu_percent": summary["cpu_percent"],
+            "rss_mb": summary["rss_mb"],
+            "psutil_available": summary["psutil_available"],
+            "adaptive_gate": gate_stats,
+        })
 
     def stop(self) -> None:
         self._running = False

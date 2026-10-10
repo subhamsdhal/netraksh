@@ -1616,3 +1616,67 @@ button {
     overflow-wrap: anywhere;
   }
 }
+
+/* Keep every header action in view on desktop widths. The status strip is the
+   flexible region; the account control is a fixed-priority action and must
+   never be pushed beyond the header's right edge. */
+@media (min-width: 1201px) and (max-width: 1600px) {
+  .header-top {
+    gap: 0.75rem;
+    min-width: 0;
+    padding-inline: 1rem;
+  }
+
+  .topbar-brand {
+    flex: 0 1 17.5rem;
+    min-width: 0;
+    gap: 0.45rem;
+  }
+
+  .topbar-brand-text { min-width: 0; }
+  .topbar-title { font-size: 0.8rem; letter-spacing: 0.09em; }
+  .topbar-sub { font-size: 0.46rem; letter-spacing: 0.06em; }
+
+  .topbar-status-strip {
+    flex: 1 1 0;
+    min-width: 0;
+    justify-content: center;
+  }
+
+  .topbar-status-item {
+    flex: 1 1 0;
+    min-width: 0;
+    padding-inline: 0.5rem;
+  }
+
+  .topbar-status-value {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .topbar-right { flex: 0 0 auto; gap: 0.5rem; }
+  .topbar-time { min-width: 0; }
+  .topbar-time-value { font-size: 0.68rem; letter-spacing: 0.02em; }
+  .topbar-account-button { flex: 0 0 32px; }
+}
+
+@media (min-width: 901px) and (max-width: 1366px) {
+  .header-top {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    column-gap: 0.75rem;
+    row-gap: 0.3rem;
+    padding-block: 0.35rem;
+  }
+
+  .topbar-brand { grid-column: 1; grid-row: 1; }
+  .topbar-right { grid-column: 2; grid-row: 1; }
+  .topbar-status-strip {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+  }
+}

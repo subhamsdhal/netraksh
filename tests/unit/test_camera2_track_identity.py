@@ -33,7 +33,7 @@ def test_new_native_id_recovers_visible_prior_identity():
     new_box = BoundingBox(x1=412, y1=215, x2=504, y2=380)
     incoming = SimpleNamespace(track_id=4, bbox=new_box, trajectory=[new_box.centroid])
 
-    pipeline._prime_camera2_lost_tracks([incoming])
+    pipeline._prime_stored_lost_tracks([incoming])
     pipeline._apply_continuity_guard([incoming], frame)
 
     assert incoming.track_id == 2
@@ -45,17 +45,87 @@ def test_spatially_unrelated_person_keeps_new_identity():
     new_box = BoundingBox(x1=800, y1=200, x2=850, y2=350)
     incoming = SimpleNamespace(track_id=4, bbox=new_box, trajectory=[new_box.centroid])
 
-    pipeline._prime_camera2_lost_tracks([incoming])
+    pipeline._prime_stored_lost_tracks([incoming])
     pipeline._apply_continuity_guard([incoming], frame)
 
     assert incoming.track_id == 4
 
 
-def test_camera1_continuity_order_is_unchanged():
+def test_camera1_stored_source_recovers_visible_prior_identity():
     pipeline, frame = _pipeline(camera_id="cam-border-01")
     new_box = BoundingBox(x1=412, y1=215, x2=504, y2=380)
     incoming = SimpleNamespace(track_id=4, bbox=new_box, trajectory=[new_box.centroid])
 
-    pipeline._prime_camera2_lost_tracks([incoming])
+    pipeline._prime_stored_lost_tracks([incoming])
+    pipeline._apply_continuity_guard([incoming], frame)
+
+    assert incoming.track_id == 2
+    assert pipeline._track_id_map[4] == 2
+
+
+def test_camera1_two_same_packet_id_changes_keep_separate_people():
+    pipeline, frame = _pipeline(camera_id="cam-border-01")
+    left_old = BoundingBox(x1=80, y1=220, x2=125, y2=360)
+    right_old = BoundingBox(x1=750, y1=220, x2=795, y2=360)
+    frame[220:360, 80:125] = (20, 40, 180)
+    frame[220:360, 750:795] = (160, 40, 20)
+    pipeline._known_track_ids = {1, 2}
+    pipeline._trajectories = {1: [left_old.centroid], 2: [right_old.centroid]}
+    pipeline._track_last_snapshot = {
+        1: {"histogram": compute_histogram(frame, left_old), "centroid": left_old.centroid},
+        2: {"histogram": compute_histogram(frame, right_old), "centroid": right_old.centroid},
+    }
+    left_new = BoundingBox(x1=85, y1=220, x2=130, y2=360)
+    right_new = BoundingBox(x1=745, y1=220, x2=790, y2=360)
+    incoming = [
+        SimpleNamespace(track_id=6, bbox=left_new, trajectory=[left_new.centroid]),
+        SimpleNamespace(track_id=8, bbox=right_new, trajectory=[right_new.centroid]),
+    ]
+
+    pipeline._prime_stored_lost_tracks(incoming)
+    pipeline._apply_continuity_guard(incoming, frame)
+
+    assert [track.track_id for track in incoming] == [1, 2]
+
+
+def test_camera1_stored_source_accepts_motion_match_below_default_histogram_threshold(monkeypatch):
+    pipeline, frame = _pipeline(camera_id="cam-border-01")
+    incoming = SimpleNamespace(
+        track_id=9,
+        bbox=BoundingBox(x1=470, y1=240, x2=515, y2=380),
+        trajectory=[pipeline._trajectories[2][0]],
+    )
+    monkeypatch.setattr(pipeline.continuity_guard, "_similarity", lambda *_: 0.55)
+
+    pipeline._prime_stored_lost_tracks([incoming])
+    pipeline._apply_continuity_guard([incoming], frame)
+
+    assert incoming.track_id == 2
+    assert pipeline._track_id_map[9] == 2
+
+
+def test_camera2_keeps_default_histogram_threshold(monkeypatch):
+    pipeline, frame = _pipeline(camera_id="cam-checkpoint-01")
+    incoming = SimpleNamespace(
+        track_id=9,
+        bbox=BoundingBox(x1=470, y1=240, x2=515, y2=380),
+        trajectory=[pipeline._trajectories[2][0]],
+    )
+    monkeypatch.setattr(pipeline.continuity_guard, "_similarity", lambda *_: 0.55)
+
+    pipeline._prime_stored_lost_tracks([incoming])
+    pipeline._apply_continuity_guard([incoming], frame)
+
+    assert incoming.track_id == 9
+    assert 9 not in pipeline._track_id_map
+
+
+def test_camera1_unstored_source_keeps_previous_continuity_order():
+    pipeline, frame = _pipeline(camera_id="cam-border-01")
+    pipeline.adapter.preserve_finite_frames = False
+    new_box = BoundingBox(x1=412, y1=215, x2=504, y2=380)
+    incoming = SimpleNamespace(track_id=4, bbox=new_box, trajectory=[new_box.centroid])
+
+    pipeline._prime_stored_lost_tracks([incoming])
 
     assert pipeline.continuity_guard.get_pool_size() == 0

@@ -29,6 +29,24 @@ def test_waking_normal_durable_control_allows_pipeline_and_unpauses_adapter():
     assert sync.offline is False
 
 
+def test_replacement_process_never_forks_an_active_generation():
+    assert not _durable_pipeline_allowed(
+        "source-session",
+        "ACTIVE",
+        "normal",
+        "existing-analysis-session",
+    )
+
+
+def test_waking_generation_with_existing_run_identity_is_not_restarted():
+    assert not _durable_pipeline_allowed(
+        "source-session",
+        "WAKING",
+        "normal",
+        "existing-analysis-session",
+    )
+
+
 def test_stop_control_pauses_live_adapter():
     adapter = _Adapter()
     adapter.paused = False

@@ -81,6 +81,7 @@ describe('detection-synchronized analyzed playback', () => {
       return 1;
     });
     HTMLMediaElement.prototype.cancelVideoFrameCallback = vi.fn();
+    HTMLCanvasElement.prototype.getContext = vi.fn(() => ({ drawImage: vi.fn() }));
   });
 
   it('defaults durable media to ANALYZED SYNC without starting browser playback', () => {
@@ -106,6 +107,48 @@ describe('detection-synchronized analyzed playback', () => {
     expect(screen.getByLabelText('Detection-synchronized tracking overlay')).toHaveAttribute('data-frame-index', '12');
     expect(container.querySelector('[data-track-id="9"][data-track-class="person"]')).toBeInTheDocument();
     expect(screen.getByText('FRAME 12 · 0.40s')).toBeInTheDocument();
+  });
+
+  it('keeps waiting for later live samples after reaching the current timeline end', async () => {
+    const onAnalyzedSample = vi.fn();
+    const { container } = renderFeed({ onAnalyzedSample });
+    wireVideo(container.querySelector('video'));
+    act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: sample() })));
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 12 })));
+    act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', {
+      detail: sample({ sequence: 2, frame_index: 13, video_time: 0.45 }),
+    })));
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 13 })));
+    expect(screen.getByText('FRAME 13 · 0.45s')).toBeInTheDocument();
+  });
+
+  it('keeps the last frame, boxes, and metrics paired while seeking the next live sample', async () => {
+    const onAnalyzedSample = vi.fn();
+    const { container } = renderFeed({ onAnalyzedSample });
+    const video = wireVideo(container.querySelector('video'));
+    act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', { detail: sample() })));
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 12 })));
+
+    let mediaTime = video.currentTime;
+    Object.defineProperty(video, 'currentTime', {
+      configurable: true,
+      get: () => mediaTime,
+      set: value => { mediaTime = Number(value); },
+    });
+    act(() => window.dispatchEvent(new CustomEvent('netraksh-tracking-frame', {
+      detail: sample({ sequence: 2, frame_index: 13, video_time: 0.45 }),
+    })));
+
+    await waitFor(() => expect(video.currentTime).toBe(0.45));
+    expect(container.querySelector('canvas[aria-label="Last synchronized analyzed frame"]')).toHaveStyle({ display: 'block' });
+    expect(video).toHaveStyle({ opacity: '0' });
+    expect(screen.getByLabelText('Detection-synchronized tracking overlay')).toHaveAttribute('data-frame-index', '12');
+    expect(screen.getByText('FRAME 12 · 0.40s')).toBeInTheDocument();
+    expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 12 }));
+    fireEvent.seeked(video);
+    await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({ frame_index: 13 })));
+    expect(container.querySelector('canvas[aria-label="Last synchronized analyzed frame"]')).toHaveStyle({ display: 'none' });
+    expect(screen.getByLabelText('Detection-synchronized tracking overlay')).toHaveAttribute('data-frame-index', '13');
   });
 
   it('exposes only persisted, read-only sample diagnostics when explicitly enabled for admins', async () => {
@@ -273,10 +316,11 @@ describe('detection-synchronized analyzed playback', () => {
     expect(screen.getByTitle('View analyzed frames')).toHaveAttribute('data-view-state', 'SOURCE_PREVIEW');
     fireEvent.click(screen.getByTitle('View analyzed frames'));
     expect(screen.getByTitle('View source preview')).toHaveAttribute('data-view-state', 'COMPLETED_REPLAY_READY');
-    expect(screen.getByText('CURRENT VIEW: ANALYZED SYNC')).toBeInTheDocument();
+    expect(screen.getByText('CURRENT VIEW: BUFFERING ANALYZED FRAME')).toBeInTheDocument();
     await waitFor(() => expect(onAnalyzedSample).toHaveBeenLastCalledWith(expect.objectContaining({
       frame_index: 150, video_time: 5,
     })));
+    expect(screen.getByText('CURRENT VIEW: ANALYZED SYNC')).toBeInTheDocument();
     expect(video.currentTime).toBe(5);
     expect(screen.getByRole('button', { name: 'Pause analyzed replay' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Pause analyzed replay' }));

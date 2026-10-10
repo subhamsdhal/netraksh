@@ -34,6 +34,7 @@ class DetectorJob:
     confidence_threshold: float
     enhancement_applied: bool
     submitted_at: float
+    new_track_threshold: float | None = None
 
 
 @dataclass
@@ -121,11 +122,19 @@ class AsyncDetectorWorker:
             tracks: list[TrackData] = []
             error = None
             try:
-                tracks = self.detector.detect_and_track(
-                    job.detector_frame,
-                    job.condition.condition,
-                    job.confidence_threshold,
-                )
+                if job.new_track_threshold is None:
+                    tracks = self.detector.detect_and_track(
+                        job.detector_frame,
+                        job.condition.condition,
+                        job.confidence_threshold,
+                    )
+                else:
+                    tracks = self.detector.detect_and_track(
+                        job.detector_frame,
+                        job.condition.condition,
+                        job.confidence_threshold,
+                        new_track_threshold=job.new_track_threshold,
+                    )
             except Exception as exc:  # pragma: no cover - exercised by integration failure path
                 error = f"{type(exc).__name__}: {exc}"
                 logger.error("[HybridTracker] Detector keyframe failed: %s", error)

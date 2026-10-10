@@ -5,7 +5,7 @@ import httpx
 
 from edge.demo_runner import (
     _apply_control_sync,
-    _camera2_durable_source_clock,
+    _stored_file_source_clock,
     _control_seek_target,
     _is_resolvable_edge_source,
     _materialize_remote_source,
@@ -78,6 +78,24 @@ def test_resolvable_source_switch_applies_its_session_seek():
     assert _scenario["current"] == "paused"
 
 
+def test_control_sync_preserves_claimed_analysis_session_for_restart_fence():
+    _set_local_session()
+    replacement = Path(__file__)
+
+    assert _apply_control_sync({
+        "video_source": str(replacement),
+        "video_session_id": "local-session",
+        "scenario": "normal",
+        "analysis_state": "ACTIVE",
+        "analysis_generation": 7,
+        "latest_analysis_session_id": "existing-analysis-session",
+    }) is True
+
+    assert _scenario["analysis_state"] == "ACTIVE"
+    assert _scenario["analysis_generation"] == 7
+    assert _scenario["latest_analysis_session_id"] == "existing-analysis-session"
+
+
 def test_same_accepted_session_keeps_legitimate_browser_seek_functional():
     replacement = str(Path(__file__))
     _set_local_session(replacement)
@@ -112,10 +130,12 @@ def test_browser_position_is_not_wall_clock_extrapolated_after_its_last_update()
     assert _control_seek_target(0.0, "LOCAL_FINITE_FILE", 79.5) == 0.0
 
 
-def test_camera2_durable_analysis_uses_decoder_clock_not_browser_preview():
-    assert _camera2_durable_source_clock("cam-checkpoint-01", "stored-video-session")
-    assert not _camera2_durable_source_clock("cam-checkpoint-01", None)
-    assert not _camera2_durable_source_clock("cam-border-01", "stored-video-session")
+def test_stored_camera_analyses_use_decoder_clock_not_browser_preview():
+    assert _stored_file_source_clock("cam-border-01", "stored-video-session")
+    assert _stored_file_source_clock("cam-checkpoint-01", "stored-video-session")
+    assert not _stored_file_source_clock("cam-border-01", None)
+    assert not _stored_file_source_clock("cam-checkpoint-01", None)
+    assert not _stored_file_source_clock("another-camera", "stored-video-session")
 
 
 def test_backend_scoped_paths_do_not_reuse_legacy_or_other_backend_queues():
@@ -206,3 +226,52 @@ def test_bundled_control_uses_the_worker_local_source_without_a_session(monkeypa
     assert _apply_control_sync(hydrated) is True
     assert _scenario["video_session_id"] is None
     assert _scenario["current"] == "normal"
+
+
+def test_postgres_worker_download_verifies_camera_media_and_checksum(monkeypatch, tmp_path):
+    import hashlib
+
+    session_id = str(uuid.uuid4())
+    source_bytes = b"\x00\x00\x00\x18ftypisom" + b"real-camera-source" * 8
+    media_id = f"video-sessions/cam-border-01/{session_id}/source.mp4"
+    digest = hashlib.sha256(source_bytes).hexdigest()
+    monkeypatch.setenv("EDGE_SOURCE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("BACKEND_URL", "https://backend.example.test")
+    monkeypatch.setenv("EDGE_AUTH_TOKEN", "test-private-edge-token")
+    requests = []
+
+    class Stream:
+        headers = {"X-Video-Media-ID": media_id, "X-Video-SHA256": digest}
+
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def raise_for_status(self): return None
+        def iter_bytes(self, _size): yield source_bytes
+
+    def stream(_method, url, **kwargs):
+        requests.append((url, kwargs))
+        return Stream()
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    control = {
+        "camera_id": "cam-border-01", "source_mode": "durable",
+        "video_source": f"object://{media_id}", "media_id": media_id,
+        "media_sha256": digest, "media_size_bytes": len(source_bytes),
+        "source_generation": 1, "video_session_id": session_id,
+        "download_url": f"/api/dashboard/video/edge-media/{session_id}?camera_id=cam-border-01",
+    }
+    assert _materialize_remote_source(control, "cam-checkpoint-01")["source_unavailable"] is True
+    assert requests == []
+    hydrated = _materialize_remote_source(control, "cam-border-01")
+    assert Path(hydrated["video_source"]).read_bytes() == source_bytes
+    assert requests[0][1]["headers"] == {"Authorization": "Bearer test-private-edge-token"}
+    assert requests[0][1]["follow_redirects"] is False
+    Path(hydrated["video_source"]).write_bytes(b"corrupt-cache")
+    assert Path(_materialize_remote_source(control, "cam-border-01")["video_source"]).read_bytes() == source_bytes
+
+    class CorruptStream(Stream):
+        def iter_bytes(self, _size): yield b"wrong-video"
+
+    monkeypatch.setattr(httpx, "stream", lambda *_args, **_kwargs: CorruptStream())
+    Path(hydrated["video_source"]).unlink()
+    assert _materialize_remote_source(control, "cam-border-01")["source_unavailable"] is True

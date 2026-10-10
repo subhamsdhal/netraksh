@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -7,6 +8,15 @@ from fastapi import HTTPException
 
 from backend.api import dashboard
 from backend.services import video_storage
+
+
+def _run_sync_async_handler(coroutine):
+    """Run mocked handlers that do not yield without Windows Proactor setup."""
+    try:
+        coroutine.send(None)
+    except StopIteration as completed:
+        return completed.value
+    raise AssertionError("handler unexpectedly yielded control")
 
 SOURCE_ID = "22222222-2222-4222-8222-222222222222"
 
@@ -24,13 +34,20 @@ class _Query:
     def one_or_none(self):
         return self.value
 
+    def all(self):
+        return self.value
+
 
 class _Database:
-    def __init__(self, camera):
+    def __init__(self, camera, summary=None):
         self.camera = camera
+        self.summary = summary
 
     def query(self, _model):
         return _Query(self.camera)
+
+    def get(self, _model, _identity):
+        return self.summary
 
 
 def _request():
@@ -106,7 +123,7 @@ def _payload(request_id="11111111-1111-4111-8111-111111111111"):
 def test_reanalyze_reuses_completed_source_creates_generation_and_audits(monkeypatch):
     db, _camera, active, old_history, starts, audits, wakes = _setup(monkeypatch)
 
-    result = asyncio.run(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user()))
+    result = _run_sync_async_handler(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user()))
 
     assert result == {
         "status": "success",
@@ -137,7 +154,7 @@ def test_reanalyze_camera_2_reuses_its_completed_source_without_upload(monkeypat
     )
     payload = {**_payload(), "camera_id": "cam-checkpoint-01"}
 
-    result = asyncio.run(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
+    result = _run_sync_async_handler(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
 
     assert result["camera_id"] == "cam-checkpoint-01"
     assert result["source_session_id"] == SOURCE_ID
@@ -154,8 +171,8 @@ def test_same_reanalysis_request_is_idempotent_after_start(monkeypatch):
     db, _camera, _active, _history, starts, audits, wakes = _setup(monkeypatch)
     payload = _payload()
 
-    first = asyncio.run(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
-    repeated = asyncio.run(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
+    first = _run_sync_async_handler(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
+    repeated = _run_sync_async_handler(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
 
     assert first["analysis_generation"] == repeated["analysis_generation"] == 5
     assert repeated["idempotent_replay"] is True
@@ -168,7 +185,7 @@ def test_reanalyze_rejects_an_active_run_and_does_not_start_another(monkeypatch)
     db, _camera, _active, _history, starts, audits, wakes = _setup(monkeypatch, lifecycle="ACTIVE")
 
     with pytest.raises(HTTPException) as error:
-        asyncio.run(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user()))
+        _run_sync_async_handler(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user()))
 
     assert error.value.status_code == 409
     assert starts == []
@@ -180,7 +197,7 @@ def test_reanalyze_enforces_camera_command_ownership(monkeypatch):
     db, _camera, _active, _history, starts, audits, wakes = _setup(monkeypatch)
 
     with pytest.raises(HTTPException) as error:
-        asyncio.run(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user("OPERATOR", "COMMAND_B")))
+        _run_sync_async_handler(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user("OPERATOR", "COMMAND_B")))
 
     assert error.value.status_code == 403
     assert starts == []
@@ -193,7 +210,7 @@ def test_reanalyze_rejects_invalid_request_id_before_mutating(monkeypatch):
     payload = _payload(request_id="not-a-uuid")
 
     with pytest.raises(HTTPException) as error:
-        asyncio.run(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
+        _run_sync_async_handler(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
 
     assert error.value.status_code == 422
     assert starts == []
@@ -206,7 +223,7 @@ def test_reanalyze_on_camera_1_does_not_change_camera_2_control(monkeypatch):
     camera2_before = {"analysis_state": "COMPLETED", "analysis_generation": 3, "session_id": "camera-2-source"}
     camera2_after = copy.deepcopy(camera2_before)
 
-    asyncio.run(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user()))
+    _run_sync_async_handler(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user()))
 
     assert camera2_after == camera2_before
     assert starts == [_payload()["request_id"]]
@@ -232,4 +249,103 @@ def test_start_active_session_persists_same_request_identity(monkeypatch):
     assert created is True
     assert first["analysis_generation"] == repeated["analysis_generation"] == 10
     assert repeated_created is False
+    assert len(writes) == 1
+
+
+def test_interrupt_exact_generation_preserves_history_and_audits(monkeypatch):
+    camera = SimpleNamespace(id="cam-border-01", is_active=True, owning_command_id="COMMAND_A")
+    summary = SimpleNamespace(
+        camera_id="cam-border-01",
+        stream_id=SOURCE_ID,
+        analysis_generation=6,
+        analysis_session_id="16d1d6ec-1144-4690-8713-c3e16d0475ab",
+        last_telemetry_at=time.time() - 120,
+        completed_at=None,
+    )
+    class _InterruptDatabase(_Database):
+        def query(self, model):
+            if model is dashboard.Camera:
+                return _Query(camera)
+            return _Query([(summary.analysis_session_id,)])
+    db = _InterruptDatabase(camera, summary)
+    audits = []
+    interrupted = []
+    monkeypatch.setattr(dashboard.settings, "AUDIT_LOG_ENABLED", True)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda _camera_id: {
+        "session_id": SOURCE_ID, "analysis_generation": 6,
+    })
+    monkeypatch.setattr(dashboard, "interrupt_active_session", lambda *args, **kwargs: interrupted.append((args, kwargs)) or {
+        "analysis_state": "INTERRUPTED", "scenario": "paused",
+    })
+    monkeypatch.setattr(dashboard, "audit", lambda _db, action, **kwargs: audits.append((action, kwargs)))
+
+    result = _run_sync_async_handler(dashboard.interrupt_stale_video_analysis({
+        "camera_id": "cam-border-01",
+        "video_session_id": SOURCE_ID,
+        "analysis_session_id": summary.analysis_session_id,
+        "analysis_generation": 6,
+        "reason": "deployment_interrupted",
+    }, _request(), db, _user()))
+
+    assert result["analysis_state"] == "INTERRUPTED"
+    assert result["analysis_generation"] == 6
+    assert interrupted[0][0] == ("cam-border-01", SOURCE_ID, 6)
+    assert audits[0][0] == "ANALYSIS_INTERRUPTED"
+    assert audits[0][1]["resource_id"] == "cam-border-01:6"
+
+
+def test_interrupt_rejects_mismatched_generation_without_mutation(monkeypatch):
+    camera = SimpleNamespace(id="cam-border-01", is_active=True, owning_command_id="COMMAND_A")
+    summary = SimpleNamespace(
+        camera_id="cam-border-01",
+        stream_id=SOURCE_ID,
+        analysis_generation=6,
+        analysis_session_id="16d1d6ec-1144-4690-8713-c3e16d0475ab",
+        last_telemetry_at=time.time(),
+        completed_at=None,
+    )
+    db = _Database(camera, summary)
+    monkeypatch.setattr(dashboard.settings, "AUDIT_LOG_ENABLED", True)
+    monkeypatch.setattr(dashboard, "get_valid_active_session", lambda _camera_id: {
+        "session_id": SOURCE_ID, "analysis_generation": 7,
+    })
+    monkeypatch.setattr(dashboard, "interrupt_active_session", lambda *_args, **_kwargs: pytest.fail("recent run must not be interrupted"))
+
+    with pytest.raises(HTTPException) as error:
+        _run_sync_async_handler(dashboard.interrupt_stale_video_analysis({
+            "camera_id": "cam-border-01",
+            "video_session_id": SOURCE_ID,
+            "analysis_session_id": summary.analysis_session_id,
+            "analysis_generation": 6,
+            "reason": "deployment_interrupted",
+        }, _request(), db, _user()))
+
+    assert error.value.status_code == 409
+
+
+def test_interrupt_active_session_requires_exact_run_identity(monkeypatch):
+    current = {
+        "camera_id": "cam-border-01",
+        "session_id": SOURCE_ID,
+        "analysis_state": "ACTIVE",
+        "scenario": "normal",
+        "analysis_generation": 6,
+        "latest_analysis_session_id": "16d1d6ec-1144-4690-8713-c3e16d0475ab",
+    }
+    writes = []
+    monkeypatch.setattr(video_storage, "get_valid_active_session", lambda _camera_id: copy.deepcopy(current))
+    monkeypatch.setattr(video_storage, "_put_json", lambda _key, value: writes.append(copy.deepcopy(value)))
+
+    assert video_storage.interrupt_active_session(
+        "cam-border-01", SOURCE_ID, 5, reason="deployment_interrupted",
+    ) is None
+    settled = video_storage.interrupt_active_session(
+        "cam-border-01", SOURCE_ID, 6, reason="deployment_interrupted",
+    )
+
+    assert settled["analysis_state"] == "INTERRUPTED"
+    assert settled["scenario"] == "paused"
+    assert settled["analysis_generation"] == 6
+    assert settled["latest_analysis_session_id"] == current["latest_analysis_session_id"]
+    assert settled["interruption_reason"] == "deployment_interrupted"
     assert len(writes) == 1

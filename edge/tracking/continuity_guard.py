@@ -101,7 +101,14 @@ class TrackContinuityGuard:
         }
 
     def resolve_new_track(
-        self, histogram: Optional[np.ndarray], centroid: Point, now: float
+        self,
+        histogram: Optional[np.ndarray],
+        centroid: Point,
+        now: float,
+        *,
+        histogram_similarity_threshold: Optional[float] = None,
+        max_centroid_distance: Optional[float] = None,
+        excluded_track_ids: Optional[set[int]] = None,
     ) -> Optional[Tuple[int, List[Point]]]:
         """
         Checks whether a newly-appeared track is likely the same physical
@@ -114,13 +121,26 @@ class TrackContinuityGuard:
         if histogram is None:
             return None
 
+        similarity_threshold = (
+            self._similarity_threshold
+            if histogram_similarity_threshold is None
+            else float(histogram_similarity_threshold)
+        )
+        max_distance = (
+            self._max_distance
+            if max_centroid_distance is None
+            else float(max_centroid_distance)
+        )
+
         best_id: Optional[int] = None
         best_score = 0.0
         best_trajectory: List[Point] = []
 
         for track_id, entry in self._lost_pool.items():
+            if excluded_track_ids and track_id in excluded_track_ids:
+                continue
             distance = math.hypot(centroid.x - entry["centroid"].x, centroid.y - entry["centroid"].y)
-            if distance > self._max_distance:
+            if distance > max_distance:
                 continue
             score = self._similarity(histogram, entry["histogram"])
             if score > best_score:
@@ -128,7 +148,7 @@ class TrackContinuityGuard:
                 best_id = track_id
                 best_trajectory = entry["trajectory"]
 
-        if best_id is not None and best_score >= self._similarity_threshold:
+        if best_id is not None and best_score >= similarity_threshold:
             del self._lost_pool[best_id]
             logger.info(
                 f"[ContinuityGuard] Re-associated as lost track {best_id} "

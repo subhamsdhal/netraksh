@@ -27,6 +27,9 @@ describe('production truth state derivation', () => {
       node: 'READY', source: 'NOT LOADED', analysis: 'IDLE', telemetry: 'NONE',
     });
     expect(deriveCameraOperationalState({ nodeStatus: 'READY', telemetry: { timestamp: 1000 }, now: 1010_000 }).analysis).toBe('LIVE');
+    expect(deriveCameraOperationalState({ nodeStatus: 'READY', sourceState: { restoring: true }, telemetry: null })).toEqual({
+      node: 'READY', source: 'LOADING', analysis: 'RESTORING', telemetry: 'RESTORING',
+    });
   });
 
   it('does not claim an unreported capability', () => {

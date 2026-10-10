@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     EVIDENCE_STORAGE_BACKEND: str = "local"
     EVIDENCE_CLIPS_DIR: str = "edge/data/clips"
 
-    OBJECT_STORAGE_PROVIDER: str = "local"  # "local" | "s3"
+    OBJECT_STORAGE_PROVIDER: str = "local"  # "local" | "s3" | "postgres"
     # Required when OBJECT_STORAGE_PROVIDER=s3:
     OBJECT_STORAGE_ENDPOINT: Optional[str] = None   # e.g. https://s3.amazonaws.com
     OBJECT_STORAGE_BUCKET: Optional[str] = None     # S3 bucket name

@@ -71,6 +71,7 @@ _scenario: dict = {
     "video_session_id": None,
     "analysis_state": "READY",
     "analysis_generation": 0,
+    "latest_analysis_session_id": None,
     "should_restart": False,
     "initialized": False,
 }
@@ -141,19 +142,51 @@ def _materialize_remote_source(data: dict, camera_id: str) -> dict:
         bundled["video_session_id"] = None
         bundled.pop("download_url", None)
         return bundled
+    def unavailable_source() -> dict:
+        unavailable = dict(data)
+        unavailable["source_unavailable"] = True
+        unavailable["video_source"] = None
+        unavailable.pop("download_url", None)
+        return unavailable
+
+    if data.get("camera_id") not in {None, camera_id}:
+        logger.warning("[DemoRunner] Rejecting control for another camera")
+        return unavailable_source()
     download_url = str(data.get("download_url") or "").strip()
     session_id = str(data.get("video_session_id") or "").strip()
     if not download_url or not session_id:
-        return data
+        return unavailable_source()
     try:
         session_id = str(__import__("uuid").UUID(session_id))
     except (ValueError, AttributeError):
         logger.warning("[DemoRunner] Ignoring remote source with invalid session ID")
-        return data
+        return unavailable_source()
+    media_id = str(data.get("media_id") or "")
+    expected_sha256 = str(data.get("media_sha256") or "").lower()
+    expected_size = data.get("media_size_bytes")
+    if media_id:
+        expected_key = f"video-sessions/{camera_id}/{session_id}/source.mp4"
+        if (data.get("camera_id") != camera_id
+                or media_id != expected_key or data.get("video_source") != f"object://{media_id}"
+                or not isinstance(data.get("source_generation"), int)
+                or data["source_generation"] < 1
+                or len(expected_sha256) != 64 or not all(c in "0123456789abcdef" for c in expected_sha256)
+                or not isinstance(expected_size, int) or not 0 < expected_size <= 49_000_000):
+            logger.warning("[DemoRunner] Rejecting mismatched PostgreSQL media identity")
+            return unavailable_source()
     safe_source_name = str(data.get("source_name") or "normalized upload").replace("\r", " ").replace("\n", " ")[:160]
 
     logical_source = str(data.get("video_source") or "").removeprefix("object://")
     parsed = urlparse(download_url)
+    request_headers = {}
+    if not parsed.scheme:
+        if not download_url.startswith("/api/dashboard/video/edge-media/"):
+            return unavailable_source()
+        backend_url = os.environ.get("BACKEND_URL", "http://localhost:8443").rstrip("/")
+        download_url = f"{backend_url}{download_url}"
+        token = os.environ.get("EDGE_AUTH_TOKEN", "")
+        if token:
+            request_headers["Authorization"] = f"Bearer {token}"
     suffix = Path(logical_source).suffix.lower() or Path(parsed.path).suffix.lower()
     if suffix not in {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}:
         suffix = ".video"
@@ -165,15 +198,23 @@ def _materialize_remote_source(data: dict, camera_id: str) -> dict:
     )
     destination = cache_root / camera_id / f"{session_id}{suffix}"
     if destination.is_file() and destination.stat().st_size > 0:
-        hydrated = dict(data)
-        hydrated["video_source"] = str(destination)
-        logger.info(
-            "[DemoRunner] Durable source cache ready camera_id=%s session=%s source=%s",
-            camera_id,
-            session_id[:8],
-            safe_source_name,
-        )
-        return hydrated
+        if media_id:
+            digest = hashlib.sha256()
+            with open(destination, "rb") as cached:
+                for chunk in iter(lambda: cached.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if destination.stat().st_size != expected_size or digest.hexdigest() != expected_sha256:
+                destination.unlink(missing_ok=True)
+        if destination.is_file():
+            hydrated = dict(data)
+            hydrated["video_source"] = str(destination)
+            logger.info(
+                "[DemoRunner] Durable source cache ready camera_id=%s session=%s source=%s",
+                camera_id,
+                session_id[:8],
+                safe_source_name,
+            )
+            return hydrated
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     part_path = destination.with_suffix(destination.suffix + ".part")
@@ -183,16 +224,23 @@ def _materialize_remote_source(data: dict, camera_id: str) -> dict:
 
         timeout = httpx.Timeout(connect=5.0, read=120.0, write=10.0, pool=5.0)
         total = 0
-        with httpx.stream("GET", download_url, timeout=timeout, follow_redirects=True) as response:
+        digest = hashlib.sha256()
+        with httpx.stream("GET", download_url, headers=request_headers, timeout=timeout, follow_redirects=not bool(request_headers)) as response:
             response.raise_for_status()
+            if media_id and (response.headers.get("X-Video-Media-ID") != media_id
+                             or response.headers.get("X-Video-SHA256", "").lower() != expected_sha256):
+                raise ValueError("remote media identity headers do not match control")
             with open(part_path, "wb") as handle:
                 for chunk in response.iter_bytes(1024 * 1024):
                     total += len(chunk)
                     if total > max_bytes:
                         raise ValueError("remote video exceeds EDGE_MAX_SOURCE_BYTES")
+                    digest.update(chunk)
                     handle.write(chunk)
         if total == 0:
             raise ValueError("remote video is empty")
+        if media_id and (total != expected_size or digest.hexdigest() != expected_sha256):
+            raise ValueError("remote media size or checksum does not match control")
         os.replace(part_path, destination)
     except Exception as exc:
         part_path.unlink(missing_ok=True)
@@ -202,11 +250,7 @@ def _materialize_remote_source(data: dict, camera_id: str) -> dict:
             type(exc).__name__,
             f" (HTTP {status_code})" if status_code is not None else "",
         )
-        unavailable = dict(data)
-        unavailable["source_unavailable"] = True
-        unavailable["video_source"] = None
-        unavailable.pop("download_url", None)
-        return unavailable
+        return unavailable_source()
     hydrated = dict(data)
     hydrated["video_source"] = str(destination)
     logger.info(
@@ -245,9 +289,9 @@ def _control_seek_target(
     return target
 
 
-def _camera2_durable_source_clock(camera_id: str, source_session_id: object) -> bool:
-    """Keep Camera 2's stored one-shot source on its decoder's media clock."""
-    return camera_id == "cam-checkpoint-01" and bool(source_session_id)
+def _stored_file_source_clock(camera_id: str, source_session_id: object) -> bool:
+    """Keep stored Camera 1/2 analyses on the decoder's media clock."""
+    return camera_id in {"cam-border-01", "cam-checkpoint-01"} and bool(source_session_id)
 
 
 def _apply_control_sync(data: dict) -> bool:
@@ -293,6 +337,7 @@ def _apply_control_sync(data: dict) -> bool:
     new_scenario = data.get("scenario", "normal")
     _scenario["analysis_state"] = str(data.get("analysis_state") or "READY").upper()
     _scenario["analysis_generation"] = int(data.get("analysis_generation") or 0)
+    _scenario["latest_analysis_session_id"] = data.get("latest_analysis_session_id")
     _scenario["source_generation"] = data.get("source_generation")
     new_video_time = data.get("video_time")
 
@@ -322,9 +367,59 @@ def _apply_control_sync(data: dict) -> bool:
     return True
 
 
-def _durable_pipeline_allowed(session_id: str | None, lifecycle: str, scenario: str) -> bool:
-    """A durable replay may run only under one coherent control contract."""
-    return bool(session_id) and lifecycle.upper() in {"WAKING", "ACTIVE"} and scenario == "normal"
+def _durable_pipeline_allowed(
+    session_id: str | None,
+    lifecycle: str,
+    scenario: str,
+    latest_analysis_session_id: str | None = None,
+) -> bool:
+    """Allow only a generation that has not already been claimed by a run.
+
+    ACTIVE means the backend has accepted telemetry from a concrete analysis
+    session.  If the edge process is subsequently replaced, starting a new
+    local UUID would fork that generation and replay the source from frame 1.
+    The original process does not call this gate again while its pipeline is
+    running, so a fresh process must wait for an explicit interruption and
+    reanalysis instead of silently creating a second run.
+    """
+    if not session_id or scenario != "normal":
+        return False
+    lifecycle = lifecycle.upper()
+    if lifecycle == "WAKING":
+        return not latest_analysis_session_id
+    return False
+
+
+def _persist_durable_eof(backend_url: str, token: str, payload: dict) -> bool:
+    """Idempotently persist the exact completed generation across short 502s."""
+    import httpx
+
+    url = f"{backend_url}/api/dashboard/video/internal-complete"
+    with httpx.Client(timeout=httpx.Timeout(connect=5, read=10, write=10, pool=5)) as client:
+        for attempt in range(5):
+            try:
+                response = client.post(
+                    url, headers={"Authorization": f"Bearer {token}"}, json=payload,
+                )
+                if response.status_code == 200:
+                    return True
+                logger.warning(
+                    "[DemoRunner] durable EOF response camera_id=%s generation=%s run_id=%s status=%s attempt=%s",
+                    payload["camera_id"], payload["analysis_generation"],
+                    payload["analysis_session_id"], response.status_code, attempt + 1,
+                )
+                retryable = response.status_code in {429, 502, 503, 504}
+            except httpx.RequestError as exc:
+                logger.warning(
+                    "[DemoRunner] durable EOF transport error camera_id=%s generation=%s run_id=%s error_type=%s attempt=%s",
+                    payload["camera_id"], payload["analysis_generation"],
+                    payload["analysis_session_id"], type(exc).__name__, attempt + 1,
+                )
+                retryable = True
+            if not retryable or attempt == 4:
+                return False
+            time.sleep(min(0.5 * (2 ** attempt), 4.0))
+    return False
 
 
 def _apply_live_control(adapter, sync_client, scenario: str) -> None:
@@ -514,12 +609,12 @@ class DemoAwareEdgePipeline(EdgePipeline):
         scenario = _scenario["current"]
 
         # -------------------------------------------------------------
-        # SYNCHRONIZATION FIX:
-        # Override OpenCV's internal video_time with the authoritative
-        # extrapolated browser clock so that telemetry payloads match exactly.
+        # A restored, one-shot source uses the decoder's media time. Browser
+        # preview position is not an analysis clock; applying it here can
+        # stamp frame N with the time of a different frame.
         # -------------------------------------------------------------
         if (os.environ.get("DEMO_LOOP_VIDEO", "true").lower() != "true"
-                and not _camera2_durable_source_clock(self.camera_id, self.config.get("source_stream_id"))):
+                and not _stored_file_source_clock(self.camera_id, self.config.get("source_stream_id"))):
             browser_time = _scenario.get("video_time", 0.0)
             browser_updated = _scenario.get("video_time_updated_at", time.time())
             if scenario == "paused":
@@ -603,7 +698,7 @@ class DemoAwareEdgePipeline(EdgePipeline):
                     continue
 
                 # Check for explicit seek requests
-                if _camera2_durable_source_clock(self.camera_id, self.config.get("source_stream_id")):
+                if _stored_file_source_clock(self.camera_id, self.config.get("source_stream_id")):
                     # Browser preview position is not an analysis seek command.
                     # Replaying a completed source is handled by a new run.
                     time.sleep(1.0)
@@ -731,12 +826,25 @@ def run_demo_pipeline(
         # explicit START creates a coherent WAKING/ACTIVE generation. A
         # contradictory WAKING+paused record must not open the source and
         # spin a paused pipeline with zero processed frames.
-        if current_session and not _durable_pipeline_allowed(current_session, lifecycle, scenario):
+        latest_analysis_session_id = _scenario.get("latest_analysis_session_id")
+        if current_session and not _durable_pipeline_allowed(
+            current_session,
+            lifecycle,
+            scenario,
+            latest_analysis_session_id,
+        ):
             if lifecycle in {"WAKING", "ACTIVE"} and scenario != "normal":
                 logger.warning(
                     "[DemoRunner] Control state inconsistent: lifecycle=%s scenario=%s; "
                     "waiting for normalized START control",
                     lifecycle, scenario,
+                )
+            elif lifecycle == "ACTIVE" and latest_analysis_session_id:
+                logger.warning(
+                    "[DemoRunner] Durable generation %s already belongs to analysis session %s; "
+                    "replacement process will not fork the run",
+                    _scenario.get("analysis_generation", 0),
+                    str(latest_analysis_session_id)[:8],
                 )
             else:
                 logger.info(
@@ -787,6 +895,15 @@ def run_demo_pipeline(
             on_run_state("RUNNING", pipeline)
         try:
             pipeline.start()
+        except BaseException as exc:
+            logger.error(
+                "[DemoRunner] pipeline terminated unexpectedly camera_id=%s generation=%s run_id=%s last_frame=%s last_video_time=%s error_type=%s",
+                camera_id, config["analysis_generation"], pipeline.stream_id,
+                getattr(pipeline, "_last_processed_frame_index", None),
+                getattr(pipeline, "_last_video_time", None),
+                type(exc).__name__,
+            )
+            raise
         finally:
             if on_run_state:
                 on_run_state("FINALIZING", pipeline)
@@ -806,37 +923,72 @@ def run_demo_pipeline(
             # uploaded session can be picked up without restarting the OS
             # process. The polling thread sets should_restart on a new ID.
             if _scenario.get("video_session_id"):
-                if pipeline.adapter.eof_reached and pipeline.adapter.state.name != "FAILED":
-                    try:
-                        import httpx
-                        headers = {"Authorization": f"Bearer {os.environ.get('EDGE_AUTH_TOKEN', '')}"}
-                        response = httpx.post(
-                            f"{backend_url}/api/dashboard/video/internal-complete",
-                            headers=headers,
-                            json={
-                                "camera_id": camera_id,
-                                "video_session_id": current_session,
-                                "analysis_session_id": pipeline.stream_id,
-                                "analysis_generation": _scenario.get("analysis_generation", 0),
-                                # Use the last frame actually processed by the
-                                # pipeline. CameraAdapter exposes
-                                # frames_received, not a frame_index property,
-                                # and that decoder counter can include frames
-                                # dropped before processing.
-                                "final_frame_index": getattr(pipeline, "_last_processed_frame_index", None),
-                                "final_video_time": getattr(pipeline, "_last_video_time", None),
-                            },
-                            timeout=10.0,
+                eof_persist_failed = bool(getattr(pipeline, "timeline_incomplete", False))
+                if pipeline.adapter.eof_reached and pipeline.adapter.state.name != "FAILED" and not eof_persist_failed:
+                    eof_payload = {
+                            "camera_id": camera_id,
+                            "video_session_id": current_session,
+                            "analysis_session_id": pipeline.stream_id,
+                            "analysis_generation": _scenario.get("analysis_generation", 0),
+                            # This is the last frame actually analyzed, not
+                            # the decoder's potentially ahead-of-work counter.
+                            "final_frame_index": getattr(pipeline, "_last_processed_frame_index", None),
+                            "final_video_time": getattr(pipeline, "_last_video_time", None),
+                    }
+                    if camera_id == "cam-border-01":
+                        final_sample = getattr(pipeline, "_final_authoritative_sample", None)
+                        processed_frame = eof_payload["final_frame_index"]
+                        processed_time = eof_payload["final_video_time"]
+                        if (
+                            not final_sample
+                            or processed_frame is None
+                            or processed_time is None
+                            or int(final_sample.get("frame_index", -1)) != int(processed_frame)
+                            or abs(float(final_sample.get("video_time", -1)) - float(processed_time)) > 0.002
+                        ):
+                            eof_persist_failed = True
+                            logger.error(
+                                "[DemoRunner] Camera 1 final sample identity mismatch; refusing completion "
+                                "generation=%s processed_frame=%s sample_frame=%s",
+                                _scenario.get("analysis_generation", 0), processed_frame,
+                                final_sample.get("frame_index") if final_sample else None,
+                            )
+                        else:
+                            eof_payload.update({
+                                "final_processed_frame_index": processed_frame,
+                                "final_processed_video_time": processed_time,
+                                "final_authoritative_sample_frame_index": final_sample["frame_index"],
+                                "final_authoritative_sample_video_time": final_sample["video_time"],
+                            })
+                    completed = (
+                        _persist_durable_eof(
+                            backend_url, os.environ.get("EDGE_AUTH_TOKEN", ""), eof_payload,
                         )
-                        response.raise_for_status()
+                        if not eof_persist_failed else False
+                    )
+                    if completed:
                         _scenario["analysis_state"] = "COMPLETED"
                         _scenario["current"] = "paused"
                         logger.info("[DemoRunner] Durable EOF persisted for generation %s", _scenario.get("analysis_generation", 0))
-                    except Exception as exc:
-                        logger.warning("[DemoRunner] Durable EOF callback failed: %s", type(exc).__name__)
-                if on_run_state:
-                    on_run_state("IDLE", None)
+                        if camera_id == "cam-border-01":
+                            # Publish COMPLETED only after the backend has
+                            # acknowledged the exact durable terminal sample.
+                            pipeline._publish_analysis_state("COMPLETED")
+                    else:
+                        eof_persist_failed = True
+                        if camera_id == "cam-border-01":
+                            pipeline._publish_analysis_state("FAILED_EOF")
+                        logger.error(
+                            "[DemoRunner] Durable EOF not persisted camera_id=%s generation=%s run_id=%s final_frame=%s",
+                            camera_id, _scenario.get("analysis_generation", 0),
+                            pipeline.stream_id, getattr(pipeline, "_last_processed_frame_index", None),
+                        )
                 logger.info("[DemoRunner] Uploaded video completed; waiting for the next session...")
+                if on_run_state:
+                    if eof_persist_failed:
+                        on_run_state("FAILED_EOF", pipeline)
+                    else:
+                        on_run_state("IDLE", None)
                 while not _scenario.get("should_restart"):
                     # Only restart if scenario is normal AND video_time explicitly returns to 0 (replay)
                     if _scenario.get("analysis_state") in {"WAKING", "ACTIVE"} and _scenario.get("current") == "normal" and _scenario.get("video_time", -1) == 0:
@@ -848,6 +1000,8 @@ def run_demo_pipeline(
                 _scenario["should_restart"] = False
                 continue
             logger.info("[DemoRunner] Pipeline exited normally. Ending loop.")
+            if on_run_state:
+                on_run_state("IDLE", None)
             break
 
 

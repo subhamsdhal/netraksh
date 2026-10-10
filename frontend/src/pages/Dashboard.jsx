@@ -11,7 +11,7 @@ import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, completedRunMetrics, completedRunSummaryIdentity, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, latestEventAtOrBeforeFrame, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, selectedRunContext, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring, uploadedRunComparison } from '../utils/dashboardScope';
 import { canReuseRestoredMedia, updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
-import { analysisLifecyclePresentation, applyReplayResult, canReanalyzeSource, fetchWithTimeout, reanalyzeRequestPayload, restoringSourceState, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, canReanalyzeSource, fetchPreparationForRestore, fetchReadOnlyWithRetry, fetchWithTimeout, normalizeReadyUploadResponse, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 import { replayTimelineAssessment } from '../utils/trackingTimeline';
 import { adminDiagnosticsEnabled as isAdminDiagnosticsEnabled } from '../utils/adminDiagnostics';
@@ -130,6 +130,7 @@ export default function Dashboard() {
   });
   const [now, setNow] = useState(Date.now());
   const [backendStatus, setBackendStatus] = useState('CHECKING');
+  const [restoreReady, setRestoreReady] = useState(false);
   const [controlRequests, setControlRequests] = useState({});
   const fileInputRefs = useRef({});
   const uploadRequestsRef = useRef({});
@@ -194,7 +195,7 @@ export default function Dashboard() {
     throw lastTransportError || new Error('VIDEO PREPARATION TIMED OUT');
   };
 
-  const hydratePreparedUpload = async (cameraId, prepared, requestIsCurrent) => {
+  const hydratePreparedUpload = async (cameraId, prepared, requestIsCurrent, uploadRequestId = null) => {
     if (!prepared || !requestIsCurrent()) return false;
     const preparedSource = sourceStateFromPreparation(prepared);
     if (!preparedSource) throw new Error('VIDEO PREPARATION COMPLETED WITHOUT A VALID SOURCE');
@@ -208,6 +209,15 @@ export default function Dashboard() {
       uploadError: null,
       analysisStartFailed: false,
     });
+    if (uploadRequestId && requestIsCurrent()) {
+      await runUploadAutoStart({
+        claims: uploadAutoStartClaimsRef.current,
+        cameraId,
+        sourceState: preparedSource,
+        uploadRequestId,
+        start: handleStartAnalysis,
+      });
+    }
     if (prepared.preview_url) {
       try {
         const mediaResponse = await authFetch(prepared.preview_url);
@@ -391,6 +401,30 @@ export default function Dashboard() {
     }
   };
 
+  const handleInterruptGeneration = async (cameraId, sourceState) => {
+    const response = await authFetch('/api/dashboard/video/interrupt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        camera_id: cameraId,
+        video_session_id: sourceState.sourceId,
+        analysis_generation: sourceState.analysisGeneration,
+        reason: 'deployment_interrupted',
+      }),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.detail || `INTERRUPT FAILED — HTTP ${response.status}`);
+    setSlotSources((current) => ({
+      ...current,
+      [cameraId]: {
+        ...(current[cameraId] || sourceState),
+        analysisState: 'INTERRUPTED',
+        runState: 'INTERRUPTED',
+      },
+    }));
+    return result;
+  };
+
   useEffect(() => {
     cameraMediaRef.current = cameraMedia;
   }, [cameraMedia]);
@@ -486,6 +520,14 @@ export default function Dashboard() {
     const id = setInterval(check, 10000);
     return () => { mounted = false; clearInterval(id); };
   }, []);
+
+  // Once the backend has been ready during this Dashboard mount, keep source
+  // restoration alive through brief readiness-probe failures. Keying the
+  // restore effect directly to backendStatus let its cleanup discard an
+  // authoritative current-source response that was already in flight.
+  useEffect(() => {
+    if (backendStatus === 'HEALTHY') setRestoreReady(true);
+  }, [backendStatus]);
 
   const cameraIds = Array.from(new Set([
     // Saved slots are layout only.  Including them while a cold backend is
@@ -673,7 +715,7 @@ export default function Dashboard() {
     if (visibleCameraIds[0] && !visibleCameraIds.includes(selectedCameraId)) setSelectedCameraId(visibleCameraIds[0]);
   }, [cameraSlots.join('|'), visibleCameraIds.join('|')]);
   useEffect(() => {
-    if (backendStatus !== 'HEALTHY') return undefined;
+    if (!restoreReady) return undefined;
     let mounted = true;
     setSlotSources((current) => {
       const next = { ...current };
@@ -691,18 +733,11 @@ export default function Dashboard() {
         }));
         try {
           recordRestoreDiagnostic({ stage: 'PREPARATION_CHECK_PENDING' });
-          let preparationResponse = null;
-          try {
-            preparationResponse = await fetchWithTimeout(
-              authFetch,
-              `/api/dashboard/video/preparation/current?camera_id=${encodeURIComponent(cameraId)}`,
-              5000,
-            );
-            recordRestoreDiagnostic({ stage: 'PREPARATION_CHECK_COMPLETE', http_status: preparationResponse.status });
-          } catch (error) {
-            if (error?.name !== 'AbortError') throw error;
-            recordRestoreDiagnostic({ stage: 'PREPARATION_CHECK_TIMEOUT', timeout_ms: 5000 });
-          }
+          const preparationResponse = await fetchPreparationForRestore(
+            authFetch,
+            `/api/dashboard/video/preparation/current?camera_id=${encodeURIComponent(cameraId)}`,
+            recordRestoreDiagnostic,
+          );
           if (preparationResponse?.ok && mounted) {
             const preparation = await preparationResponse.json();
             const preparationState = String(preparation?.state || '').toUpperCase();
@@ -742,7 +777,14 @@ export default function Dashboard() {
             }
           }
           recordRestoreDiagnostic({ stage: 'CURRENT_SOURCE_LOOKUP_PENDING' });
-          const response = await authFetch(`/api/dashboard/video/current?camera_id=${encodeURIComponent(cameraId)}`);
+          const response = await fetchReadOnlyWithRetry(
+            authFetch,
+            `/api/dashboard/video/current?camera_id=${encodeURIComponent(cameraId)}`,
+            {
+              timeoutMs: 15000,
+              onRetry: (retry) => recordRestoreDiagnostic({ stage: 'CURRENT_SOURCE_LOOKUP_RETRY', ...retry }),
+            },
+          );
           recordRestoreDiagnostic({ stage: 'CURRENT_SOURCE_LOOKUP_COMPLETE', http_status: response.status });
           if (!response.ok || !mounted) return;
           authoritativeResponse = true;
@@ -774,6 +816,7 @@ export default function Dashboard() {
                     ...current[cameraId],
                     mediaUrl: null,
                     sessionId: restoredSource.sourceMode === 'durable' ? state.session_id : null,
+                    previewLoading: Boolean(state.preview_url && !reuseLoadedMedia),
                     playbackEnded: false,
                     uploadError: null,
                     isUploading: false,
@@ -783,43 +826,75 @@ export default function Dashboard() {
             }
             if (state.preview_url && !reuseLoadedMedia) {
               recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_PENDING' });
-              const mediaResponse = await authFetch(state.preview_url);
-              recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_COMPLETE', http_status: mediaResponse.status });
-              if (mediaResponse.ok) {
-                const blobUrl = URL.createObjectURL(await mediaResponse.blob());
-                setCameraMedia((current) => {
-                  const previous = current[cameraId]?.mediaUrl;
-                  if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous);
-                  return {
+              try {
+                const mediaResponse = await fetchReadOnlyWithRetry(
+                  authFetch,
+                  state.preview_url,
+                  {
+                    timeoutMs: 30000,
+                    attempts: 2,
+                    onRetry: (retry) => recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_RETRY', ...retry }),
+                  },
+                );
+                recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_COMPLETE', http_status: mediaResponse.status });
+                if (mediaResponse.ok) {
+                  const blobUrl = URL.createObjectURL(await mediaResponse.blob());
+                  setCameraMedia((current) => {
+                    const previous = current[cameraId]?.mediaUrl;
+                    if (previous?.startsWith('blob:')) URL.revokeObjectURL(previous);
+                    return {
+                      ...current,
+                      [cameraId]: {
+                        ...current[cameraId],
+                        mediaUrl: blobUrl,
+                        mediaType: 'video',
+                        previewLoading: false,
+                        sessionId: state.session_id,
+                        sessionStartTime: Date.now(),
+                        playbackEnded: false,
+                        uploadError: null,
+                        isUploading: false,
+                      },
+                    };
+                  });
+                  recordRestoreDiagnostic({ stage: 'PREVIEW_RESTORED' });
+                } else {
+                  if (restoredSource.sourceMode === 'durable') {
+                    // Preview transport is independent of durable activation.
+                    // Keep the session authoritative when preview fetch fails.
+                    setCameraMedia((current) => ({
+                      ...current,
+                      [cameraId]: {
+                        ...current[cameraId],
+                        mediaUrl: null,
+                        previewLoading: false,
+                        sessionId: state.session_id,
+                        uploadError: 'PREVIEW LOAD FAILED — VIDEO IS STILL STORED',
+                        isUploading: false,
+                      },
+                    }));
+                  } else {
+                    updateCameraMedia(cameraId, { previewLoading: false });
+                  }
+                  recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_FAILED', http_status: mediaResponse.status });
+                }
+              } catch (error) {
+                if (restoredSource.sourceMode === 'durable') {
+                  setCameraMedia((current) => ({
                     ...current,
                     [cameraId]: {
                       ...current[cameraId],
-                      mediaUrl: blobUrl,
-                      mediaType: 'video',
+                      mediaUrl: null,
+                      previewLoading: false,
                       sessionId: state.session_id,
-                      sessionStartTime: Date.now(),
-                      playbackEnded: false,
-                      uploadError: null,
+                      uploadError: 'PREVIEW LOAD FAILED — VIDEO IS STILL STORED',
                       isUploading: false,
                     },
-                  };
-                });
-                recordRestoreDiagnostic({ stage: 'PREVIEW_RESTORED' });
-              } else if (restoredSource.sourceMode === 'durable') {
-                // Preview transport is independent of durable activation. Do
-                // not replace a valid cloud session with the bundled demo just
-                // because a redirect/blob fetch was temporarily unavailable.
-                setCameraMedia((current) => ({
-                  ...current,
-                  [cameraId]: {
-                    ...current[cameraId],
-                    mediaUrl: null,
-                    sessionId: state.session_id,
-                    uploadError: 'PREVIEW LOAD FAILED — VIDEO IS STILL STORED',
-                    isUploading: false,
-                  },
-                }));
-                recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_FAILED', http_status: mediaResponse.status });
+                  }));
+                } else {
+                  updateCameraMedia(cameraId, { previewLoading: false });
+                }
+                recordRestoreDiagnostic({ stage: 'PREVIEW_FETCH_ERROR', error_name: error?.name || 'Error' });
               }
             }
           } else {
@@ -835,7 +910,33 @@ export default function Dashboard() {
     };
     restoreScopedSources();
     return () => { mounted = false; };
-  }, [visibleCameraIds.join('|'), backendStatus]);
+  }, [visibleCameraIds.join('|'), restoreReady]);
+  useEffect(() => {
+    // Camera 1's backend worker lease is authoritative. An open page must
+    // observe an interrupted or completed generation without a manual reload.
+    const cameraId = 'cam-border-01';
+    const source = slotSources[cameraId];
+    if (backendStatus !== 'HEALTHY' || source?.sourceMode !== 'durable'
+        || !['WAKING', 'ACTIVE', 'LIVE', 'RUNNING'].includes(String(source.analysisState || '').toUpperCase())) return undefined;
+    let mounted = true;
+    const checkTerminal = async () => {
+      try {
+        const response = await fetchWithTimeout(
+          authFetch, `/api/dashboard/video/current?camera_id=${cameraId}`, 5000,
+        );
+        if (!mounted || !response.ok) return;
+        const authority = await response.json();
+        if (mounted) setSlotSources((current) => {
+          const existing = current[cameraId];
+          const settled = reconcileTerminalCameraSource(existing, authority);
+          return settled === existing ? current : { ...current, [cameraId]: settled };
+        });
+      } catch (_) { /* A transient read failure cannot change lifecycle authority. */ }
+    };
+    checkTerminal();
+    const id = window.setInterval(checkTerminal, 10_000);
+    return () => { mounted = false; window.clearInterval(id); };
+  }, [backendStatus, slotSources['cam-border-01']?.sourceId, slotSources['cam-border-01']?.analysisGeneration, slotSources['cam-border-01']?.analysisState]);
   useEffect(() => {
     if (operationalCameraIdsNow.length !== 1) return;
     const cameraId = operationalCameraIdsNow[0];
@@ -874,11 +975,18 @@ export default function Dashboard() {
   const activeTelemetryReceivedAt = activeCameraId ? scopedLiveTracks[activeCameraId]?.timestamp : null;
   const telemetryAgeMs = activeTelemetryReceivedAt == null ? null : now - activeTelemetryReceivedAt;
   const analysisState = activeCameraId ? scopedLiveTracks[activeCameraId]?.analysis_state : null;
-  const activeSourceState = activeCameraId ? slotSources[activeCameraId] : null;
+  // A route remount clears page-local state before the backend has answered.
+  // Treat that absence as pending authority, never as proof that the source
+  // was deleted. The API response replaces this placeholder with the durable
+  // source or an explicit UNAVAILABLE state.
+  const activeSourceState = activeCameraId
+    ? (slotSources[activeCameraId] || restoringSourceState())
+    : null;
   const activePresentedTelemetry = activeCameraId ? presentedTelemetry[activeCameraId] : null;
   const activeUploadState = visibleUploadState(activeMediaState, activeSourceState);
   const isUploading = activeUploadState.isUploading;
-  const telemetryStatus = !isConnected ? 'DISCONNECTED'
+  const telemetryStatus = activeSourceState?.restoring ? 'RESTORING'
+    : !isConnected ? 'DISCONNECTED'
     : telemetryAgeMs == null ? lifecycleStatus(activeSourceState, null, now)
     : telemetryStatusAt(scopedLiveTracks[activeCameraId], now);
   const activeProcessingFps = processingFpsForTelemetry(activePresentedTelemetry, now);
@@ -890,9 +998,15 @@ export default function Dashboard() {
   const topNodeKey = activeCameraId === 'cam-border-01' ? 'camBorder01' : activeCameraId === 'cam-checkpoint-01' ? 'camCheckpoint01' : null;
   const topNodeReady = topNodeKey && startupReadiness[topNodeKey]?.status === 'READY';
   const activeCameraHealth = cameraHealthPresentation(health[activeCameraId], now);
-  const activeCameraHealthLabel = ['PAUSED', 'WAKING', 'WAITING'].includes(telemetryStatus) || (!health[activeCameraId] && activeSourceState?.sourceMode)
+  const activeCameraHealthLabel = activeSourceState?.restoring ? 'RESTORING CAMERA STATE'
+    : ['PAUSED', 'WAKING', 'WAITING'].includes(telemetryStatus) || (!health[activeCameraId] && activeSourceState?.sourceMode)
     ? (telemetryStatus === 'WAKING' ? 'AWAITING CURRENT-RUN HEALTH SAMPLE' : `N/A · ANALYSIS ${telemetryStatus}`)
     : `${activeCameraHealth.health}${activeCameraHealth.health !== 'OK' && activeCameraHealth.reason !== 'N/A' ? ` · ${String(activeCameraHealth.reason).replace(/_/g, ' ')}` : ''}`;
+  const activeHistoryPendingLabel = activeSourceState?.restoring
+    ? 'RESTORING CAMERA STATE'
+    : runSummaryLoading[activeCameraId]
+      ? 'LOADING COMPLETED RUN'
+      : null;
 
   const eventTimestampMs = (value) => {
     if (!value) return NaN;
@@ -949,7 +1063,14 @@ export default function Dashboard() {
       const params = new URLSearchParams({ camera_id: identity.cameraId, stream_id: identity.streamId });
       if (identity.analysisGeneration != null) params.set('analysis_generation', String(identity.analysisGeneration));
       try {
-        const response = await authFetch(`/system/analysis-runs/${encodeURIComponent(identity.analysisSessionId)}?${params.toString()}`);
+        const response = await fetchReadOnlyWithRetry(
+          authFetch,
+          `/system/analysis-runs/${encodeURIComponent(identity.analysisSessionId)}?${params.toString()}`,
+          {
+            timeoutMs: 10000,
+            onRetry: (retry) => recordSummaryDiagnostic({ stage: 'RUN_SUMMARY_FETCH_RETRY', ...retry }),
+          },
+        );
         const summary = response.ok ? await response.json() : null;
         recordSummaryDiagnostic({
           stage: 'RUN_SUMMARY_FETCH_COMPLETE',
@@ -1117,11 +1238,54 @@ export default function Dashboard() {
       }
     }
 
-    if (!uploaded?.preparation_job_id) throw new Error('VIDEO UPLOAD ACCEPTED WITHOUT A PREPARATION JOB ID');
-    if (String(uploaded.state || uploaded.source_state || '').toUpperCase() !== 'READY') {
-      uploaded = await waitForPreparation(cameraId, uploaded.preparation_job_id, requestIsCurrent);
+    try {
+      uploaded = normalizeReadyUploadResponse(uploaded, cameraId, uploadRequestId);
+      if (uploaded?.local_only) {
+        setSlotSources(current => ({
+          ...current,
+          [cameraId]: {
+            ...current[cameraId],
+            restoring: false,
+            sourceMode: null,
+            sourceId: null,
+            sourceName: uploaded.source_name || current[cameraId]?.sourceName || 'Uploaded video',
+            runState: 'ERROR',
+            analysisState: 'ERROR',
+          },
+        }));
+        updateCameraMedia(cameraId, {
+          mediaUrl: null,
+          isUploading: false,
+          uploadStage: 'ERROR',
+          uploadProgress: null,
+          uploadError: 'UPLOAD RECEIVED, BUT PERSISTENT MEDIA STORAGE IS REQUIRED BEFORE ANALYSIS OR REPLAY',
+        });
+        delete uploadRequestsRef.current[cameraId];
+        return;
+      }
+      if (!uploaded?.preparation_job_id && (uploaded?.local_only || String(uploaded?.source_state || '').toUpperCase() !== 'READY')) {
+        throw new Error('VIDEO UPLOAD RESPONSE DID NOT IDENTIFY A READY SOURCE');
+      }
+      if (String(uploaded.state || uploaded.source_state || '').toUpperCase() !== 'READY') {
+        uploaded = await waitForPreparation(cameraId, uploaded.preparation_job_id, requestIsCurrent);
+      }
+      if (!uploaded.preparation_job_id) {
+        uploaded = { ...uploaded, state: 'READY', analysis_state: 'READY', preparation_job_id: uploadRequestId };
+      }
+      await hydratePreparedUpload(cameraId, uploaded, requestIsCurrent, uploadRequestId);
+    } catch (error) {
+      if (!requestIsCurrent()) return;
+      console.error('Upload completion error:', error);
+      updateCameraMedia(cameraId, {
+        mediaUrl: null,
+        isUploading: false,
+        uploadStage: 'ERROR',
+        uploadProgress: null,
+        uploadError: error?.message || 'VIDEO PREPARATION FAILED',
+      });
+      delete uploadRequestsRef.current[cameraId];
+      return;
     }
-    await hydratePreparedUpload(cameraId, uploaded, requestIsCurrent);
     if (requestIsCurrent()) delete uploadRequestsRef.current[cameraId];
   };
 
@@ -1339,10 +1503,10 @@ export default function Dashboard() {
       <div className="dashboard-live-strip">
         <div><span>CAMERA</span><strong title={activeCamera?.displayId}>{activeCamera?.friendlyName || 'Not configured'}</strong></div>
         <div><span>CAMERA HEALTH</span><strong>{activeRunSummary && topNodeReady ? 'NODE READY · RUN COMPLETED' : activeCameraHealthLabel}</strong></div>
-        <div><span>DETECTOR FPS</span><strong>{topDetectorFps == null ? (activeRunSummary ? 'NOT REPORTED' : 'AWAITING ANALYZED SAMPLE') : Number(topDetectorFps).toFixed(2)}</strong></div>
-        <div><span>{activePresentedTelemetry ? 'CURRENT TRACKS' : 'FINAL TRACKS'}</span><strong>{activeRunMetrics?.track_count ?? (activeRunSummary ? 'NOT REPORTED' : 'AWAITING ANALYZED SAMPLE')}</strong></div>
-        <div><span>ANALYZED FRAME</span><strong>{activePresentedTelemetry?.frame_index ?? activeRunSummary?.final_frame_index ?? (activeRunSummary ? 'READY FOR ANALYZED REPLAY' : 'AWAITING ANALYZED SAMPLE')}</strong></div>
-        <div><span>SOURCE TIME</span><strong>{(activePresentedTelemetry?.video_time ?? activeRunSummary?.final_video_time) == null ? 'NOT REPORTED' : `${Number(activePresentedTelemetry?.video_time ?? activeRunSummary?.final_video_time).toFixed(2)}s`}</strong></div>
+        <div><span>DETECTOR FPS</span><strong>{topDetectorFps == null ? (activeHistoryPendingLabel || (activeRunSummary ? 'NOT REPORTED' : 'AWAITING ANALYZED SAMPLE')) : Number(topDetectorFps).toFixed(2)}</strong></div>
+        <div><span>{activePresentedTelemetry ? 'CURRENT TRACKS' : 'FINAL TRACKS'}</span><strong>{activeRunMetrics?.track_count ?? (activeHistoryPendingLabel || (activeRunSummary ? 'NOT REPORTED' : 'AWAITING ANALYZED SAMPLE'))}</strong></div>
+        <div><span>ANALYZED FRAME</span><strong>{activePresentedTelemetry?.frame_index ?? activeRunSummary?.final_frame_index ?? (activeHistoryPendingLabel || (activeRunSummary ? 'READY FOR ANALYZED REPLAY' : 'AWAITING ANALYZED SAMPLE'))}</strong></div>
+        <div><span>SOURCE TIME</span><strong>{(activePresentedTelemetry?.video_time ?? activeRunSummary?.final_video_time) == null ? (activeHistoryPendingLabel || 'NOT REPORTED') : `${Number(activePresentedTelemetry?.video_time ?? activeRunSummary?.final_video_time).toFixed(2)}s`}</strong></div>
         <div><span>LAST TELEMETRY</span><strong>{activeSourceState?.restoring || runSummaryLoading[activeCameraId] ? 'LOADING RUN HISTORY...' : telemetryStatus === 'COMPLETED' ? 'RUN COMPLETED · HISTORICAL TELEMETRY' : telemetryAgeMs == null ? (telemetryStatus === 'PAUSED' ? 'N/A · PAUSED' : telemetryStatus === 'WAKING' ? 'WAITING FOR FIRST CURRENT-RUN TELEMETRY' : 'Never') : formatTelemetryAge(telemetryAgeMs)}</strong></div>
       </div>
 
@@ -1351,16 +1515,24 @@ export default function Dashboard() {
           const cameraId = visibleCameraIds[slotIndex];
           const camera = cameraModels.find(item => item.cameraId === cameraId) || null;
           const telemetry = cameraId ? scopedLiveTracks[cameraId] : null;
-          const sourceState = cameraId ? slotSources[cameraId] : null;
+          const sourceState = cameraId
+            ? (slotSources[cameraId] || restoringSourceState())
+            : null;
+          const interruptedReady = String(sourceState?.analysisState || '').toUpperCase() === 'INTERRUPTED';
           const sessionId = analysisSessionIdForSource(telemetry, sourceState);
           const streamId = sourceState?.sourceId || null;
-          const cameraRunEvents = eventsForCameraRun(scopedRunEvents, cameraId, sessionId, streamId);
+          const cameraRunEvents = interruptedReady ? [] : eventsForCameraRun(scopedRunEvents, cameraId, sessionId, streamId);
           const latestCameraEvent = latestEventForSession(cameraRunEvents, cameraId, sessionId, streamId);
           const latestPlateEvent = latestPlateEventForSession(cameraRunEvents, cameraId, sessionId, streamId);
           const latestFaceEvent = latestFaceEventForSession(cameraRunEvents, cameraId, sessionId, streamId);
           const faceStatus = latestFaceEvent?.face_match_status || (latestFaceEvent?.face_match_person_id ? 'KNOWN' : latestFaceEvent ? 'UNKNOWN' : null);
           const faceLabel = latestFaceEvent?.watchlist_label || latestFaceEvent?.face_match_person_name || null;
-          const completedSummary = runSummaries[cameraId] || null;
+          const completedSummary = interruptedReady ? null : runSummaries[cameraId] || null;
+          const historyPendingLabel = sourceState?.restoring
+            ? 'RESTORING CAMERA STATE'
+            : runSummaryLoading[cameraId]
+              ? 'LOADING COMPLETED RUN'
+              : null;
           const replayAssessment = replayTimelineAssessment(
             completedSummary?.tracking_timeline_json || [],
             completedSummary || {},
@@ -1384,21 +1556,28 @@ export default function Dashboard() {
             ? 'RESTORING'
             : status === 'COMPLETED'
               ? 'COMPLETED'
-              : operational.analysis === 'LIVE'
-                ? 'LIVE'
+              : lifecycle === 'INTERRUPTED'
+                  ? 'READY'
+                : operational.analysis === 'LIVE'
+                  ? 'LIVE'
                 : lifecycle || (telemetryAvailable ? 'LIVE' : 'LOADED');
           const mediaState = cameraId ? (cameraMedia[cameraId] || {}) : {};
           const uploadState = visibleUploadState(mediaState, sourceState);
           const reanalyzeInFlight = Boolean(controlRequests[cameraId]);
           const reanalysisActive = ['STARTING', 'WAKING', 'ACTIVE', 'LIVE', 'RUNNING'].includes(lifecycle);
-          const baseAnalysisPresentation = analysisLifecyclePresentation(sourceState, mediaState, reanalyzeInFlight);
+          const baseAnalysisPresentation = analysisLifecyclePresentation(
+            sourceState,
+            mediaState,
+            reanalyzeInFlight,
+            { hideInterrupted: true },
+          );
           const analysisPresentation = mediaState.reanalyzeStartFailed
             ? { label: 'REANALYZE FAILED', badge: 'REANALYZE FAILED', tone: 'failed', retry: false }
             : baseAnalysisPresentation;
           const showReanalyzeControl = ['cam-border-01', 'cam-checkpoint-01'].includes(cameraId)
             && sourceState?.sourceMode === 'durable'
             && (canReanalyzeSource(cameraId, sourceState) || reanalyzeInFlight || reanalysisActive || mediaState.reanalyzeStartFailed);
-          const presentedSample = cameraId ? (presentedTelemetry[cameraId] || null) : null;
+          const presentedSample = cameraId && !interruptedReady ? (presentedTelemetry[cameraId] || null) : null;
           const isDemoReplay = Boolean(telemetry?.demo_replay || sourceState?.sourceMode === 'bundled');
           const statusLabel = analysisPresentation.badge;
           const cardFps = processingFpsForTelemetry(presentedSample, now);
@@ -1449,7 +1628,7 @@ export default function Dashboard() {
                   {!sourceState?.restoring && sourceState?.sourceName && <p className="dashboard-source-name">SOURCE: {sourceState.sourceName}</p>}
                   {!sourceState?.restoring && sourceState?.sourceMode && <p className="dashboard-source-name">MODE: {sourceState.sourceMode === 'durable' ? 'USER UPLOAD' : 'BUNDLED DEMO'} · ANALYSIS: {displayRunState}</p>}
                   <p className="dashboard-source-name">SUPPORTED: MP4 · AVI · MOV · MKV · WEBM · M4V</p>
-                  {mediaState.edgeStatus === 'WAKING' && !telemetryAvailable && <p className="dashboard-source-name">WAKING AI WORKER...</p>}
+                  {!completedRun && mediaState.edgeStatus === 'WAKING' && !telemetryAvailable && <p className="dashboard-source-name">WAKING AI WORKER...</p>}
                 </div>
                 <div className="dashboard-camera-card-controls">
                   <span className={`dashboard-camera-status status-${analysisPresentation.tone}`}>{statusLabel}</span>
@@ -1465,6 +1644,13 @@ export default function Dashboard() {
                       disabled={reanalyzeInFlight || reanalysisActive}
                       onClick={() => handleReanalyze(cameraId, sourceState)}
                     >{reanalyzeInFlight ? 'STARTING REANALYSIS…' : reanalysisActive ? 'ANALYZING…' : mediaState.reanalyzeStartFailed ? 'RETRY REANALYZE' : 'REANALYZE'}</button>}
+                    {diagnosticsEnabled && cameraId === 'cam-border-01' && ['WAKING', 'ACTIVE', 'LIVE'].includes(lifecycle) && <button
+                      type="button"
+                      className="btn btn-sm btn-outline"
+                      data-action="interrupt-analysis-generation"
+                      data-camera-id={cameraId}
+                      onClick={() => handleInterruptGeneration(cameraId, sourceState)}
+                    >INTERRUPT DEPLOYMENT-STALE RUN</button>}
                   </div>}
                   <select
                     aria-label={`Select camera slot ${slotIndex + 1}`}
@@ -1491,6 +1677,7 @@ export default function Dashboard() {
                     playbackEnded={Boolean(mediaState.playbackEnded)}
                     demoScenario={demoScenario}
                     mediaUrl={mediaState.mediaUrl || null}
+                    previewLoading={Boolean(mediaState.previewLoading)}
                     mediaType={mediaState.mediaType || 'video'}
                     currentFps={cardFps}
                     onUpload={() => triggerUpload(cameraId)}
@@ -1537,26 +1724,26 @@ export default function Dashboard() {
                 <span className="ai-context">OCR {capabilityLabel(capabilities?.anpr_ocr, 'AVAILABLE', 'UNAVAILABLE')}</span>
               </div>
               <div className="dashboard-camera-telemetry" aria-label={`ANPR result for ${cameraId || 'empty slot'}`}>
-                <span><b>ANPR OCR</b>{latestPlateEvent?.normalized_plate_text || latestPlateEvent?.plate_text || (capabilities?.anpr_ocr === false ? 'ANPR UNAVAILABLE' : 'NO PLATE READ IN THIS RUN')}</span>
-                <span><b>CONFIDENCE</b>{latestPlateEvent?.plate_confidence == null ? 'N/A' : `${Math.round(Number(latestPlateEvent.plate_confidence) * 100)}%`}</span>
-                <span><b>SOURCE</b>{latestPlateEvent ? `FRAME ${latestPlateEvent.frame_index ?? 'NOT REPORTED'} · ${Number.isFinite(Number(latestPlateEvent.video_time)) ? `${Number(latestPlateEvent.video_time).toFixed(2)}s` : 'TIME NOT REPORTED'}` : 'NO ACCEPTED READ'}</span>
+                <span><b>ANPR OCR</b>{historyPendingLabel || latestPlateEvent?.normalized_plate_text || latestPlateEvent?.plate_text || (capabilities?.anpr_ocr === false ? 'ANPR UNAVAILABLE' : 'NO PLATE READ IN THIS RUN')}</span>
+                <span><b>CONFIDENCE</b>{historyPendingLabel || (latestPlateEvent?.plate_confidence == null ? 'N/A' : `${Math.round(Number(latestPlateEvent.plate_confidence) * 100)}%`)}</span>
+                <span><b>SOURCE</b>{historyPendingLabel || (latestPlateEvent ? `FRAME ${latestPlateEvent.frame_index ?? 'NOT REPORTED'} · ${Number.isFinite(Number(latestPlateEvent.video_time)) ? `${Number(latestPlateEvent.video_time).toFixed(2)}s` : 'TIME NOT REPORTED'}` : 'NO ACCEPTED READ')}</span>
               </div>
               <div className="dashboard-camera-telemetry" aria-label={`Face watchlist result for ${cameraId || 'empty slot'}`}>
-                <span><b>FACE WATCHLIST</b>{capabilities?.face_recognition_engine === 'disabled' ? 'WATCHLIST UNAVAILABLE' : faceStatus === 'KNOWN' ? `MATCH · ${faceLabel || 'SUBJECT LABEL NOT REPORTED'}` : faceStatus === 'INSUFFICIENT_QUALITY' ? 'INSUFFICIENT QUALITY' : 'NO WATCHLIST MATCH IN THIS RUN'}</span>
-                <span><b>SCORE</b>{latestFaceEvent?.recognition_score == null ? 'N/A' : Number(latestFaceEvent.recognition_score).toFixed(1)}</span>
-                <span><b>SOURCE</b>{latestFaceEvent ? `FRAME ${latestFaceEvent.frame_index ?? 'NOT REPORTED'} · ${Number.isFinite(Number(latestFaceEvent.video_time)) ? `${Number(latestFaceEvent.video_time).toFixed(2)}s` : 'TIME NOT REPORTED'}` : 'NO FACE EVENT'}</span>
+                <span><b>FACE WATCHLIST</b>{historyPendingLabel || (capabilities?.face_recognition_engine === 'disabled' ? 'WATCHLIST UNAVAILABLE' : faceStatus === 'KNOWN' ? `MATCH · ${faceLabel || 'SUBJECT LABEL NOT REPORTED'}` : faceStatus === 'INSUFFICIENT_QUALITY' ? 'INSUFFICIENT QUALITY' : 'NO WATCHLIST MATCH IN THIS RUN')}</span>
+                <span><b>SCORE</b>{historyPendingLabel || (latestFaceEvent?.recognition_score == null ? 'N/A' : Number(latestFaceEvent.recognition_score).toFixed(1))}</span>
+                <span><b>SOURCE</b>{historyPendingLabel || (latestFaceEvent ? `FRAME ${latestFaceEvent.frame_index ?? 'NOT REPORTED'} · ${Number.isFinite(Number(latestFaceEvent.video_time)) ? `${Number(latestFaceEvent.video_time).toFixed(2)}s` : 'TIME NOT REPORTED'}` : 'NO FACE EVENT')}</span>
               </div>
               <div className="dashboard-camera-telemetry">
-                <span><b>DETECTOR FPS</b>{Number.isFinite(Number(metricsSample?.detector_fps)) ? Number(metricsSample.detector_fps).toFixed(2) : 'N/A'}</span>
-                <span><b>{completedRun ? 'ANALYZED REPLAY FPS' : 'ANALYZED SAMPLE FPS'}</b>{completedRun ? (!replayAssessment.ready || replayAssessment.cadenceHz == null ? 'UNAVAILABLE' : replayAssessment.cadenceHz.toFixed(2)) : (Number.isFinite(Number(metricsSample?.hud_fps)) ? Number(metricsSample.hud_fps).toFixed(2) : (cardFps == null ? 'N/A' : cardFps.toFixed(2)))}</span>
-                <span><b>SOURCE FPS</b>{completedRun ? (sourceFpsForTelemetry(metricsSample) == null ? 'NOT RECORDED FOR THIS COMPLETED RUN' : sourceFpsForTelemetry(metricsSample).toFixed(2)) : (sourceFps == null ? 'N/A' : sourceFps.toFixed(2))}</span>
-                <span><b>{completedRun ? (replayMetricsSample ? 'REPLAY PERSONS' : 'FINAL FRAME PERSONS') : 'PERSONS'}</b>{metricsSample ? (metricsSample.person_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A'}</span>
-                <span><b>{completedRun ? (replayMetricsSample ? 'REPLAY VEHICLES' : 'FINAL FRAME VEHICLES') : 'VEHICLES'}</b>{metricsSample ? (metricsSample.vehicle_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A'}</span>
-                <span><b>{completedRun ? (replayMetricsSample ? 'REPLAY TRACKS' : 'FINAL FRAME TRACKS') : 'TRACKS'}</b>{metricsSample ? (metricsSample.track_count ?? 'NOT REPORTED FOR THIS COMPLETED RUN') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A'}</span>
-                <span><b>{replayMetricsSample ? 'REPLAY FRAME' : 'FRAME'}</b>{completedRun ? (metricsSample?.final_frame_index ?? metricsSample?.frame_index ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : (metricsSample?.frame_index ?? 'N/A')}</span>
-                <span><b>{replayMetricsSample ? 'REPLAY SOURCE TIME' : 'SOURCE TIME'}</b>{Number.isFinite(Number(metricsSample?.final_video_time ?? metricsSample?.video_time)) ? `${Number(metricsSample.final_video_time ?? metricsSample.video_time).toFixed(2)}s` : 'N/A'}</span>
-                <span><b>LAST UPDATE</b>{runSummaryLoading[cameraId] ? 'LOADING RUN HISTORY...' : updateAge == null ? (completedRun ? 'NOT RECORDED FOR THIS HISTORICAL RUN' : 'Never') : liveStatus === 'COMPLETED' ? `COMPLETED ${formatTelemetryAge(updateAge)}` : liveStatus === 'OFFLINE' ? 'OFFLINE' : liveStatus === 'STALE' ? `STALE · ${formatTelemetryAge(updateAge)}` : formatTelemetryAge(updateAge)}</span>
-                <span><b>LATEST EVENT</b>{formatLatestEvent(latestCameraEvent, now)}</span>
+                <span><b>DETECTOR FPS</b>{historyPendingLabel || (Number.isFinite(Number(metricsSample?.detector_fps)) ? Number(metricsSample.detector_fps).toFixed(2) : 'N/A')}</span>
+                <span><b>{completedRun ? 'ANALYZED REPLAY FPS' : 'ANALYZED SAMPLE FPS'}</b>{historyPendingLabel || (completedRun ? (!replayAssessment.ready || replayAssessment.cadenceHz == null ? 'UNAVAILABLE' : replayAssessment.cadenceHz.toFixed(2)) : (Number.isFinite(Number(metricsSample?.hud_fps)) ? Number(metricsSample.hud_fps).toFixed(2) : (cardFps == null ? 'N/A' : cardFps.toFixed(2))))}</span>
+                <span><b>SOURCE FPS</b>{historyPendingLabel || (completedRun ? (sourceFpsForTelemetry(metricsSample) == null ? 'NOT RECORDED FOR THIS COMPLETED RUN' : sourceFpsForTelemetry(metricsSample).toFixed(2)) : (sourceFps == null ? 'N/A' : sourceFps.toFixed(2)))}</span>
+                <span><b>{completedRun ? (replayMetricsSample ? 'REPLAY PERSONS' : 'FINAL FRAME PERSONS') : 'PERSONS'}</b>{historyPendingLabel || (metricsSample ? (metricsSample.person_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A')}</span>
+                <span><b>{completedRun ? (replayMetricsSample ? 'REPLAY VEHICLES' : 'FINAL FRAME VEHICLES') : 'VEHICLES'}</b>{historyPendingLabel || (metricsSample ? (metricsSample.vehicle_count ?? 'NOT REPORTED FOR THIS SAMPLE') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A')}</span>
+                <span><b>{completedRun ? (replayMetricsSample ? 'REPLAY TRACKS' : 'FINAL FRAME TRACKS') : 'TRACKS'}</b>{historyPendingLabel || (metricsSample ? (metricsSample.track_count ?? 'NOT REPORTED FOR THIS COMPLETED RUN') : completedRun ? 'NOT RECORDED FOR THIS COMPLETED RUN' : 'N/A')}</span>
+                <span><b>{replayMetricsSample ? 'REPLAY FRAME' : 'FRAME'}</b>{historyPendingLabel || (completedRun ? (metricsSample?.final_frame_index ?? metricsSample?.frame_index ?? 'NOT RECORDED FOR THIS COMPLETED RUN') : (metricsSample?.frame_index ?? 'N/A'))}</span>
+                <span><b>{replayMetricsSample ? 'REPLAY SOURCE TIME' : 'SOURCE TIME'}</b>{historyPendingLabel || (Number.isFinite(Number(metricsSample?.final_video_time ?? metricsSample?.video_time)) ? `${Number(metricsSample.final_video_time ?? metricsSample.video_time).toFixed(2)}s` : 'N/A')}</span>
+                <span><b>LAST UPDATE</b>{historyPendingLabel || (updateAge == null ? (completedRun ? 'NOT RECORDED FOR THIS HISTORICAL RUN' : 'Never') : liveStatus === 'COMPLETED' ? `COMPLETED ${formatTelemetryAge(updateAge)}` : liveStatus === 'OFFLINE' ? 'OFFLINE' : liveStatus === 'STALE' ? `STALE · ${formatTelemetryAge(updateAge)}` : formatTelemetryAge(updateAge))}</span>
+                <span><b>LATEST EVENT</b>{historyPendingLabel || formatLatestEvent(latestCameraEvent, now)}</span>
               </div>
             </article>
           );
@@ -1565,7 +1752,7 @@ export default function Dashboard() {
 
       <section className="dashboard-events-card card" aria-label="Latest unified security events">
         <div className="card-header">
-          <div><span className="card-title">Current Run Events</span><span className="dashboard-events-subtitle">{authoritativeRunContext ? `${cameraModels.find((camera) => camera.cameraId === authoritativeRunContext.cameraId)?.friendlyName || authoritativeRunContext.cameraId} · selected run ${String(authoritativeRunContext.analysisSessionId).slice(0, 8)}` : 'WAITING FOR SELECTED RUN'} · {displayEvents.length} event{displayEvents.length === 1 ? '' : 's'}</span></div>
+          <div><span className="card-title">Current Run Events</span><span className="dashboard-events-subtitle">{cameraInventoryRestoring ? 'RESTORING CAMERA STATE' : authoritativeRunContext ? `${cameraModels.find((camera) => camera.cameraId === authoritativeRunContext.cameraId)?.friendlyName || authoritativeRunContext.cameraId} · selected run ${String(authoritativeRunContext.analysisSessionId).slice(0, 8)} · ${displayEvents.length} event${displayEvents.length === 1 ? '' : 's'}` : 'WAITING FOR SELECTED RUN'}</span></div>
           {configuredCameraIds.length > 1 && <div className="dashboard-event-filters" role="group" aria-label="Event camera filter">
             {configuredCameraIds.map((cameraId) => <button key={cameraId} className={`btn btn-sm ${reliabilityScopeCameraId === cameraId ? 'btn-primary' : 'btn-outline'}`} onClick={() => setSelectedCameraId(cameraId)}>{cameraId === 'cam-border-01' ? 'CAM 1' : 'CAM 2'}</button>)}
           </div>}
@@ -1596,12 +1783,12 @@ export default function Dashboard() {
 
       <section className="dashboard-events-card card" aria-label="Recent number plate reads">
         <div className="card-header">
-          <div><span className="card-title">Recent Number Plate Reads</span><span className="dashboard-events-subtitle">Selected camera/run scope · {recentPlateReads.length} read{recentPlateReads.length === 1 ? '' : 's'}</span></div>
+          <div><span className="card-title">Recent Number Plate Reads</span><span className="dashboard-events-subtitle">{cameraInventoryRestoring ? 'RESTORING CAMERA STATE' : `Selected camera/run scope · ${recentPlateReads.length} read${recentPlateReads.length === 1 ? '' : 's'}`}</span></div>
           {dashboardMode === 'DUAL' && <div className="dashboard-event-filters" role="group" aria-label="ANPR camera filter">
             {activeCameraIds.map((cameraId) => <button key={`anpr-${cameraId}`} className={`btn btn-sm ${reliabilityScopeCameraId === cameraId ? 'btn-primary' : 'btn-outline'}`} onClick={() => setSelectedCameraId(cameraId)}>{cameraModels.find((camera) => camera.cameraId === cameraId)?.friendlyName || cameraId}</button>)}
           </div>}
         </div>
-        {recentPlateReads.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">0 READS · NO ACCEPTED PLATE READ THIS RUN</div></div> : (
+        {cameraInventoryRestoring ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">RESTORING CAMERA STATE</div></div> : recentPlateReads.length === 0 ? <div className="state-empty" style={{ padding: '1rem' }}><div className="state-empty-sub">0 READS · NO ACCEPTED PLATE READ THIS RUN</div></div> : (
           <div className="dashboard-events-table-wrap"><table className="dashboard-events-table"><thead><tr>{['TIME', 'CAMERA', 'PLATE', 'CONFIDENCE', 'VEHICLE', 'EVIDENCE'].map(label => <th key={`anpr-head-${label}`}>{label}</th>)}</tr></thead><tbody>{recentPlateReads.map((event, index) => {
             const time = parseUtc(event.timestamp);
             const camera = cameraModels.find(item => item.cameraId === event.camera_id);
@@ -1631,6 +1818,7 @@ export default function Dashboard() {
               playbackEnded={playbackEnded}
               demoScenario={demoScenario}
               mediaUrl={mediaUrl}
+              previewLoading={Boolean(activeMediaState.previewLoading)}
               mediaType={mediaType}
               currentFps={activeProcessingFps}
               onUpload={() => triggerUpload(activeCameraId)}
@@ -1648,6 +1836,7 @@ export default function Dashboard() {
               completedSummaryLoading={Boolean(runSummaryLoading[activeCameraId])}
               diagnosticsEnabled={diagnosticsEnabled}
               sourceRunState={slotSources[activeCameraId]?.runState || null}
+              sourceRestoring={Boolean(slotSources[activeCameraId]?.restoring)}
               onVideoEnded={() => updateCameraMedia(activeCameraId, { playbackEnded: true })}
             />
           </div>

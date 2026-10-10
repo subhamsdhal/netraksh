@@ -1,6 +1,7 @@
 export const DEFAULT_CAMERA_MEDIA = Object.freeze({
   mediaUrl: null,
   mediaType: 'video',
+  previewLoading: false,
   isUploading: false,
   uploadStage: null,
   uploadProgress: null,
@@ -54,5 +55,13 @@ export function canReuseRestoredMedia(mediaState, sourceState, sessionId) {
     && mediaState?.sessionId === sessionId
     && mediaState?.mediaUrl,
   );
+}
+
+export function restoredPreviewStatus({ sourceRestoring, previewLoading, sourceMode, expectedSessionId, isUploading }) {
+  if (isUploading) return null;
+  if (previewLoading) return 'LOADING STORED VIDEO PREVIEW';
+  if (sourceRestoring) return 'VERIFYING DURABLE SOURCE AUTHORITY';
+  if (sourceMode === 'durable' && expectedSessionId) return 'PREVIEW UNAVAILABLE FOR THIS RESTORED SESSION';
+  return null;
 }
 

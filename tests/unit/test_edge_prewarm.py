@@ -25,6 +25,16 @@ def _reset_cache():
     dashboard._startup_prewarm_tasks.clear()
 
 
+def _snapshot_state(value):
+    # Preserve mapping-key identity. Earlier API tests can leave FastAPI Form
+    # objects as keys in this shared state, and deepcopy makes unequal keys.
+    if isinstance(value, dict):
+        return {key: _snapshot_state(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_snapshot_state(item) for item in value]
+    return copy.deepcopy(value)
+
+
 def test_prewarm_wakes_two_configured_workers_concurrently_without_control_mutation(monkeypatch):
     _reset_cache()
     records = {camera_id: _durable(camera_id) for camera_id in CAMERAS}
@@ -72,7 +82,7 @@ def test_prewarm_skips_only_unconfigured_worker(monkeypatch):
 
 def test_prewarm_requires_no_durable_source_and_preserves_control_state(monkeypatch):
     _reset_cache()
-    original_state = copy.deepcopy(dashboard._demo_state)
+    original_state = _snapshot_state(dashboard._demo_state)
     monkeypatch.setattr(dashboard, "_edge_wake_url", lambda camera_id: f"https://{camera_id}.example.test")
     monkeypatch.setattr(dashboard, "get_valid_active_session", lambda _camera_id: None)
 
@@ -224,7 +234,7 @@ def test_public_startup_routes_are_unauthenticated_and_status_is_safe():
 
 def test_public_startup_prewarm_has_no_camera_control_side_effects(monkeypatch):
     _reset_cache()
-    original_state = copy.deepcopy(dashboard._demo_state)
+    original_state = _snapshot_state(dashboard._demo_state)
     monkeypatch.setattr(dashboard, "_edge_wake_url", lambda camera_id: f"https://{camera_id}.example.test")
 
     def forbidden(*_args, **_kwargs):
