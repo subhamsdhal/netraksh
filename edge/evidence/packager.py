@@ -10,6 +10,8 @@ Storage: append-only SQLite (never modified, only inserted)
 from __future__ import annotations
 
 import hashlib
+import base64
+import binascii
 import json
 import logging
 import os
@@ -59,6 +61,24 @@ class EdgeKeyManager:
     def load_or_generate(self, allow_generate: bool = False) -> None:
         """Load existing keys or generate new ones."""
         os.makedirs(os.path.dirname(self.private_key_path) or ".", exist_ok=True)
+        configured = os.environ.get("EDGE_SIGNING_PRIVATE_KEY_B64", "")
+        if configured:
+            try:
+                pem = base64.b64decode(configured, validate=True)
+                configured_key = serialization.load_pem_private_key(pem, password=None)
+                if not isinstance(configured_key, Ed25519PrivateKey):
+                    raise ValueError("Configured signing key must be Ed25519")
+            except (binascii.Error, ValueError) as exc:
+                raise ValueError("Invalid EDGE_SIGNING_PRIVATE_KEY_B64") from exc
+            if os.path.exists(self.private_key_path):
+                with open(self.private_key_path, "rb") as key_file:
+                    existing = key_file.read()
+                if existing != pem:
+                    raise RuntimeError("Stored signing key differs from configured key")
+            else:
+                with open(self.private_key_path, "wb") as key_file:
+                    key_file.write(pem)
+                os.chmod(self.private_key_path, 0o600)
         if os.path.exists(self.private_key_path):
             self._load()
         else:
@@ -159,6 +179,22 @@ class EvidenceEncryptor:
 
     def load_or_generate(self) -> None:
         os.makedirs(os.path.dirname(self.key_path) or ".", exist_ok=True)
+        configured = os.environ.get("EDGE_EVIDENCE_KEY_B64", "")
+        if configured:
+            try:
+                configured_key = base64.b64decode(configured, validate=True)
+            except binascii.Error as exc:
+                raise ValueError("Invalid EDGE_EVIDENCE_KEY_B64") from exc
+            if len(configured_key) != 32:
+                raise ValueError("EDGE_EVIDENCE_KEY_B64 must encode 32 bytes")
+            if os.path.exists(self.key_path):
+                with open(self.key_path, "rb") as key_file:
+                    if key_file.read() != configured_key:
+                        raise RuntimeError("Stored evidence key differs from configured key")
+            else:
+                with open(self.key_path, "wb") as key_file:
+                    key_file.write(configured_key)
+                os.chmod(self.key_path, 0o600)
         if os.path.exists(self.key_path):
             with open(self.key_path, "rb") as f:
                 self._key = f.read()
