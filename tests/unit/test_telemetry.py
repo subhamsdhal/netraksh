@@ -48,21 +48,39 @@ def test_live_telemetry_payload_validation():
 
 @patch("backend.api.system.broadcast_telemetry")
 def test_post_telemetry_endpoint(mock_broadcast, monkeypatch):
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
     from backend.config import settings
-    from backend.database.session import init_db
+    from backend.database.session import get_db
+    from backend.models.orm import Base
     monkeypatch.setattr(settings, "EDGE_AUTH_TOKEN", "test-edge-auth-token-0123456789abcdef")
-    init_db()
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+
+    def test_db():
+        with session_factory() as session:
+            yield session
+
+    app.dependency_overrides[get_db] = test_db
     payload = {
         "camera_id": "cam-01",
         "timestamp": time.time(),
         "sequence": 1,
         "tracks": []
     }
-    response = client.post(
-        "/system/telemetry",
-        json=payload,
-        headers={"Authorization": f"Bearer {settings.EDGE_AUTH_TOKEN}"},
-    )
+    try:
+        response = client.post(
+            "/system/telemetry",
+            json=payload,
+            headers={"Authorization": f"Bearer {settings.EDGE_AUTH_TOKEN}"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+        engine.dispose()
     assert response.status_code == 202
     assert response.json() == {"status": "ok"}
     mock_broadcast.assert_called_once()

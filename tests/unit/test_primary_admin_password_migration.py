@@ -27,17 +27,21 @@ class _Result:
     def all(self):
         return self._rows
 
+    def first(self):
+        return self._rows[0] if self._rows else None
+
 
 class _Connection:
     def __init__(self, primary_rows, guard_rows, update_count=1):
         self._results = iter([
+            _Result([1]),
             _Result(primary_rows),
             _Result(guard_rows),
             _Result(rowcount=update_count),
         ])
         self.calls = []
 
-    def execute(self, statement, parameters):
+    def execute(self, statement, parameters=None):
         self.calls.append((str(statement), parameters))
         return next(self._results)
 
@@ -67,7 +71,7 @@ def test_upgrade_changes_only_the_primary_password_hash(monkeypatch):
 
     migration.upgrade()
 
-    update_sql, update_parameters = connection.calls[2]
+    update_sql, update_parameters = connection.calls[3]
     set_clause = update_sql.upper().split("SET", 1)[1].split("WHERE", 1)[0]
     assert "HASHED_PASSWORD" in set_clause
     for protected_column in (
@@ -82,19 +86,18 @@ def test_upgrade_changes_only_the_primary_password_hash(monkeypatch):
 
 
 @pytest.mark.parametrize("value", [None, ""])
-def test_upgrade_fails_before_database_access_when_password_is_missing(monkeypatch, value):
+def test_populated_upgrade_requires_password_before_any_write(monkeypatch, value):
     if value is None:
         monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
     else:
         monkeypatch.setenv("ADMIN_PASSWORD", value)
-    monkeypatch.setattr(
-        migration.op,
-        "get_bind",
-        lambda: pytest.fail("database must not be accessed without ADMIN_PASSWORD"),
-    )
+    connection = _Connection(_valid_primary(), _valid_legacy())
+    monkeypatch.setattr(migration.op, "get_bind", lambda: connection)
 
     with pytest.raises(RuntimeError, match="ADMIN_PASSWORD is required"):
         migration.upgrade()
+    assert len(connection.calls) == 1
+    assert connection.calls[0][0].startswith("SELECT")
 
 
 def test_upgrade_rejects_admin_eval(monkeypatch):
@@ -111,7 +114,7 @@ def test_upgrade_rejects_admin_eval(monkeypatch):
     with pytest.raises(RuntimeError, match="admin_eval must not exist"):
         migration.upgrade()
 
-    assert len(connection.calls) == 2
+    assert len(connection.calls) == 3
 
 
 def test_upgrade_requires_inactive_legacy_account(monkeypatch):
@@ -124,7 +127,7 @@ def test_upgrade_requires_inactive_legacy_account(monkeypatch):
     with pytest.raises(RuntimeError, match="must remain inactive"):
         migration.upgrade()
 
-    assert len(connection.calls) == 2
+    assert len(connection.calls) == 3
 
 
 def test_upgrade_requires_exactly_one_updated_row(monkeypatch):

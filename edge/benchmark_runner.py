@@ -47,6 +47,10 @@ def run_benchmark(
     detector_model: str = "yolov8n.pt",
     tracker_config: str = None,
 ):
+    if not video_path and not image_dir:
+        logger.warning("No video or image directory provided")
+        return None
+
     logger.info("Initializing Benchmark Harness (Phase 3 Step 0)...")
     logger.info(f"OS: {sys.platform} | Python: {sys.version.split()[0]}")
     logger.info(f"RSS Before Init: {get_rss_mb():.2f} MB")

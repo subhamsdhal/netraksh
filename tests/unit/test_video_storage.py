@@ -357,6 +357,9 @@ def test_eof_completion_is_idempotent_and_stops_durable_run(monkeypatch, tmp_pat
     )
     video_storage.activate_session("cam-border-01", session_id)
     running, _ = video_storage.start_active_session("cam-border-01", session_id)
+    video_storage.promote_active_session(
+        "cam-border-01", session_id, running["analysis_generation"], "analysis-run-1",
+    )
     completed = video_storage.complete_active_session(
         "cam-border-01", session_id, running["analysis_generation"],
         {"latest_analysis_session_id": "analysis-run-1", "final_frame_index": 12, "video_time": 4.5},

@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response as PlainResponse
-from sqlalchemy import desc
+from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
 from backend.config import settings
@@ -391,13 +391,19 @@ _SUMMARY_FIELDS = (
 )
 
 
-def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[AnalysisRunSummary]:
+def _record_run_summary(
+    db: Session,
+    payload: LiveTelemetryPayload,
+    *,
+    measurement_is_newer: bool = True,
+) -> Optional[AnalysisRunSummary]:
     if not (payload.stream_id and payload.analysis_session_id and payload.analysis_generation is not None):
         return None
     observed_at = float(payload.processed_timestamp or payload.timestamp)
     summary = db.query(AnalysisRunSummary).filter(
         AnalysisRunSummary.analysis_session_id == payload.analysis_session_id,
     ).first()
+    summary_is_new = summary is None
     if summary is None:
         summary = AnalysisRunSummary(
             analysis_session_id=payload.analysis_session_id,
@@ -413,38 +419,40 @@ def _record_run_summary(db: Session, payload: LiveTelemetryPayload) -> Optional[
         payload.camera_id, payload.stream_id, payload.analysis_generation
     ):
         raise HTTPException(status_code=409, detail="analysis_session_id identity conflict")
+    measurement_is_newer = measurement_is_newer or summary_is_new
     summary.last_telemetry_at = max(float(summary.last_telemetry_at), observed_at)
     # Sparse lifecycle packets must not replace a real final sample with a
     # decoder/transport artifact that is older or less complete. The edge
     # reports its last processed frame explicitly; retain monotonic source
     # identity for delayed packets from the same run as well.
-    if payload.frame_index is not None and (
+    if measurement_is_newer and payload.frame_index is not None and (
         summary.final_frame_index is None
         or int(payload.frame_index) >= int(summary.final_frame_index)
     ):
         summary.final_frame_index = payload.frame_index
-    if payload.video_time is not None and (
+    if measurement_is_newer and payload.video_time is not None and (
         summary.final_video_time is None
         or float(payload.video_time) >= float(summary.final_video_time)
     ):
         summary.final_video_time = payload.video_time
-    if payload.processing_fps is not None:
+    if measurement_is_newer and payload.processing_fps is not None:
         summary.processing_fps = payload.processing_fps
-    if payload.source_generation is not None:
+    if measurement_is_newer and payload.source_generation is not None:
         summary.source_generation = payload.source_generation
-    if payload.detector_fps is not None:
+    if measurement_is_newer and payload.detector_fps is not None:
         summary.detector_fps = payload.detector_fps
-    if payload.hud_fps is not None:
+    if measurement_is_newer and payload.hud_fps is not None:
         summary.hud_fps = payload.hud_fps
     reported_source_fps = payload.source_fps if payload.source_fps is not None else payload.fps_declared
-    if reported_source_fps is not None:
+    if measurement_is_newer and reported_source_fps is not None:
         summary.source_fps = reported_source_fps
-    for field in _SUMMARY_FIELDS:
-        value = getattr(payload, field)
-        if value is not None:
-            setattr(summary, field, value)
+    if measurement_is_newer:
+        for field in _SUMMARY_FIELDS:
+            value = getattr(payload, field)
+            if value is not None:
+                setattr(summary, field, value)
     if str(payload.analysis_state or "").upper() == "COMPLETED":
-        summary.completed_at = observed_at
+        summary.completed_at = max(float(summary.completed_at or observed_at), observed_at)
         identity = _tracking_identity(payload)
         durable = _durable_tracking_timeline(db, identity) if identity else []
         memory = list(_tracking_timelines.get(identity, [])) if identity else []
@@ -715,6 +723,13 @@ async def post_tracking_frame(
     identity = _tracking_identity(payload)
     if identity is not None:
         compact_sample = _compact_tracking_sample(payload, received_at)
+        latest_sequence = db.query(func.max(AnalysisTrackingSample.sequence)).filter(
+            AnalysisTrackingSample.camera_id == payload.camera_id,
+            AnalysisTrackingSample.stream_id == payload.stream_id,
+            AnalysisTrackingSample.analysis_session_id == payload.analysis_session_id,
+            AnalysisTrackingSample.analysis_generation == payload.analysis_generation,
+        ).scalar()
+        measurement_is_newer = latest_sequence is None or int(payload.sequence) > int(latest_sequence)
         persisted = db.get(
             AnalysisTrackingSample,
             (payload.analysis_session_id, int(payload.sequence), int(payload.frame_index)),
@@ -730,14 +745,11 @@ async def post_tracking_frame(
                 video_time=payload.video_time,
                 sample_json=compact_sample,
             ))
-        if payload.camera_id == "cam-border-01":
-            # The durable sample transport is sufficient to establish/update
-            # Camera 1's run summary too. Optional JPEG/diagnostic telemetry
-            # may be dropped; it must not leave this run without the summary
-            # required by its acknowledged EOF completion callback.
-            _record_run_summary(db, payload)
-        if persisted is None or payload.camera_id == "cam-border-01":
-            db.commit()
+        # Durable tracking is sufficient to establish/update either camera's
+        # run summary. Optional diagnostic telemetry can arrive later or be
+        # dropped; the completed replay must still retain its real final frame.
+        _record_run_summary(db, payload, measurement_is_newer=measurement_is_newer)
+        db.commit()
         if payload.camera_id == "cam-border-01":
             # Durable tracking is authoritative even if the separate optional
             # telemetry transport was unavailable. Ensure this exact run owns
