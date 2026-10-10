@@ -1,5 +1,5 @@
 import React from 'react';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -88,11 +88,45 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   localStorage.clear();
   vi.unstubAllGlobals();
 });
 
 describe('Command Center restored-source reanalysis', () => {
+  it('restores both completed sources when readiness fails during an authoritative lookup', async () => {
+    vi.useFakeTimers();
+    const readiness = [];
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(resolve => readiness.push(resolve))));
+    const originalFetch = mocks.authFetch.getMockImplementation();
+    let finishCurrent;
+    mocks.authFetch.mockImplementation((path, options) => {
+      if (path.startsWith('/api/dashboard/video/current?camera_id=cam-border-01')) {
+        return new Promise(resolve => { finishCurrent = resolve; });
+      }
+      return originalFetch(path, options);
+    });
+    render(<Dashboard />);
+    await act(async () => { readiness[0]({ ok: true }); });
+    expect(finishCurrent).toBeTypeOf('function');
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+    await act(async () => { readiness[1]({ ok: false }); });
+    await act(async () => {
+      finishCurrent(response({
+        available: true, source_mode: 'durable', camera_id: 'cam-border-01',
+        session_id: sourceId, source_name: 'vid 1.mp4', analysis_state: 'COMPLETED',
+        analysis_generation: 4, source_generation: 2, scenario: 'paused',
+        latest_analysis_session_id: runId, preview_url: null,
+      }));
+    });
+    expect(screen.getByText('SOURCE: vid 1.mp4')).toBeInTheDocument();
+    expect(screen.getByText('SOURCE: vid 2.mp4')).toBeInTheDocument();
+    expect(screen.queryByText('NO VIDEO SOURCE')).not.toBeInTheDocument();
+    expect(mocks.authFetch.mock.calls.some(([path, options]) =>
+      path === '/api/dashboard/video/reanalyze'
+      || (path === '/api/dashboard/video/scenario' && options?.method === 'POST'))).toBe(false);
+  });
+
   it('shows restoring state until backend readiness and both persisted sources are confirmed', async () => {
     let resolveReady;
     vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => { resolveReady = resolve; })));

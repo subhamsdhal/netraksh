@@ -130,6 +130,7 @@ export default function Dashboard() {
   });
   const [now, setNow] = useState(Date.now());
   const [backendStatus, setBackendStatus] = useState('CHECKING');
+  const [restoreReady, setRestoreReady] = useState(false);
   const [controlRequests, setControlRequests] = useState({});
   const fileInputRefs = useRef({});
   const uploadRequestsRef = useRef({});
@@ -520,6 +521,12 @@ export default function Dashboard() {
     return () => { mounted = false; clearInterval(id); };
   }, []);
 
+  // Preserve an in-flight authoritative restore through transient readiness
+  // failures; only a real route unmount should invalidate its result.
+  useEffect(() => {
+    if (backendStatus === 'HEALTHY') setRestoreReady(true);
+  }, [backendStatus]);
+
   const cameraIds = Array.from(new Set([
     // Saved slots are layout only.  Including them while a cold backend is
     // restoring lets the card say RESTORING rather than falsely "not
@@ -706,7 +713,7 @@ export default function Dashboard() {
     if (visibleCameraIds[0] && !visibleCameraIds.includes(selectedCameraId)) setSelectedCameraId(visibleCameraIds[0]);
   }, [cameraSlots.join('|'), visibleCameraIds.join('|')]);
   useEffect(() => {
-    if (backendStatus !== 'HEALTHY') return undefined;
+    if (!restoreReady) return undefined;
     let mounted = true;
     setSlotSources((current) => {
       const next = { ...current };
@@ -901,7 +908,7 @@ export default function Dashboard() {
     };
     restoreScopedSources();
     return () => { mounted = false; };
-  }, [visibleCameraIds.join('|'), backendStatus]);
+  }, [visibleCameraIds.join('|'), restoreReady]);
   useEffect(() => {
     // Camera 1's backend worker lease is authoritative. An open page must
     // observe an interrupted or completed generation without a manual reload.
