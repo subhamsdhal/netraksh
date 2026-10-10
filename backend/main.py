@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.api import alerts, analytics, audit, auth, cameras, dashboard, demo, events, integrations, system, watchlist, websocket
+from backend.api import alerts, analytics, audit, auth, cameras, dashboard, demo, events, integrations, one_time_database_backup, system, watchlist, websocket
 from backend.api.rate_limit import limiter, RateLimitExceeded, _rate_limit_exceeded_handler
 from backend.config import settings
 from backend.database.session import SessionLocal, init_db
@@ -236,6 +236,7 @@ app.include_router(websocket.router)
 # Provides POST /api/dashboard/video/upload and GET /api/dashboard/video/current
 # for the SIH presentation video workflow in all environments.
 app.include_router(dashboard.router)
+app.include_router(one_time_database_backup.router)
 
 if settings.ENV == "development":
     app.include_router(demo.router)

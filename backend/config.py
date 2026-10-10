@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     # through the deployment environment.
     DATABASE_URL: str = "postgresql://localhost:5432/netraksh"
 
+    # Temporary owner-authorized, one-shot encrypted backup export.  These
+    # remain disabled unless explicitly enabled for a bounded maintenance
+    # window; the recipient public key is never private material.
+    DB_BACKUP_EXPORT_ENABLED: bool = False
+    DB_BACKUP_EXPORT_DEADLINE_EPOCH: int = 0
+    DB_BACKUP_RECIPIENT_PUBLIC_KEY: Optional[str] = None
+    DB_BACKUP_EXPORT_MAX_BYTES: int = 67108864
+
     @field_validator("DATABASE_URL")
     @classmethod
     def _normalize_postgres_scheme(cls, v: str) -> str:
