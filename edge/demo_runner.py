@@ -675,6 +675,7 @@ def run_demo_pipeline(
     backend_url: str,
     zones_config_path: str = "demo/scripts/zones_config.json",
     require_explicit_session: bool = False,
+    on_run_state=None,
 ) -> None:
     """
     Build and run a DemoAwareEdgePipeline for one named camera.
@@ -782,7 +783,13 @@ def run_demo_pipeline(
         pipeline = DemoAwareEdgePipeline(config)
 
         # start() blocks until the pipeline stops (e.g. video ends, interrupted, or restarted)
-        pipeline.start()
+        if on_run_state:
+            on_run_state("RUNNING", pipeline)
+        try:
+            pipeline.start()
+        finally:
+            if on_run_state:
+                on_run_state("FINALIZING", pipeline)
 
         pipeline_exit_time = time.time()
 
@@ -791,6 +798,8 @@ def run_demo_pipeline(
             logger.info("[DemoRunner] Pipeline stopped for restart. Recreating...")
             # Consume the restart request only after the blocking pipeline exits.
             _scenario["should_restart"] = False
+            if on_run_state:
+                on_run_state("IDLE", None)
             time.sleep(1.0)
         else:
             # A completed upload should leave the worker alive so the next
@@ -825,6 +834,8 @@ def run_demo_pipeline(
                         logger.info("[DemoRunner] Durable EOF persisted for generation %s", _scenario.get("analysis_generation", 0))
                     except Exception as exc:
                         logger.warning("[DemoRunner] Durable EOF callback failed: %s", type(exc).__name__)
+                if on_run_state:
+                    on_run_state("IDLE", None)
                 logger.info("[DemoRunner] Uploaded video completed; waiting for the next session...")
                 while not _scenario.get("should_restart"):
                     # Only restart if scenario is normal AND video_time explicitly returns to 0 (replay)

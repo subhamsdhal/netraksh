@@ -11,6 +11,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
@@ -19,11 +20,92 @@ logger = logging.getLogger("netraksh.cloud_worker")
 
 _state = {
     "started_at": time.time(),
+    "boot_id": str(uuid.uuid4()),
+    "instance_id": (os.environ.get("RENDER_INSTANCE_ID") or os.environ.get("HOSTNAME") or "")[:128],
+    "analysis_phase": "IDLE",
+    "pipeline": None,
     "worker_started_at": None,
     "worker_alive": False,
     "last_error": None,
     "phase": "WAITING_BACKEND",
 }
+
+
+def _set_run_state(phase: str, pipeline) -> None:
+    """Publish the current pipeline identity to the independent lease sender."""
+    _state["analysis_phase"] = phase
+    _state["pipeline"] = pipeline
+    logger.info(
+        "[WorkerLease] run_state camera_id=%s boot_id=%s phase=%s run_id=%s generation=%s last_frame=%s",
+        os.environ.get("CAMERA_ID", "unknown"), _state["boot_id"], phase,
+        getattr(pipeline, "stream_id", None), getattr(pipeline, "analysis_generation", None),
+        getattr(pipeline, "_last_processed_frame_index", None),
+    )
+
+
+def _heartbeat_payload(camera_id: str) -> dict:
+    pipeline = _state["pipeline"]
+    payload = {
+        "camera_id": camera_id,
+        "boot_id": _state["boot_id"],
+        "instance_id": _state["instance_id"],
+        "worker_started_at": _state["started_at"],
+        "phase": _state["analysis_phase"] if pipeline is not None else "IDLE",
+    }
+    if pipeline is not None:
+        payload.update({
+            "analysis_session_id": pipeline.stream_id,
+            "stream_id": pipeline.source_stream_id,
+            "analysis_generation": pipeline.analysis_generation,
+            "last_frame_index": getattr(pipeline, "_last_processed_frame_index", None),
+            "last_video_time": getattr(pipeline, "_last_video_time", None),
+        })
+    return payload
+
+
+def _heartbeat_loop() -> None:
+    """Maintain this process's per-camera backend lease without starting analysis."""
+    camera_id = _required("CAMERA_ID")
+    backend_url = _required("BACKEND_URL").rstrip("/")
+    token = _required("EDGE_AUTH_TOKEN")
+    failures = 0
+    last_logged_signature = None
+    with httpx.Client(timeout=httpx.Timeout(connect=3, read=5, write=5, pool=3)) as client:
+        while True:
+            payload = _heartbeat_payload(camera_id)
+            try:
+                response = client.post(
+                    f"{backend_url}/api/dashboard/video/internal-worker-heartbeat",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if response.status_code != 200:
+                    failures += 1
+                    logger.warning(
+                        "[WorkerLease] heartbeat rejected camera_id=%s boot_id=%s phase=%s status=%s retry=%s",
+                        camera_id, _state["boot_id"], payload["phase"], response.status_code, failures,
+                    )
+                else:
+                    signature = (
+                        payload["phase"], payload.get("analysis_session_id"),
+                        payload.get("analysis_generation"), payload.get("last_frame_index"),
+                    )
+                    if failures or signature != last_logged_signature:
+                        logger.info(
+                            "[WorkerLease] heartbeat accepted camera_id=%s boot_id=%s instance_id=%s phase=%s run_id=%s generation=%s last_frame=%s last_video_time=%s recovered_after=%s",
+                            camera_id, _state["boot_id"], _state["instance_id"], payload["phase"],
+                            payload.get("analysis_session_id"), payload.get("analysis_generation"),
+                            payload.get("last_frame_index"), payload.get("last_video_time"), failures,
+                        )
+                    last_logged_signature = signature
+                    failures = 0
+            except httpx.RequestError as exc:
+                failures += 1
+                logger.warning(
+                    "[WorkerLease] heartbeat transport error camera_id=%s boot_id=%s phase=%s error_type=%s retry=%s",
+                    camera_id, _state["boot_id"], payload["phase"], type(exc).__name__, failures,
+                )
+            time.sleep(min(5 * (2 ** min(failures, 3)), 30) if failures else 5)
 
 
 def _required(name: str) -> str:
@@ -101,6 +183,7 @@ def _run_edge() -> None:
                 backend_url=backend_url,
                 zones_config_path=zones,
                 require_explicit_session=True,
+                on_run_state=_set_run_state,
             )
             logger.warning("[CloudWorker] Edge loop exited; restarting in %.1fs", retry_seconds)
         except KeyboardInterrupt:
@@ -112,6 +195,7 @@ def _run_edge() -> None:
             logger.error("[CloudWorker] Edge cycle failed (%s); retrying in %.1fs", type(exc).__name__, retry_seconds)
         finally:
             _state["worker_alive"] = False
+            _set_run_state("IDLE", None)
         time.sleep(retry_seconds)
 
 
@@ -181,6 +265,11 @@ def main() -> None:
     port = int(os.environ.get("PORT", "10000"))
     server = CloudHealthServer(("0.0.0.0", port), HealthHandler)
     logger.info("[CloudWorker] Health listener bound on 0.0.0.0:%s", port)
+    logger.info(
+        "[WorkerLease] process boot camera_id=%s boot_id=%s instance_id=%s",
+        os.environ.get("CAMERA_ID", "unknown"), _state["boot_id"], _state["instance_id"],
+    )
+    threading.Thread(target=_heartbeat_loop, daemon=True, name="worker-lease-heartbeat").start()
     thread = threading.Thread(target=_run_edge, daemon=True, name="netraksh-edge")
     thread.start()
     # No optional imports or inference setup are allowed between a successful
