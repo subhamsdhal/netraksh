@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, canReanalyzeSource, claimUploadAutoStart, durableHeartbeat, fetchPreparationForRestore, fetchReadOnlyWithRetry, fetchWithTimeout, lifecycleAction, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, bundledSourceState, canReanalyzeSource, claimUploadAutoStart, durableHeartbeat, fetchPreparationForRestore, fetchReadOnlyWithRetry, fetchWithTimeout, lifecycleAction, normalizeReadyUploadResponse, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation, uploadAutoStartIdentity } from '../src/utils/dashboardVideoControl';
 
 describe('dashboard video control ownership', () => {
   it('settles only the exact Camera 1 live generation from backend authority', () => {
@@ -311,6 +311,27 @@ describe('dashboard video control ownership', () => {
       analysis_state: 'WAKING',
       analysis_generation: 3,
     })).toMatchObject({ runState: 'WAKING', analysisState: 'WAKING', analysisGeneration: 3 });
+  });
+
+  it('recognizes temporary local uploads without granting them analysis authority', () => {
+    const syncResponse = {
+      status: 'ok', source_state: 'READY', camera_id: 'cam-border-01',
+      session_id: 'upload-1', upload_intent_id: 'upload-1', source_name: 'vid 1.mp4',
+    };
+    expect(normalizeReadyUploadResponse(syncResponse, 'cam-border-01', 'upload-1')).toMatchObject({
+      local_only: true, camera_id: 'cam-border-01', source_name: 'vid 1.mp4',
+    });
+    expect(normalizeReadyUploadResponse({
+      ...syncResponse, source_mode: 'durable', source_generation: 1,
+    }, 'cam-border-01', 'upload-1')).toMatchObject({
+      local_only: false, source_mode: 'durable', source_generation: 1,
+    });
+    const asyncResponse = { preparation_job_id: 'intent-2', camera_id: 'cam-checkpoint-01', state: 'NORMALIZING' };
+    expect(normalizeReadyUploadResponse(asyncResponse, 'cam-checkpoint-01', 'intent-2')).toBe(asyncResponse);
+    expect(normalizeReadyUploadResponse(asyncResponse, 'cam-border-01', 'intent-2')).toBeNull();
+    expect(normalizeReadyUploadResponse(syncResponse, 'cam-checkpoint-01', 'upload-1')).toBeNull();
+    expect(normalizeReadyUploadResponse(syncResponse, 'cam-border-01', 'different-upload')).toBeNull();
+    expect(normalizeReadyUploadResponse({ ...syncResponse, source_state: 'UPLOADED' }, 'cam-border-01', 'upload-1')).toBeNull();
   });
 
   it('claims one automatic start for one authoritative new upload only', () => {

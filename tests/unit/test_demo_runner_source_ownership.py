@@ -226,3 +226,52 @@ def test_bundled_control_uses_the_worker_local_source_without_a_session(monkeypa
     assert _apply_control_sync(hydrated) is True
     assert _scenario["video_session_id"] is None
     assert _scenario["current"] == "normal"
+
+
+def test_postgres_worker_download_verifies_camera_media_and_checksum(monkeypatch, tmp_path):
+    import hashlib
+
+    session_id = str(uuid.uuid4())
+    source_bytes = b"\x00\x00\x00\x18ftypisom" + b"real-camera-source" * 8
+    media_id = f"video-sessions/cam-border-01/{session_id}/source.mp4"
+    digest = hashlib.sha256(source_bytes).hexdigest()
+    monkeypatch.setenv("EDGE_SOURCE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setenv("BACKEND_URL", "https://backend.example.test")
+    monkeypatch.setenv("EDGE_AUTH_TOKEN", "test-private-edge-token")
+    requests = []
+
+    class Stream:
+        headers = {"X-Video-Media-ID": media_id, "X-Video-SHA256": digest}
+
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+        def raise_for_status(self): return None
+        def iter_bytes(self, _size): yield source_bytes
+
+    def stream(_method, url, **kwargs):
+        requests.append((url, kwargs))
+        return Stream()
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    control = {
+        "camera_id": "cam-border-01", "source_mode": "durable",
+        "video_source": f"object://{media_id}", "media_id": media_id,
+        "media_sha256": digest, "media_size_bytes": len(source_bytes),
+        "source_generation": 1, "video_session_id": session_id,
+        "download_url": f"/api/dashboard/video/edge-media/{session_id}?camera_id=cam-border-01",
+    }
+    assert _materialize_remote_source(control, "cam-checkpoint-01")["source_unavailable"] is True
+    assert requests == []
+    hydrated = _materialize_remote_source(control, "cam-border-01")
+    assert Path(hydrated["video_source"]).read_bytes() == source_bytes
+    assert requests[0][1]["headers"] == {"Authorization": "Bearer test-private-edge-token"}
+    assert requests[0][1]["follow_redirects"] is False
+    Path(hydrated["video_source"]).write_bytes(b"corrupt-cache")
+    assert Path(_materialize_remote_source(control, "cam-border-01")["video_source"]).read_bytes() == source_bytes
+
+    class CorruptStream(Stream):
+        def iter_bytes(self, _size): yield b"wrong-video"
+
+    monkeypatch.setattr(httpx, "stream", lambda *_args, **_kwargs: CorruptStream())
+    Path(hydrated["video_source"]).unlink()
+    assert _materialize_remote_source(control, "cam-border-01")["source_unavailable"] is True

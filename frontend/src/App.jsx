@@ -103,19 +103,12 @@ function App() {
   return (
     <BrowserRouter>
       <DemoScenarioProvider>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route
-            path="/*"
-            element={
-              <ProtectedRoute>
-                <StartupGate>
-                  <AppLayout />
-                </StartupGate>
-              </ProtectedRoute>
-            }
-          />
-        </Routes>
+        <StartupGate>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/*" element={<ProtectedRoute><AppLayout /></ProtectedRoute>} />
+          </Routes>
+        </StartupGate>
       </DemoScenarioProvider>
     </BrowserRouter>
   );

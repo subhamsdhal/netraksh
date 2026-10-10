@@ -211,18 +211,22 @@ describe('Command Center restored-source reanalysis', () => {
 
   it('automatically starts exactly one analysis after a new Camera 1 upload is ready', async () => {
     const user = userEvent.setup();
-    mocks.authUpload.mockResolvedValue(response({
-      available: true,
-      status: 'accepted',
-      state: 'READY',
-      source_state: 'READY',
-      camera_id: 'cam-border-01',
-      preparation_job_id: sourceId,
-      upload_intent_id: sourceId,
-      session_id: sourceId,
-      source_name: 'vid 1.mp4',
-      source_generation: 7,
-    }, true));
+    let uploadedSourceId;
+    mocks.authUpload.mockImplementation(async (_path, formData) => {
+      uploadedSourceId = formData.get('upload_intent_id');
+      return response({
+        available: true,
+        status: 'accepted',
+        state: 'READY',
+        source_state: 'READY',
+        camera_id: 'cam-border-01',
+        preparation_job_id: uploadedSourceId,
+        upload_intent_id: uploadedSourceId,
+        session_id: uploadedSourceId,
+        source_name: 'vid 1.mp4',
+        source_generation: 7,
+      }, true);
+    });
     render(<Dashboard />);
 
     await screen.findAllByRole('button', { name: 'REANALYZE' });
@@ -247,11 +251,36 @@ describe('Command Center restored-source reanalysis', () => {
     expect(JSON.parse(options.body)).toMatchObject({
       camera_id: 'cam-border-01',
       source_mode: 'durable',
-      video_session_id: sourceId,
+      video_session_id: uploadedSourceId,
       scenario: 'normal',
       wake_edge: true,
     });
     expect(starts).toHaveLength(1);
+  });
+
+  it('clears the upload spinner and blocks analysis for an ephemeral local-file response', async () => {
+    const user = userEvent.setup();
+    mocks.authUpload.mockImplementation(async (_path, formData) => {
+      const intent = formData.get('upload_intent_id');
+      return response({
+        status: 'ok', source_state: 'READY', camera_id: 'cam-border-01',
+        session_id: intent, upload_intent_id: intent, source_name: 'vid 1.mp4',
+        source_generation: null,
+      });
+    });
+    render(<Dashboard />);
+    await screen.findAllByRole('button', { name: 'REANALYZE' });
+    const file = new File(['video-bytes'], 'vid 1.mp4', { type: 'video/mp4' });
+    await user.upload(document.querySelector('input[type="file"][data-camera-id="cam-border-01"]'), file);
+
+    expect(await screen.findByText('FAILED')).toBeInTheDocument();
+    expect(screen.queryByText('UPLOADING 100%')).not.toBeInTheDocument();
+    const startRequests = mocks.authFetch.mock.calls.filter(([path, options]) =>
+      path === '/api/dashboard/video/scenario'
+      && options?.method === 'POST'
+      && JSON.parse(options.body).scenario === 'normal',
+    );
+    expect(startRequests).toHaveLength(0);
   });
 
   it('does not start a run on restore, then sends exactly one explicit Camera 1 reanalyze request', async () => {

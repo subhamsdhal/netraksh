@@ -16,7 +16,9 @@ def test_source_session_switching(tmp_path):
     _scenario["should_restart"] = False
 
     # Mock httpx response
-    with patch("httpx.get") as mock_get:
+    with patch("httpx.get") as mock_get, patch(
+        "edge.demo_runner._materialize_remote_source", side_effect=lambda data, _camera: data,
+    ):
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_get.return_value = mock_resp

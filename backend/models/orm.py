@@ -10,6 +10,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     JSON,
+    LargeBinary,
     Boolean,
     DateTime,
     Float,
@@ -25,6 +26,34 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 class Base(DeclarativeBase):
     pass
+
+
+class VideoMediaObject(Base):
+    __tablename__ = "video_media_objects"
+    __table_args__ = (Index("ix_video_media_camera_session", "camera_id", "session_id"),)
+
+    object_key: Mapped[str] = mapped_column(String(320), primary_key=True)
+    camera_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    duration_seconds: Mapped[Optional[float]] = mapped_column(Float)
+    fps: Mapped[Optional[float]] = mapped_column(Float)
+    source_generation: Mapped[Optional[int]] = mapped_column(Integer)
+    prepared_source_key: Mapped[Optional[str]] = mapped_column(String(320))
+    ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class VideoControlRecord(Base):
+    __tablename__ = "video_control_records"
+
+    object_key: Mapped[str] = mapped_column(String(320), primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 def new_uuid() -> str:

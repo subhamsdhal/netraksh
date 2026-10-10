@@ -9,52 +9,49 @@ import {
 } from '../src/services/startupWake';
 
 const services = {
-  backend: { url: 'https://api.example/ready', kind: 'backend' },
+  backend: { url: 'https://api.example/ready', wakeUrl: 'https://api.example/ready', kind: 'backend' },
   camBorder01: {
-    url: 'https://border.example/wake',
-    kind: 'edge',
-    cameraId: 'cam-border-01',
+    url: 'https://border.example/health', wakeUrl: 'https://border.example/wake',
+    kind: 'edge', cameraId: 'cam-border-01',
   },
   camCheckpoint01: {
-    url: 'https://checkpoint.example/wake',
-    kind: 'edge',
-    cameraId: 'cam-checkpoint-01',
+    url: 'https://checkpoint.example/health', wakeUrl: 'https://checkpoint.example/wake',
+    kind: 'edge', cameraId: 'cam-checkpoint-01',
   },
-};
-
-const prewarm = {
-  triggerUrl: 'https://api.example/api/dashboard/startup/prewarm',
-  statusUrl: 'https://api.example/api/dashboard/startup/prewarm/status',
 };
 
 const payloads = {
   backend: { status: 'ready', database: 'connected' },
-  camBorder01: {
-    camera_id: 'cam-border-01',
-    worker_alive: true,
-    last_error: null,
-  },
-  camCheckpoint01: {
-    camera_id: 'cam-checkpoint-01',
-    worker_alive: true,
-    last_error: null,
-  },
+  camBorder01: { camera_id: 'cam-border-01', worker_alive: true, last_error: null },
+  camCheckpoint01: { camera_id: 'cam-checkpoint-01', worker_alive: true, last_error: null },
 };
 
-function response(payload, status = 200) {
+function response(payload, status = 200, json = true) {
   return {
     ok: status >= 200 && status < 300,
     status,
-    json: async () => payload,
+    json: async () => {
+      if (!json) throw new SyntaxError('not JSON');
+      return payload;
+    },
   };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
 }
 
 function readyFetch(url) {
   if (url.endsWith('/ready')) return Promise.resolve(response(payloads.backend));
-  if (url.endsWith('/startup/prewarm')) return Promise.resolve(response({ cameras: {} }));
-  if (url.endsWith('/startup/prewarm/status')) return Promise.resolve(response({ cameras: {} }));
   if (url.includes('border.example')) return Promise.resolve(response(payloads.camBorder01));
   return Promise.resolve(response(payloads.camCheckpoint01));
+}
+
+async function poll() {
+  await vi.advanceTimersByTimeAsync(5);
 }
 
 afterEach(() => {
@@ -63,296 +60,178 @@ afterEach(() => {
 });
 
 describe('startup response classification', () => {
-  it('keeps a backend 503 in WAKING', () => {
-    expect(classifyStartupResponse(
-      services.backend,
-      response({ status: 'starting' }, 503),
-      { status: 'starting' },
-    )).toBe(STARTUP_STATUS.WAKING);
+  it('requires backend HTTP 200 JSON with database connected', () => {
+    expect(classifyStartupResponse(services.backend, response(payloads.backend), payloads.backend)).toBe(STARTUP_STATUS.READY);
+    expect(classifyStartupResponse(services.backend, response({ status: 'ready' }), { status: 'ready' })).toBe(STARTUP_STATUS.WAKING);
+    expect(classifyStartupResponse(services.backend, response(payloads.backend, 200, false), null)).toBe(STARTUP_STATUS.WAKING);
+    expect(classifyStartupResponse(services.backend, response(payloads.backend, 503), payloads.backend)).toBe(STARTUP_STATUS.WAKING);
   });
 
-  it('keeps an edge response in WAKING while its worker is not alive', () => {
-    expect(classifyStartupResponse(
-      services.camBorder01,
-      response({ camera_id: 'cam-border-01', worker_alive: false, last_error: null }),
-      { camera_id: 'cam-border-01', worker_alive: false, last_error: null },
-    )).toBe(STARTUP_STATUS.WAKING);
-    expect(classifyStartupResponse(
-      services.camBorder01,
-      response({ camera_id: 'cam-border-01', worker_alive: true, last_error: 'worker failed' }),
-      { camera_id: 'cam-border-01', worker_alive: true, last_error: 'worker failed' },
-    )).toBe(STARTUP_STATUS.WAKING);
-  });
-
-  it('requires the expected camera, live worker, and no last error', () => {
-    expect(classifyStartupResponse(
-      services.camBorder01,
-      response(payloads.camBorder01),
-      payloads.camBorder01,
-    )).toBe(STARTUP_STATUS.READY);
-
-    expect(classifyStartupResponse(
-      services.camBorder01,
-      response({ ...payloads.camBorder01, camera_id: 'cam-checkpoint-01' }),
-      { ...payloads.camBorder01, camera_id: 'cam-checkpoint-01' },
-    )).toBe(STARTUP_STATUS.WAKING);
+  it('requires the expected camera identity and live worker state', () => {
+    expect(classifyStartupResponse(services.camBorder01, response(payloads.camBorder01), payloads.camBorder01)).toBe(STARTUP_STATUS.READY);
+    expect(classifyStartupResponse(services.camBorder01, response({ ...payloads.camBorder01, camera_id: 'cam-checkpoint-01' }), { ...payloads.camBorder01, camera_id: 'cam-checkpoint-01' })).toBe(STARTUP_STATUS.WAKING);
+    expect(classifyStartupResponse(services.camBorder01, response({ ...payloads.camBorder01, worker_alive: false }), { ...payloads.camBorder01, worker_alive: false })).toBe(STARTUP_STATUS.WAKING);
   });
 });
 
 describe('startup coordinator', () => {
-  it('does not revalidate after a short tab switch but does after the resume threshold', () => {
-    const state = { readyAt: 10_000, lastReadyAt: 10_000, startedAt: 1_000 };
-    expect(shouldRevalidateOnResume(state, 10_000 + RESUME_AFTER_MS - 1)).toBe(false);
-    expect(shouldRevalidateOnResume(state, 10_000 + RESUME_AFTER_MS)).toBe(true);
-  });
-
-  it('dispatches all three direct probes and backend prewarm before awaiting any response', async () => {
-    const resolvers = [];
-    const fetchImpl = vi.fn(() => new Promise((resolve) => resolvers.push(resolve)));
-    const coordinator = createStartupCoordinator({ services, prewarm, fetchImpl });
-
+  it('launches backend and both camera wake requests in the same turn', async () => {
+    vi.useFakeTimers();
+    const pending = [deferred(), deferred(), deferred()];
+    const fetchImpl = vi.fn(() => pending[fetchImpl.mock.calls.length - 1].promise);
+    const coordinator = createStartupCoordinator({ services, fetchImpl, pollIntervalMs: 5 });
     const startup = coordinator.start();
-    expect(fetchImpl).toHaveBeenCalledTimes(4);
+
     expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
-      services.backend.url,
-      services.camBorder01.url,
-      services.camCheckpoint01.url,
-      prewarm.triggerUrl,
+      services.backend.wakeUrl,
+      services.camBorder01.wakeUrl,
+      services.camCheckpoint01.wakeUrl,
     ]);
-    expect(fetchImpl.mock.calls[3][1].method).toBe('POST');
-
-    resolvers[0](response(payloads.backend));
-    resolvers[1](response(payloads.camBorder01));
-    resolvers[2](response(payloads.camCheckpoint01));
-    resolvers[3](response({ cameras: {} }));
+    expect(fetchImpl.mock.calls).toHaveLength(3);
+    pending[0].resolve(response(payloads.backend));
+    pending[1].resolve(response(payloads.camBorder01));
+    pending[2].resolve(response(payloads.camCheckpoint01));
+    await poll();
     await startup;
-
     expect(coordinator.getSnapshot().allReady).toBe(true);
-    expect(coordinator.getSnapshot().camBorder01.payload.camera_id).toBe('cam-border-01');
   });
 
-  it('does not report allReady until every service is READY', async () => {
+  it('tracks backend and Camera 1 readiness while waiting for Camera 2', async () => {
+    vi.useFakeTimers();
+    let backendReady = false;
+    let camera1Ready = false;
+    let camera2Ready = false;
     const fetchImpl = vi.fn((url) => {
+      if (url.includes('api.example')) return Promise.resolve(response(backendReady ? payloads.backend : { status: 'starting' }, backendReady ? 200 : 503));
+      if (url.includes('border.example')) return Promise.resolve(response({ ...payloads.camBorder01, worker_alive: camera1Ready }));
+      return Promise.resolve(response({ ...payloads.camCheckpoint01, worker_alive: camera2Ready }));
+    });
+    const coordinator = createStartupCoordinator({ services, fetchImpl, pollIntervalMs: 5, maxStartupMs: 100 });
+    const observed = [];
+    coordinator.subscribe((state) => observed.push([state.backend.status, state.camBorder01.status, state.camCheckpoint01.status]));
+    const startup = coordinator.start();
+    await poll();
+
+    backendReady = true;
+    camera1Ready = true;
+    await poll();
+    expect(coordinator.getSnapshot().camBorder01.status).toBe(STARTUP_STATUS.READY);
+    await poll();
+    expect(coordinator.getSnapshot().backend.status).toBe(STARTUP_STATUS.READY);
+    expect(coordinator.getSnapshot().camCheckpoint01.status).toBe(STARTUP_STATUS.WAKING);
+    expect(observed).toContainEqual([STARTUP_STATUS.READY, STARTUP_STATUS.READY, STARTUP_STATUS.WAKING]);
+    expect(coordinator.getSnapshot().allReady).toBe(false);
+
+    camera2Ready = true;
+    await poll();
+    await poll();
+    await startup;
+    expect(coordinator.getSnapshot().allReady).toBe(true);
+  });
+
+  it('keeps Camera 2 READY when it responds before the backend', async () => {
+    vi.useFakeTimers();
+    let backendReady = false;
+    const fetchImpl = vi.fn((url) => {
+      if (url.includes('api.example')) return Promise.resolve(response(backendReady ? payloads.backend : { status: 'starting' }, backendReady ? 200 : 503));
+      return readyFetch(url);
+    });
+    const coordinator = createStartupCoordinator({ services, fetchImpl, pollIntervalMs: 5, maxStartupMs: 100 });
+    const startup = coordinator.start();
+    await poll();
+    expect(coordinator.getSnapshot().camCheckpoint01.status).toBe(STARTUP_STATUS.READY);
+    expect(coordinator.getSnapshot().backend.status).toBe(STARTUP_STATUS.RETRYING);
+
+    backendReady = true;
+    await poll();
+    await poll();
+    await poll();
+    await startup;
+    expect(coordinator.getSnapshot().camCheckpoint01.status).toBe(STARTUP_STATUS.READY);
+    expect(coordinator.getSnapshot().allReady).toBe(true);
+    expect(fetchImpl.mock.calls.filter(([url]) => url === services.camCheckpoint01.wakeUrl || url === services.camCheckpoint01.url)).toHaveLength(1);
+  });
+
+  it('bounds one timed out request, then continues polling the healthy services', async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn((url, { signal } = {}) => {
       if (url.includes('checkpoint.example')) {
-        return Promise.resolve(response({
-          camera_id: 'cam-checkpoint-01',
-          worker_alive: false,
-          last_error: null,
-        }));
+        return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
       }
       return readyFetch(url);
     });
-    const coordinator = createStartupCoordinator({
-      services, prewarm,
-      fetchImpl,
-      maxStartupMs: 5,
-      pollIntervalMs: 1,
-    });
-
-    await coordinator.start();
-    const state = coordinator.getSnapshot();
-    expect(state.backend.status).toBe(STARTUP_STATUS.READY);
-    expect(state.camBorder01.status).toBe(STARTUP_STATUS.READY);
-    expect(state.camCheckpoint01.status).toBe(STARTUP_STATUS.TIMEOUT);
-    expect(state.allReady).toBe(false);
-  });
-
-  it('deduplicates concurrent callers into one startup cycle', async () => {
-    const fetchImpl = vi.fn(readyFetch);
-    const coordinator = createStartupCoordinator({ services, prewarm, fetchImpl });
-
-    const first = coordinator.start();
-    const second = coordinator.start();
-    expect(first).toBe(second);
-    await Promise.all([first, second]);
-
-    expect(fetchImpl).toHaveBeenCalledTimes(5);
-    [
-      services.backend.url,
-      services.camBorder01.url,
-      services.camCheckpoint01.url,
-      prewarm.triggerUrl,
-      prewarm.statusUrl,
-    ].forEach((url) => {
-      expect(fetchImpl.mock.calls.filter(([calledUrl]) => calledUrl === url)).toHaveLength(1);
-    });
-  });
-
-  it('stops every timer and does not poll after all services are ready', async () => {
-    vi.useFakeTimers();
-    const fetchImpl = vi.fn(readyFetch);
-    const coordinator = createStartupCoordinator({
-      services, prewarm,
-      fetchImpl,
-      pollIntervalMs: 10,
-      requestTimeoutMs: 100,
-    });
-
-    await coordinator.start();
-    expect(coordinator.getSnapshot().allReady).toBe(true);
-    expect(coordinator.pendingTimerCount()).toBe(0);
-
-    await vi.advanceTimersByTimeAsync(10_000);
-    expect(fetchImpl).toHaveBeenCalledTimes(5);
-    expect(coordinator.pendingTimerCount()).toBe(0);
-  });
-
-  it('bounds transient retries and ends unfinished services at TIMEOUT', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    const fetchImpl = vi.fn(() => Promise.resolve(response({ status: 'starting' }, 503)));
-    const coordinator = createStartupCoordinator({
-      services, prewarm,
-      fetchImpl,
-      maxStartupMs: 25,
-      pollIntervalMs: 10,
-      requestTimeoutMs: 100,
-    });
-
+    const coordinator = createStartupCoordinator({ services, fetchImpl, pollIntervalMs: 5, requestTimeoutMs: 3, maxStartupMs: 100 });
     const startup = coordinator.start();
-    await vi.runAllTimersAsync();
+    await poll();
+    expect(coordinator.getSnapshot().backend.status).toBe(STARTUP_STATUS.READY);
+    expect(coordinator.getSnapshot().camBorder01.status).toBe(STARTUP_STATUS.READY);
+    expect(coordinator.getSnapshot().camCheckpoint01.status).toBe(STARTUP_STATUS.RETRYING);
+    expect(coordinator.getSnapshot().camCheckpoint01.detail).toMatch(/timed out/);
+    expect(coordinator.hasActiveCycle()).toBe(true);
+    coordinator.reset();
     await startup;
-
-    const state = coordinator.getSnapshot();
-    expect(state.backend.status).toBe(STARTUP_STATUS.TIMEOUT);
-    expect(state.camBorder01.status).toBe(STARTUP_STATUS.TIMEOUT);
-    expect(state.camCheckpoint01.status).toBe(STARTUP_STATUS.TIMEOUT);
-    expect(state.allReady).toBe(false);
-    expect(fetchImpl.mock.calls.length).toBeGreaterThanOrEqual(8);
-    expect(fetchImpl.mock.calls.length).toBeLessThanOrEqual(20);
-    expect(coordinator.pendingTimerCount()).toBe(0);
   });
 
-  it('retries all three services after a timed-out cycle', async () => {
-    const fetchImpl = vi.fn(() => Promise.resolve(response({ status: 'starting' }, 503)));
-    const coordinator = createStartupCoordinator({
-      services, prewarm,
-      fetchImpl,
-      maxStartupMs: 5,
-      pollIntervalMs: 1,
-    });
-
+  it('does not accept an opaque or CORS-blocked camera response as READY', async () => {
     vi.useFakeTimers();
+    let camera2Ready = false;
+    const fetchImpl = vi.fn((url) => {
+      if (url.includes('checkpoint.example') && !camera2Ready) return Promise.reject(new TypeError('Failed to fetch'));
+      if (url.includes('checkpoint.example')) return Promise.resolve(response(payloads.camCheckpoint01));
+      return readyFetch(url);
+    });
+    const coordinator = createStartupCoordinator({ services, fetchImpl, pollIntervalMs: 5, maxStartupMs: 100 });
+    const startup = coordinator.start();
+    await poll();
+    expect(coordinator.getSnapshot().camCheckpoint01.status).toBe(STARTUP_STATUS.RETRYING);
+    expect(coordinator.getSnapshot().allReady).toBe(false);
+    camera2Ready = true;
+    await poll();
+    await poll();
+    await startup;
+    expect(coordinator.getSnapshot().allReady).toBe(true);
+  });
+
+  it('keeps READY services and retries only the unavailable service after timeout', async () => {
+    vi.useFakeTimers();
+    const fetchImpl = vi.fn((url) => {
+      if (url.includes('checkpoint.example')) return Promise.resolve(response({ ...payloads.camCheckpoint01, worker_alive: false }));
+      return readyFetch(url);
+    });
+    const coordinator = createStartupCoordinator({ services, fetchImpl, pollIntervalMs: 5, maxStartupMs: 10 });
     const first = coordinator.start();
-    await vi.runAllTimersAsync();
+    await vi.advanceTimersByTimeAsync(10);
     await first;
-    const firstCycleCalls = fetchImpl.mock.calls.length;
-    expect(firstCycleCalls).toBeGreaterThanOrEqual(4);
+    const beforeRetry = fetchImpl.mock.calls.length;
+    expect(coordinator.getSnapshot().backend.status).toBe(STARTUP_STATUS.READY);
+    expect(coordinator.getSnapshot().camBorder01.status).toBe(STARTUP_STATUS.READY);
+    expect(coordinator.getSnapshot().camCheckpoint01.status).toBe(STARTUP_STATUS.TIMEOUT);
 
     fetchImpl.mockImplementation(readyFetch);
-    const second = coordinator.start({ force: true });
-    await vi.runAllTimersAsync();
-    await second;
-
-    expect(fetchImpl.mock.calls.length).toBeGreaterThan(firstCycleCalls);
+    const retry = coordinator.start({ force: true });
+    expect(fetchImpl.mock.calls.slice(beforeRetry).map(([url]) => url)).toEqual([services.camCheckpoint01.wakeUrl]);
+    await poll();
+    await retry;
     expect(coordinator.getSnapshot().allReady).toBe(true);
   });
 
-  it('marks a forced cycle as background revalidation and retains last-ready edge truth', async () => {
-    const pending = [];
-    const fetchImpl = vi.fn(readyFetch);
-    const coordinator = createStartupCoordinator({ services, prewarm, fetchImpl });
-    await coordinator.start();
-
-    fetchImpl.mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
-    const revalidation = coordinator.start({ force: true });
-    const state = coordinator.getSnapshot();
-    expect(state.revalidating).toBe(true);
-    expect(state.lastReadyEdgeCount).toBe(2);
-    expect(state.allReady).toBe(false);
-
-    pending[0](response(payloads.backend));
-    pending[1](response(payloads.camBorder01));
-    pending[2](response(payloads.camCheckpoint01));
-    pending[3](response({ cameras: {} }));
-    await revalidation;
-    expect(coordinator.getSnapshot().revalidating).toBe(false);
-    expect(coordinator.getSnapshot().allReady).toBe(true);
-  });
-
-  it('uses backend authority when the Camera 2 browser request stalls', async () => {
-    const fetchImpl = vi.fn((url, options = {}) => {
-      if (url === services.backend.url) return Promise.resolve(response(payloads.backend));
-      if (url === services.camBorder01.url) return Promise.resolve(response(payloads.camBorder01));
-      if (url === services.camCheckpoint01.url) {
-        return new Promise((resolve, reject) => {
-          options.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
-        });
-      }
-      if (url === prewarm.triggerUrl) return Promise.resolve(response({ cameras: {} }));
-      return Promise.resolve(response({
-        cameras: {
-          'cam-checkpoint-01': { camera_id: 'cam-checkpoint-01', status: 'ready' },
-        },
-      }));
-    });
-    const coordinator = createStartupCoordinator({ services, prewarm, fetchImpl });
-
-    const startedAt = Date.now();
-    await coordinator.start();
-
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
-    expect(coordinator.getSnapshot().camCheckpoint01.status).toBe(STARTUP_STATUS.READY);
-    expect(coordinator.getSnapshot().camCheckpoint01.authority).toBe('backend');
-    expect(coordinator.getSnapshot().allReady).toBe(true);
-    expect(coordinator.pendingTimerCount()).toBe(0);
-  });
-
-  it('rejects a wrong camera identity from both direct and backend authority', async () => {
+  it('cancels an obsolete cycle so an old response cannot overwrite reset state', async () => {
     vi.useFakeTimers();
-    vi.setSystemTime(0);
-    const wrong = { camera_id: 'cam-border-01', worker_alive: true, last_error: null };
-    const fetchImpl = vi.fn((url) => {
-      if (url === services.backend.url) return Promise.resolve(response(payloads.backend));
-      if (url === services.camBorder01.url) return Promise.resolve(response(payloads.camBorder01));
-      if (url === services.camCheckpoint01.url) return Promise.resolve(response(wrong));
-      if (url === prewarm.triggerUrl) return Promise.resolve(response({ cameras: {} }));
-      return Promise.resolve(response({
-        cameras: { 'cam-checkpoint-01': { camera_id: 'cam-border-01', status: 'ready' } },
-      }));
-    });
-    const coordinator = createStartupCoordinator({
-      services, prewarm, fetchImpl, maxStartupMs: 20, pollIntervalMs: 5,
-    });
-
+    const pending = deferred();
+    const fetchImpl = vi.fn(() => pending.promise);
+    const coordinator = createStartupCoordinator({ services, fetchImpl, pollIntervalMs: 5 });
     const startup = coordinator.start();
-    await vi.runAllTimersAsync();
+    coordinator.reset();
+    pending.resolve(response(payloads.backend));
+    await vi.advanceTimersByTimeAsync(5);
     await startup;
-
-    expect(coordinator.getSnapshot().camCheckpoint01.status).toBe(STARTUP_STATUS.TIMEOUT);
+    expect(coordinator.getSnapshot().backend.status).toBe(STARTUP_STATUS.UNKNOWN);
     expect(coordinator.getSnapshot().allReady).toBe(false);
   });
 
-  it('publishes ready services while one genuinely cold edge keeps warming', async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(0);
-    const fetchImpl = vi.fn((url) => {
-      if (url === services.backend.url) return Promise.resolve(response(payloads.backend));
-      if (url === services.camBorder01.url) return Promise.resolve(response(payloads.camBorder01));
-      if (url === services.camCheckpoint01.url) {
-        return Promise.resolve(response({ ...payloads.camCheckpoint01, worker_alive: false }));
-      }
-      return Promise.resolve(response({ cameras: {} }));
-    });
-    const coordinator = createStartupCoordinator({
-      services, prewarm, fetchImpl, maxStartupMs: 20, pollIntervalMs: 5,
-    });
-    const observed = [];
-    coordinator.subscribe((state) => observed.push({
-      backend: state.backend.status,
-      camera1: state.camBorder01.status,
-      camera2: state.camCheckpoint01.status,
-    }));
-
-    const startup = coordinator.start();
-    await vi.runAllTimersAsync();
-    await startup;
-
-    expect(observed).toContainEqual({
-      backend: STARTUP_STATUS.READY,
-      camera1: STARTUP_STATUS.READY,
-      camera2: STARTUP_STATUS.WAKING,
-    });
-    expect(coordinator.getSnapshot().camCheckpoint01.status).toBe(STARTUP_STATUS.TIMEOUT);
+  it('revalidates after a long tab switch, but not after a short one', () => {
+    const state = { readyAt: 10_000, lastReadyAt: 10_000, startedAt: 1_000 };
+    expect(shouldRevalidateOnResume(state, 10_000 + RESUME_AFTER_MS - 1)).toBe(false);
+    expect(shouldRevalidateOnResume(state, 10_000 + RESUME_AFTER_MS)).toBe(true);
   });
 });

@@ -11,7 +11,7 @@ import { cameraHealthPresentation, capabilityLabel, deriveCameraOperationalState
 import useStartupReadiness from '../hooks/useStartupReadiness';
 import { analysisSessionIdForSource, completedRunMetrics, completedRunSummaryIdentity, deriveDashboardMode, eventsForCameraRun, filterLiveEvents, latestEventAtOrBeforeFrame, latestEventForSession, latestFaceEventForSession, latestPlateEventForSession, selectedRunContext, telemetryStatusAt, formatLatestEvent, isActiveTelemetry, telemetryForSource, lifecycleStatus, operationalCameraIds, preferredOperationalCamera, restoredRunCamera, currentRunEventEmptyState, cameraInventoryIsRestoring, uploadedRunComparison } from '../utils/dashboardScope';
 import { canReuseRestoredMedia, updateCameraMediaState, uploadResultIsCurrent, visibleUploadState } from '../utils/cameraMediaState';
-import { analysisLifecyclePresentation, applyReplayResult, canReanalyzeSource, fetchPreparationForRestore, fetchReadOnlyWithRetry, fetchWithTimeout, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
+import { analysisLifecyclePresentation, applyReplayResult, canReanalyzeSource, fetchPreparationForRestore, fetchReadOnlyWithRetry, fetchWithTimeout, normalizeReadyUploadResponse, reanalyzeRequestPayload, reconcileTerminalCameraSource, restoringSourceState, runUploadAutoStart, scenarioAction, sourceStateFromCurrentVideo, sourceStateFromPreparation } from '../utils/dashboardVideoControl';
 import { processingFpsForTelemetry, sourceFpsForTelemetry } from '../utils/liveMetrics';
 import { replayTimelineAssessment } from '../utils/trackingTimeline';
 import { adminDiagnosticsEnabled as isAdminDiagnosticsEnabled } from '../utils/adminDiagnostics';
@@ -1238,11 +1238,54 @@ export default function Dashboard() {
       }
     }
 
-    if (!uploaded?.preparation_job_id) throw new Error('VIDEO UPLOAD ACCEPTED WITHOUT A PREPARATION JOB ID');
-    if (String(uploaded.state || uploaded.source_state || '').toUpperCase() !== 'READY') {
-      uploaded = await waitForPreparation(cameraId, uploaded.preparation_job_id, requestIsCurrent);
+    try {
+      uploaded = normalizeReadyUploadResponse(uploaded, cameraId, uploadRequestId);
+      if (uploaded?.local_only) {
+        setSlotSources(current => ({
+          ...current,
+          [cameraId]: {
+            ...current[cameraId],
+            restoring: false,
+            sourceMode: null,
+            sourceId: null,
+            sourceName: uploaded.source_name || current[cameraId]?.sourceName || 'Uploaded video',
+            runState: 'ERROR',
+            analysisState: 'ERROR',
+          },
+        }));
+        updateCameraMedia(cameraId, {
+          mediaUrl: null,
+          isUploading: false,
+          uploadStage: 'ERROR',
+          uploadProgress: null,
+          uploadError: 'UPLOAD RECEIVED, BUT PERSISTENT MEDIA STORAGE IS REQUIRED BEFORE ANALYSIS OR REPLAY',
+        });
+        delete uploadRequestsRef.current[cameraId];
+        return;
+      }
+      if (!uploaded?.preparation_job_id && (uploaded?.local_only || String(uploaded?.source_state || '').toUpperCase() !== 'READY')) {
+        throw new Error('VIDEO UPLOAD RESPONSE DID NOT IDENTIFY A READY SOURCE');
+      }
+      if (String(uploaded.state || uploaded.source_state || '').toUpperCase() !== 'READY') {
+        uploaded = await waitForPreparation(cameraId, uploaded.preparation_job_id, requestIsCurrent);
+      }
+      if (!uploaded.preparation_job_id) {
+        uploaded = { ...uploaded, state: 'READY', analysis_state: 'READY', preparation_job_id: uploadRequestId };
+      }
+      await hydratePreparedUpload(cameraId, uploaded, requestIsCurrent, uploadRequestId);
+    } catch (error) {
+      if (!requestIsCurrent()) return;
+      console.error('Upload completion error:', error);
+      updateCameraMedia(cameraId, {
+        mediaUrl: null,
+        isUploading: false,
+        uploadStage: 'ERROR',
+        uploadProgress: null,
+        uploadError: error?.message || 'VIDEO PREPARATION FAILED',
+      });
+      delete uploadRequestsRef.current[cameraId];
+      return;
     }
-    await hydratePreparedUpload(cameraId, uploaded, requestIsCurrent, uploadRequestId);
     if (requestIsCurrent()) delete uploadRequestsRef.current[cameraId];
   };
 

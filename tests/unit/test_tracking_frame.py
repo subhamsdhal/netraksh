@@ -1,4 +1,3 @@
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -61,7 +60,7 @@ def test_tracking_frame_is_visualization_only_and_durably_checkpointed():
     assert payload.coordinate_space == "NORMALIZED_FRAME"
     assert payload.tracks[0].detector_confirmed is False
     with patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock) as broadcast:
-        result = asyncio.run(post_tracking_frame(
+        result = _run_sync_async_handler(post_tracking_frame(
             payload,
             SimpleNamespace(edge_id="cam-checkpoint-01"),
             db,
@@ -98,7 +97,7 @@ def test_duplicate_sample_can_reconstruct_a_missing_run_summary():
         patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock),
         patch("backend.api.system.promote_active_session"),
     ):
-        result = asyncio.run(post_tracking_frame(
+        result = _run_sync_async_handler(post_tracking_frame(
             payload, SimpleNamespace(edge_id=payload.camera_id), db,
         ))
 
@@ -113,7 +112,7 @@ def test_duplicate_sample_can_reconstruct_a_missing_run_summary():
 def test_tracking_frame_rejects_a_different_authenticated_edge_identity():
     _latest_tracking_sequence.clear()
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.run(post_tracking_frame(
+        _run_sync_async_handler(post_tracking_frame(
             _payload(),
             SimpleNamespace(edge_id="cam-border-01"),
             _session(),
@@ -131,10 +130,10 @@ def test_tracking_frame_keeps_out_of_order_packet_for_replay_without_rebroadcast
     db = _session()
     try:
         with patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock) as broadcast:
-            accepted = asyncio.run(post_tracking_frame(
+            accepted = _run_sync_async_handler(post_tracking_frame(
                 newest, SimpleNamespace(edge_id="cam-checkpoint-01"), db
             ))
-            delayed_result = asyncio.run(post_tracking_frame(
+            delayed_result = _run_sync_async_handler(post_tracking_frame(
                 delayed, SimpleNamespace(edge_id="cam-checkpoint-01"), db
             ))
 
@@ -172,7 +171,7 @@ def test_delayed_or_duplicate_tracking_frames_do_not_roll_back_summary(camera_id
             patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock),
             patch("backend.api.system.promote_active_session"),
         ):
-            asyncio.run(post_tracking_frame(
+            _run_sync_async_handler(post_tracking_frame(
                 newest, SimpleNamespace(edge_id=camera_id), db
             ))
             # A retried duplicate with conflicting ancillary counts must remain
@@ -180,10 +179,10 @@ def test_delayed_or_duplicate_tracking_frames_do_not_roll_back_summary(camera_id
             duplicate = newest.model_copy(update={
                 "person_count": 99, "vehicle_count": 99, "track_count": 198,
             })
-            asyncio.run(post_tracking_frame(
+            _run_sync_async_handler(post_tracking_frame(
                 duplicate, SimpleNamespace(edge_id=camera_id), db
             ))
-            result = asyncio.run(post_tracking_frame(
+            result = _run_sync_async_handler(post_tracking_frame(
                 delayed, SimpleNamespace(edge_id=camera_id), db
             ))
 
@@ -208,8 +207,8 @@ def test_tracking_frame_accepts_sequence_reset_for_new_run():
     db = _session()
 
     with patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock) as broadcast:
-        asyncio.run(post_tracking_frame(previous, SimpleNamespace(edge_id="cam-checkpoint-01"), db))
-        result = asyncio.run(post_tracking_frame(next_run, SimpleNamespace(edge_id="cam-checkpoint-01"), db))
+        _run_sync_async_handler(post_tracking_frame(previous, SimpleNamespace(edge_id="cam-checkpoint-01"), db))
+        result = _run_sync_async_handler(post_tracking_frame(next_run, SimpleNamespace(edge_id="cam-checkpoint-01"), db))
 
     assert result == {"status": "ok"}
     assert broadcast.await_count == 2
@@ -220,7 +219,7 @@ def test_tracking_frame_accepts_empty_image_grounded_sample_to_clear_stale_boxes
     _latest_tracking_sequence.clear()
 
     with patch("backend.api.system.broadcast_telemetry", new_callable=AsyncMock) as broadcast:
-        result = asyncio.run(post_tracking_frame(
+        result = _run_sync_async_handler(post_tracking_frame(
             payload,
             SimpleNamespace(edge_id="cam-checkpoint-01"),
             _session(),
@@ -236,7 +235,7 @@ def test_completion_uses_durable_samples_after_memory_loss():
 
     db = _session()
     payload = _payload()
-    asyncio.run(post_tracking_frame(payload, SimpleNamespace(edge_id="cam-checkpoint-01"), db))
+    _run_sync_async_handler(post_tracking_frame(payload, SimpleNamespace(edge_id="cam-checkpoint-01"), db))
     identity = ("cam-checkpoint-01", "source-1", "run-1", 2)
     _tracking_timelines.pop(identity, None)
 

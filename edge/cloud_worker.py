@@ -70,7 +70,7 @@ def _heartbeat_loop() -> None:
     backend_url = _required("BACKEND_URL").rstrip("/")
     token = _required("EDGE_AUTH_TOKEN")
     failures = 0
-    last_logged_frame = None
+    last_logged_signature = None
     with httpx.Client(timeout=httpx.Timeout(connect=3, read=5, write=5, pool=3)) as client:
         while True:
             payload = _heartbeat_payload(camera_id)
@@ -87,14 +87,18 @@ def _heartbeat_loop() -> None:
                         camera_id, _state["boot_id"], payload["phase"], response.status_code, failures,
                     )
                 else:
-                    if failures or payload.get("last_frame_index") != last_logged_frame:
+                    signature = (
+                        payload["phase"], payload.get("analysis_session_id"),
+                        payload.get("analysis_generation"), payload.get("last_frame_index"),
+                    )
+                    if failures or signature != last_logged_signature:
                         logger.info(
                             "[WorkerLease] heartbeat accepted camera_id=%s boot_id=%s instance_id=%s phase=%s run_id=%s generation=%s last_frame=%s last_video_time=%s recovered_after=%s",
                             camera_id, _state["boot_id"], _state["instance_id"], payload["phase"],
                             payload.get("analysis_session_id"), payload.get("analysis_generation"),
                             payload.get("last_frame_index"), payload.get("last_video_time"), failures,
                         )
-                    last_logged_frame = payload.get("last_frame_index")
+                    last_logged_signature = signature
                     failures = 0
             except httpx.RequestError as exc:
                 failures += 1

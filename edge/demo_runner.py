@@ -142,19 +142,51 @@ def _materialize_remote_source(data: dict, camera_id: str) -> dict:
         bundled["video_session_id"] = None
         bundled.pop("download_url", None)
         return bundled
+    def unavailable_source() -> dict:
+        unavailable = dict(data)
+        unavailable["source_unavailable"] = True
+        unavailable["video_source"] = None
+        unavailable.pop("download_url", None)
+        return unavailable
+
+    if data.get("camera_id") not in {None, camera_id}:
+        logger.warning("[DemoRunner] Rejecting control for another camera")
+        return unavailable_source()
     download_url = str(data.get("download_url") or "").strip()
     session_id = str(data.get("video_session_id") or "").strip()
     if not download_url or not session_id:
-        return data
+        return unavailable_source()
     try:
         session_id = str(__import__("uuid").UUID(session_id))
     except (ValueError, AttributeError):
         logger.warning("[DemoRunner] Ignoring remote source with invalid session ID")
-        return data
+        return unavailable_source()
+    media_id = str(data.get("media_id") or "")
+    expected_sha256 = str(data.get("media_sha256") or "").lower()
+    expected_size = data.get("media_size_bytes")
+    if media_id:
+        expected_key = f"video-sessions/{camera_id}/{session_id}/source.mp4"
+        if (data.get("camera_id") != camera_id
+                or media_id != expected_key or data.get("video_source") != f"object://{media_id}"
+                or not isinstance(data.get("source_generation"), int)
+                or data["source_generation"] < 1
+                or len(expected_sha256) != 64 or not all(c in "0123456789abcdef" for c in expected_sha256)
+                or not isinstance(expected_size, int) or not 0 < expected_size <= 49_000_000):
+            logger.warning("[DemoRunner] Rejecting mismatched PostgreSQL media identity")
+            return unavailable_source()
     safe_source_name = str(data.get("source_name") or "normalized upload").replace("\r", " ").replace("\n", " ")[:160]
 
     logical_source = str(data.get("video_source") or "").removeprefix("object://")
     parsed = urlparse(download_url)
+    request_headers = {}
+    if not parsed.scheme:
+        if not download_url.startswith("/api/dashboard/video/edge-media/"):
+            return unavailable_source()
+        backend_url = os.environ.get("BACKEND_URL", "http://localhost:8443").rstrip("/")
+        download_url = f"{backend_url}{download_url}"
+        token = os.environ.get("EDGE_AUTH_TOKEN", "")
+        if token:
+            request_headers["Authorization"] = f"Bearer {token}"
     suffix = Path(logical_source).suffix.lower() or Path(parsed.path).suffix.lower()
     if suffix not in {".mp4", ".avi", ".mov", ".mkv", ".webm", ".m4v"}:
         suffix = ".video"
@@ -166,15 +198,23 @@ def _materialize_remote_source(data: dict, camera_id: str) -> dict:
     )
     destination = cache_root / camera_id / f"{session_id}{suffix}"
     if destination.is_file() and destination.stat().st_size > 0:
-        hydrated = dict(data)
-        hydrated["video_source"] = str(destination)
-        logger.info(
-            "[DemoRunner] Durable source cache ready camera_id=%s session=%s source=%s",
-            camera_id,
-            session_id[:8],
-            safe_source_name,
-        )
-        return hydrated
+        if media_id:
+            digest = hashlib.sha256()
+            with open(destination, "rb") as cached:
+                for chunk in iter(lambda: cached.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if destination.stat().st_size != expected_size or digest.hexdigest() != expected_sha256:
+                destination.unlink(missing_ok=True)
+        if destination.is_file():
+            hydrated = dict(data)
+            hydrated["video_source"] = str(destination)
+            logger.info(
+                "[DemoRunner] Durable source cache ready camera_id=%s session=%s source=%s",
+                camera_id,
+                session_id[:8],
+                safe_source_name,
+            )
+            return hydrated
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     part_path = destination.with_suffix(destination.suffix + ".part")
@@ -184,16 +224,23 @@ def _materialize_remote_source(data: dict, camera_id: str) -> dict:
 
         timeout = httpx.Timeout(connect=5.0, read=120.0, write=10.0, pool=5.0)
         total = 0
-        with httpx.stream("GET", download_url, timeout=timeout, follow_redirects=True) as response:
+        digest = hashlib.sha256()
+        with httpx.stream("GET", download_url, headers=request_headers, timeout=timeout, follow_redirects=not bool(request_headers)) as response:
             response.raise_for_status()
+            if media_id and (response.headers.get("X-Video-Media-ID") != media_id
+                             or response.headers.get("X-Video-SHA256", "").lower() != expected_sha256):
+                raise ValueError("remote media identity headers do not match control")
             with open(part_path, "wb") as handle:
                 for chunk in response.iter_bytes(1024 * 1024):
                     total += len(chunk)
                     if total > max_bytes:
                         raise ValueError("remote video exceeds EDGE_MAX_SOURCE_BYTES")
+                    digest.update(chunk)
                     handle.write(chunk)
         if total == 0:
             raise ValueError("remote video is empty")
+        if media_id and (total != expected_size or digest.hexdigest() != expected_sha256):
+            raise ValueError("remote media size or checksum does not match control")
         os.replace(part_path, destination)
     except Exception as exc:
         part_path.unlink(missing_ok=True)
@@ -203,11 +250,7 @@ def _materialize_remote_source(data: dict, camera_id: str) -> dict:
             type(exc).__name__,
             f" (HTTP {status_code})" if status_code is not None else "",
         )
-        unavailable = dict(data)
-        unavailable["source_unavailable"] = True
-        unavailable["video_source"] = None
-        unavailable.pop("download_url", None)
-        return unavailable
+        return unavailable_source()
     hydrated = dict(data)
     hydrated["video_source"] = str(destination)
     logger.info(

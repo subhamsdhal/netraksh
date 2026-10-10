@@ -127,6 +127,33 @@ export function sourceStateFromPreparation(job) {
   };
 }
 
+// The upload API has two success contracts. With durable object storage it
+// returns an asynchronous preparation job. The free/local fallback returns a
+// normalized file from ephemeral backend storage, which is not a worker source
+// and must never be auto-started as if it were durable.
+export function normalizeReadyUploadResponse(response, cameraId, uploadRequestId) {
+  if (
+    response?.preparation_job_id
+    && response.camera_id === cameraId
+    && String(response.preparation_job_id) === uploadRequestId
+  ) return response;
+  const sessionId = String(response?.session_id || '');
+  if (
+    response?.status !== 'ok'
+    || String(response?.source_state || '').toUpperCase() !== 'READY'
+    || !cameraId
+    || response?.camera_id !== cameraId
+    || !sessionId
+    || sessionId !== uploadRequestId
+  ) return null;
+  return {
+    ...response,
+    local_only: response.source_mode !== 'durable'
+      || !Number.isInteger(Number(response.source_generation))
+      || Number(response.source_generation) < 1,
+  };
+}
+
 export function lifecycleAction(sourceState) {
   const lifecycle = String(sourceState?.analysisState || sourceState?.runState || '').toUpperCase();
   // A stale WAKING/paused record is repaired by START / ANALYZE. STOP would

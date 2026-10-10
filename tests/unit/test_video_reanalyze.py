@@ -9,6 +9,15 @@ from fastapi import HTTPException
 from backend.api import dashboard
 from backend.services import video_storage
 
+
+def _run_sync_async_handler(coroutine):
+    """Run mocked handlers that do not yield without Windows Proactor setup."""
+    try:
+        coroutine.send(None)
+    except StopIteration as completed:
+        return completed.value
+    raise AssertionError("handler unexpectedly yielded control")
+
 SOURCE_ID = "22222222-2222-4222-8222-222222222222"
 
 
@@ -114,7 +123,7 @@ def _payload(request_id="11111111-1111-4111-8111-111111111111"):
 def test_reanalyze_reuses_completed_source_creates_generation_and_audits(monkeypatch):
     db, _camera, active, old_history, starts, audits, wakes = _setup(monkeypatch)
 
-    result = asyncio.run(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user()))
+    result = _run_sync_async_handler(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user()))
 
     assert result == {
         "status": "success",
@@ -145,7 +154,7 @@ def test_reanalyze_camera_2_reuses_its_completed_source_without_upload(monkeypat
     )
     payload = {**_payload(), "camera_id": "cam-checkpoint-01"}
 
-    result = asyncio.run(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
+    result = _run_sync_async_handler(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
 
     assert result["camera_id"] == "cam-checkpoint-01"
     assert result["source_session_id"] == SOURCE_ID
@@ -162,8 +171,8 @@ def test_same_reanalysis_request_is_idempotent_after_start(monkeypatch):
     db, _camera, _active, _history, starts, audits, wakes = _setup(monkeypatch)
     payload = _payload()
 
-    first = asyncio.run(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
-    repeated = asyncio.run(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
+    first = _run_sync_async_handler(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
+    repeated = _run_sync_async_handler(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
 
     assert first["analysis_generation"] == repeated["analysis_generation"] == 5
     assert repeated["idempotent_replay"] is True
@@ -176,7 +185,7 @@ def test_reanalyze_rejects_an_active_run_and_does_not_start_another(monkeypatch)
     db, _camera, _active, _history, starts, audits, wakes = _setup(monkeypatch, lifecycle="ACTIVE")
 
     with pytest.raises(HTTPException) as error:
-        asyncio.run(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user()))
+        _run_sync_async_handler(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user()))
 
     assert error.value.status_code == 409
     assert starts == []
@@ -188,7 +197,7 @@ def test_reanalyze_enforces_camera_command_ownership(monkeypatch):
     db, _camera, _active, _history, starts, audits, wakes = _setup(monkeypatch)
 
     with pytest.raises(HTTPException) as error:
-        asyncio.run(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user("OPERATOR", "COMMAND_B")))
+        _run_sync_async_handler(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user("OPERATOR", "COMMAND_B")))
 
     assert error.value.status_code == 403
     assert starts == []
@@ -201,7 +210,7 @@ def test_reanalyze_rejects_invalid_request_id_before_mutating(monkeypatch):
     payload = _payload(request_id="not-a-uuid")
 
     with pytest.raises(HTTPException) as error:
-        asyncio.run(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
+        _run_sync_async_handler(dashboard.reanalyze_existing_video(payload, _request(), db, _user()))
 
     assert error.value.status_code == 422
     assert starts == []
@@ -214,7 +223,7 @@ def test_reanalyze_on_camera_1_does_not_change_camera_2_control(monkeypatch):
     camera2_before = {"analysis_state": "COMPLETED", "analysis_generation": 3, "session_id": "camera-2-source"}
     camera2_after = copy.deepcopy(camera2_before)
 
-    asyncio.run(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user()))
+    _run_sync_async_handler(dashboard.reanalyze_existing_video(_payload(), _request(), db, _user()))
 
     assert camera2_after == camera2_before
     assert starts == [_payload()["request_id"]]
@@ -270,7 +279,7 @@ def test_interrupt_exact_generation_preserves_history_and_audits(monkeypatch):
     })
     monkeypatch.setattr(dashboard, "audit", lambda _db, action, **kwargs: audits.append((action, kwargs)))
 
-    result = asyncio.run(dashboard.interrupt_stale_video_analysis({
+    result = _run_sync_async_handler(dashboard.interrupt_stale_video_analysis({
         "camera_id": "cam-border-01",
         "video_session_id": SOURCE_ID,
         "analysis_session_id": summary.analysis_session_id,
@@ -303,7 +312,7 @@ def test_interrupt_rejects_mismatched_generation_without_mutation(monkeypatch):
     monkeypatch.setattr(dashboard, "interrupt_active_session", lambda *_args, **_kwargs: pytest.fail("recent run must not be interrupted"))
 
     with pytest.raises(HTTPException) as error:
-        asyncio.run(dashboard.interrupt_stale_video_analysis({
+        _run_sync_async_handler(dashboard.interrupt_stale_video_analysis({
             "camera_id": "cam-border-01",
             "video_session_id": SOURCE_ID,
             "analysis_session_id": summary.analysis_session_id,

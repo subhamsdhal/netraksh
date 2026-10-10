@@ -35,6 +35,8 @@ import shutil
 import subprocess
 import time
 import uuid
+import hashlib
+from fractions import Fraction
 from pathlib import Path
 from time import perf_counter
 import httpx
@@ -69,6 +71,7 @@ from backend.services.video_storage import (
     update_active_session,
 )
 from backend.services.analysis_worker_lease import record_heartbeat, reconcile_stale_run
+from backend.services.postgres_video_storage import APPROVED_ORIGINAL_SHA256, media_info, iter_media_chunks, record_prepared_metadata
 
 # Import the shared in-memory state from the demo module.  This is a plain
 # module-level dict — the same object across all imports — so writing here
@@ -260,7 +263,7 @@ def _probe_video(path: Path, ffprobe: str) -> dict:
     result = subprocess.run(
         [
             ffprobe, "-v", "error", "-show_entries",
-            "format=format_name,duration:stream=codec_type,codec_name,width,height,pix_fmt",
+            "format=format_name,duration:stream=codec_type,codec_name,width,height,pix_fmt,avg_frame_rate",
             "-of", "json", str(path),
         ],
         capture_output=True,
@@ -306,6 +309,17 @@ def _compatible_mp4_fast_path(path: Path, probe: dict) -> bool:
     )
 
 
+def _probe_timing(probe: dict) -> tuple[float | None, float | None]:
+    try:
+        duration = float(probe.get("format", {}).get("duration"))
+        video = next(stream for stream in probe.get("streams", []) if stream.get("codec_type") == "video")
+        fps = float(Fraction(video.get("avg_frame_rate") or "0"))
+        return (duration if math.isfinite(duration) and duration > 0 else None,
+                fps if math.isfinite(fps) and fps > 0 else None)
+    except (ValueError, TypeError, ZeroDivisionError, StopIteration):
+        return None, None
+
+
 def _normalize_video(source: Path, destination: Path, ffmpeg: str) -> None:
     """Create the one browser/worker H.264 source used by the cloud pipeline."""
     result = subprocess.run(
@@ -334,8 +348,68 @@ def _normalize_video(source: Path, destination: Path, ffmpeg: str) -> None:
 
 
 def _durable_video_enabled() -> bool:
-    """Production uploads use the configured shared S3-compatible store."""
-    return settings.OBJECT_STORAGE_PROVIDER == "s3"
+    """Production uploads use a shared source store, never a local-only path."""
+    return settings.OBJECT_STORAGE_PROVIDER in {"s3", "postgres"}
+
+
+def _postgres_video_enabled() -> bool:
+    return settings.OBJECT_STORAGE_PROVIDER == "postgres"
+
+
+def _media_byte_range(value: str | None, size: int) -> tuple[int, int, int]:
+    """Return inclusive start/end and HTTP status for one standard byte range."""
+    if not value:
+        return 0, size - 1, 200
+    if not value.startswith("bytes=") or "," in value:
+        raise ValueError("Only one byte range is supported")
+    spec = value[6:]
+    if spec.count("-") != 1:
+        raise ValueError("Invalid byte range")
+    first, last = spec.split("-", 1)
+    if not first and not last:
+        raise ValueError("Invalid byte range")
+    try:
+        if first:
+            start = int(first)
+            end = min(int(last), size - 1) if last else size - 1
+        else:
+            suffix = int(last)
+            if suffix <= 0:
+                raise ValueError("Invalid byte range")
+            start, end = max(0, size - suffix), size - 1
+    except (ValueError, OverflowError) as exc:
+        raise ValueError("Invalid byte range") from exc
+    if start < 0 or start >= size or end < start:
+        raise ValueError("Unsatisfiable byte range")
+    return start, end, 206
+
+
+def _postgres_media_response(camera_id: str, session_id: str, request: Request):
+    durable = get_uploaded_session(camera_id, session_id)
+    if not durable:
+        raise HTTPException(status_code=404, detail="Video session media not found")
+    key = durable.get("preview_object_key") or durable.get("source_object_key")
+    info = media_info(key) if key else None
+    if not info or not info["ready"] or info["camera_id"] != camera_id or info["session_id"] != session_id:
+        raise HTTPException(status_code=404, detail="Authoritative video bytes are not ready")
+    size = info["byte_size"]
+    try:
+        start, end, status_code = _media_byte_range(request.headers.get("range"), size)
+    except ValueError:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{size}", "Accept-Ranges": "bytes"})
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start + 1),
+        "Cache-Control": "private, no-store",
+        "X-Video-SHA256": info["sha256"],
+        "X-Video-Media-ID": key,
+    }
+    if status_code == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    return StreamingResponse(
+        iter_media_chunks(key, start, end), status_code=status_code,
+        media_type="video/mp4", headers=headers,
+    )
 
 
 def _bundled_control(camera_id: str | None) -> dict:
@@ -899,10 +973,17 @@ async def get_internal_sync(request: Request, _edge=Depends(require_edge_auth)):
         durable = _reconciled_durable(camera_id)
         if durable:
             source_key = durable.get("source_object_key")
+            stored_media = media_info(source_key) if _postgres_video_enabled() and source_key else None
             return {
                 "video_source": f"object://{source_key}",
                 "source_mode": "durable",
-                "download_url": signed_media_url(source_key) if source_key else None,
+                "download_url": (
+                    f"/api/dashboard/video/edge-media/{durable.get('session_id')}?camera_id={camera_id}"
+                    if _postgres_video_enabled() else signed_media_url(source_key) if source_key else None
+                ),
+                "media_id": source_key if stored_media else None,
+                "media_sha256": stored_media["sha256"] if stored_media else None,
+                "media_size_bytes": stored_media["byte_size"] if stored_media else None,
                 "video_session_id": durable.get("session_id"),
                 "source_name": durable.get("source_name"),
                 "scenario": durable.get("scenario", "paused"),
@@ -1452,6 +1533,10 @@ async def get_video_media_by_session(
 ):
     """Serve one immutable upload session without consulting global state."""
     camera_id = request.query_params.get("camera_id")
+    if _postgres_video_enabled():
+        if not camera_id:
+            raise HTTPException(status_code=400, detail="camera_id is required")
+        return _postgres_media_response(camera_id, session_id, request)
     if _durable_video_enabled() and camera_id:
         durable = get_uploaded_session(camera_id, session_id)
         if not durable:
@@ -1469,6 +1554,20 @@ async def get_video_media_by_session(
     if media_path.suffix.lower() != ".mp4":
         raise HTTPException(status_code=415, detail="This video has no browser-compatible MP4 preview")
     return _video_file_response(media_path, request)
+
+
+@router.get("/video/edge-media/{session_id}")
+async def get_edge_video_media_by_session(
+    session_id: str,
+    request: Request,
+    _edge=Depends(require_edge_auth),
+):
+    if not _postgres_video_enabled():
+        raise HTTPException(status_code=404, detail="PostgreSQL media is unavailable")
+    camera_id = request.query_params.get("camera_id")
+    if camera_id not in _BUNDLED_CAMERA_IDS:
+        raise HTTPException(status_code=404, detail="Camera media not found")
+    return _postgres_media_response(camera_id, session_id, request)
 
 
 @router.get("/video/demo-telemetry")
@@ -1546,8 +1645,18 @@ async def _run_preparation_job(camera_id: str, job_id: str) -> None:
 
         finalization_started = perf_counter()
         activated = await asyncio.to_thread(activate_session, camera_id, job_id) or {}
-        active, generation_created = await asyncio.to_thread(start_active_session, camera_id, job_id)
-        edge_status = await _wake_edge_service(camera_id)
+        if _postgres_video_enabled():
+            duration_seconds, fps = _probe_timing(probe_result)
+            await asyncio.to_thread(
+                record_prepared_metadata, camera_id, job_id,
+                original_filename=job.get("source_name") or "source.mp4",
+                duration_seconds=duration_seconds, fps=fps,
+                source_generation=activated["source_generation"],
+            )
+            active, generation_created, edge_status = activated, False, "not_requested"
+        else:
+            active, generation_created = await asyncio.to_thread(start_active_session, camera_id, job_id)
+            edge_status = await _wake_edge_service(camera_id)
         finalization_ms = (perf_counter() - finalization_started) * 1000
         normalized_size = prepared_path.stat().st_size
         total_ready_ms = (perf_counter() - started) * 1000
@@ -1559,8 +1668,9 @@ async def _run_preparation_job(camera_id: str, job_id: str) -> None:
             "normalized_size_bytes": normalized_size,
             "normalization_performed": not compatible_fast_path,
             "source_generation": activated.get("source_generation"),
+            "source_mode": "durable",
             "analysis_generation": active.get("analysis_generation"),
-            "analysis_state": active.get("analysis_state", "WAKING"),
+            "analysis_state": active.get("analysis_state", "READY"),
             "auto_start_created": generation_created,
             "edge_status": edge_status,
             "timings_ms": {
@@ -1695,6 +1805,14 @@ async def upload_dashboard_video(
         )
     if _durable_video_enabled() and not camera_id:
         raise HTTPException(status_code=400, detail="camera_id is required for durable video uploads")
+    if _postgres_video_enabled() and (camera_id not in _BUNDLED_CAMERA_IDS or ext != ".mp4"):
+        raise HTTPException(status_code=400, detail="PostgreSQL media accepts only the two approved camera MP4 sources")
+    if _postgres_video_enabled() and original_name != {
+        "cam-border-01": "vid 1.mp4", "cam-checkpoint-01": "vid 2.mp4",
+    }[camera_id]:
+        raise HTTPException(status_code=422, detail="Filename does not match the approved source for this camera")
+    if _postgres_video_enabled() and not (upload_intent_id and upload_intent_id.strip()):
+        raise HTTPException(status_code=400, detail="A preparation intent is required for PostgreSQL video uploads")
 
     vdir = _videos_dir()
     vdir.mkdir(parents=True, exist_ok=True)
@@ -1723,8 +1841,8 @@ async def upload_dashboard_video(
                 if not chunk:
                     break
                 total += len(chunk)
-                if total > _MAX_VIDEO_UPLOAD_BYTES:
-                    raise HTTPException(status_code=413, detail="Video upload exceeds the 200 MiB limit")
+                if total > (49_000_000 if _postgres_video_enabled() else _MAX_VIDEO_UPLOAD_BYTES):
+                    raise HTTPException(status_code=413, detail="Video upload exceeds the configured media limit")
                 buf.write(chunk)
         receive_ms = (perf_counter() - receive_started) * 1000
         if total == 0:
@@ -1739,6 +1857,10 @@ async def upload_dashboard_video(
         )
         if not valid_signature:
             raise HTTPException(status_code=400, detail="Uploaded file does not match a supported video signature")
+        if _postgres_video_enabled():
+            digest = await asyncio.to_thread(lambda: hashlib.sha256(incoming_path.read_bytes()).hexdigest())
+            if digest != APPROVED_ORIGINAL_SHA256[camera_id]:
+                raise HTTPException(status_code=422, detail="Video bytes do not match the approved source for this camera")
 
         if durable and (not ffmpeg or not ffprobe):
             raise HTTPException(status_code=503, detail="Cloud video normalization is temporarily unavailable")
@@ -1751,7 +1873,7 @@ async def upload_dashboard_video(
                 job_id=new_session_id,
                 source_path=incoming_path,
                 source_name=original_name,
-                content_type=content_type or "video/mp4",
+                content_type="video/mp4" if _postgres_video_enabled() else (content_type or "video/mp4"),
             )
             persistence_ms = (perf_counter() - persistence_started) * 1000
             _ensure_preparation_task(camera_id, new_session_id)
@@ -1853,6 +1975,7 @@ async def upload_dashboard_video(
             "session_id": new_session_id,
             "upload_intent_id": new_session_id,
             "source_generation": activated.get("source_generation") if durable else None,
+            "source_mode": "durable" if durable else "local",
             "source_name": original_name,
             "normalized_name": normalized_name,
             "camera_id": camera_id,
